@@ -1,12 +1,21 @@
 # CC AIO MON
 
-![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue) ![License MIT](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey) ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
+![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue) ![License MIT](https://img.shields.io/badge/license-MIT-green) ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 
 **Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies, single-file Python, cross-platform.
 
 <img src="screenshots/setup-full.png" width="720" alt="CC AIO MON v1.3 — Claude Code left, full dashboard right">
 
 *Claude Code with statusline (left) + fullscreen TUI dashboard (right)*
+
+### How is this different?
+
+| Project | Approach | Limitation |
+|---------|----------|------------|
+| claude-monitor | Reads JSONL cost logs | Estimated data, not real-time |
+| ccusage | CLI usage aggregator | Historical only, no live dashboard |
+| ccstatusline | Status line script | No TUI, no multi-session |
+| **CC AIO MON** | Official statusline JSON | Real-time, zero deps, most compact |
 
 <details>
 <summary>More screenshots</summary>
@@ -57,40 +66,15 @@ git clone https://github.com/iM3SK/cc-aio-mon.git
 }
 ```
 
+On Windows, use forward slashes: `"python \"C:/path/to/statusline.py\""`
+
 **3. Launch the dashboard**
 
 ```bash
 python cc-aio-mon/monitor.py
 ```
 
-Two files, zero dependencies, no install step.
-
----
-
-## Table of Contents
-
-- [Why CC AIO MON?](#why-cc-aio-mon)
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Metrics Reference](#metrics-reference)
-- [Configuration](#configuration)
-- [How It Works](#how-it-works)
-- [Requirements](#requirements)
-- [Troubleshooting](#troubleshooting)
-- [Alternatives](#alternatives)
-- [Contributing](#contributing)
-- [License](#license)
-- [Changelog](#changelog)
-
-## Why CC AIO MON?
-
-Claude Code is powerful but opaque about resource consumption. You can't see how much context you've used, how close you are to rate limits, or what a session costs — until it's too late. CC AIO MON solves this with the **most information-dense layout** of any Claude Code monitor — every metric visible at once, no scrolling, no tabs, no wasted space:
-
-- **Context window filling up?** See exactly how much is used, the fill rate, and an ETA to 100%.
-- **Rate limited?** Track 5-hour and 7-day quota consumption with countdown to reset.
-- **Expensive session?** Watch real-time cost and burn rate ($ per minute).
-- **Multiple sessions?** Auto-detect and switch between active Claude Code sessions.
+Two files, zero dependencies, no install step. Optionally add a shell alias: `alias mon='python /path/to/monitor.py'`
 
 ## Features
 
@@ -100,52 +84,10 @@ Claude Code is powerful but opaque about resource consumption. You can't see how
 - **Real-time metrics** — context window with token counts, API ratio, 5-hour and 7-day rate limits, cost, burn rate, context full ETA.
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux.
 - **Nord color palette** — truecolor ANSI output with consistent color-coded sections.
-- **Responsive layout** — statusline drops segments to fit narrow terminals. Dashboard adapts to any terminal size with ANSI-aware truncation.
+- **Responsive layout** — statusline drops segments to fit narrow terminals. Dashboard adapts to any terminal size.
 - **Multi-session support** — auto-detects active sessions. Numbered picker when multiple sessions are running.
-- **Animated spinner** — braille animation in dashboard header shows the monitor is alive.
 - **Stale detection** — session data older than 5 minutes resets all bars to zero and shows `STALE` in the header.
-- **Security hardened** — path traversal prevention, C1 escape injection protection, atomic file reads/writes, file size limits.
-
-## Installation
-
-### 1. Download
-
-```bash
-git clone https://github.com/iM3SK/cc-aio-mon.git
-cd cc-aio-mon
-```
-
-Or just download `statusline.py` and `monitor.py` — that's all you need.
-
-### 2. Configure Claude Code
-
-Add the statusline to `~/.claude/settings.json`:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python \"/path/to/statusline.py\""
-  }
-}
-```
-
-On Windows, use forward slashes:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python \"C:/path/to/statusline.py\""
-  }
-}
-```
-
-### 3. (Optional) Shell alias
-
-```bash
-alias mon='python /path/to/monitor.py'
-```
+- **Security hardened** — path traversal prevention, escape injection protection, atomic file reads/writes, file size limits.
 
 ## Usage
 
@@ -219,8 +161,6 @@ All progress bars use the same thresholds:
 
 ## Configuration
 
-### Environment Variables
-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLAUDE_STATUS_WARN` | `50` | Yellow threshold (%) |
@@ -232,8 +172,6 @@ export CLAUDE_STATUS_CRIT=90
 ```
 
 ## How It Works
-
-### Architecture
 
 ```
 Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
@@ -252,6 +190,9 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 3. Writes session state atomically to a temp directory for the monitor.
 4. Appends timestamped entries to a JSONL history file for burn rate calculation.
 5. **monitor.py** polls the temp directory, renders a fullscreen dashboard with bars, stats, and computed metrics.
+
+<details>
+<summary>IPC and security details</summary>
 
 ### IPC Details
 
@@ -272,6 +213,8 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 | Directory permissions | Temp directory created with `0o700` where supported |
 | Graceful shutdown | SIGTERM handler + atexit ensure terminal state is always restored |
 | Render isolation | Corrupted data caught per-frame — does not crash the TUI |
+
+</details>
 
 ## Requirements
 
@@ -299,109 +242,14 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 - On Windows, the terminal window must have focus for `msvcrt.getch()` to work.
 - Press `q` to quit, `Ctrl+C` as fallback.
 
-## Alternatives
-
-| Project | Approach | Limitation |
-|---------|----------|------------|
-| claude-monitor | Reads JSONL cost logs | Estimated data, not real-time |
-| ccusage | CLI usage aggregator | Historical only, no live dashboard |
-| ccstatusline | Status line script | No TUI, no multi-session |
-| **CC AIO MON** | Official statusline JSON | Real-time, zero deps, most compact |
-
 ## Contributing
 
-Contributions welcome. Please:
-
-1. Keep zero-dependency — stdlib only, no pip packages.
-2. Keep single-file — `statusline.py` and `monitor.py` should remain self-contained.
-3. Test on Windows and at least one Unix platform.
-4. Run `python -c "import py_compile; py_compile.compile('statusline.py', doraise=True); py_compile.compile('monitor.py', doraise=True)"` before submitting.
+Contributions welcome. Keep zero-dependency (stdlib only), keep single-file (`statusline.py` and `monitor.py` self-contained), test on Windows and at least one Unix platform. Run `python -c "import py_compile; py_compile.compile('statusline.py', doraise=True); py_compile.compile('monitor.py', doraise=True)"` before submitting.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
 
-## Changelog
+---
 
-### v1.3 — 2026-04-08
-
-**Statusline redesign:**
-- Removed progress bars — text-only segments for maximum density
-- Removed CHR, LNS, !200k segments — statusline now shows only: model, CST, CTX, 5HL, 7DL, DUR
-- Shortened model name (dropped context size suffix)
-- Separator changed from `─` to `│`
-- Compact formatting (no space before `%`)
-- All 6 segments fit in 80 columns (previously only 3 of 8 were visible)
-
-**Bug fixes:**
-- DUR segment label now bold (consistent with all other segment labels)
-- Spinner comment corrected (50ms, not 80ms)
-- Legend LNS color fixed to match render (dim, not green)
-- `f_tok` and `f_dur` formatting synchronized between statusline and dashboard
-- `used_percentage` no longer crashes on non-numeric values (safe coercion via `_num()`)
-- Stale detection works correctly after session file disappears (uses `last_seen` timestamp)
-- Session picker truncates long `cwd` paths to terminal width
-- `truncate()` appends ANSI reset to prevent color bleed
-- Dead `HISTORY_MAX_LINES` constant removed from trim logic
-
-### v1.2 — 2026-04-08
-
-**Features:**
-- CTX now shows used/total token count (e.g., `420k/1M`) in both statusline and dashboard
-- CHR (Cache Hit Rate) segment added to statusline with progress bar
-- 7DL progress bar added to statusline (was text-only)
-- `!200k` warning segment in statusline when context exceeds 200k tokens
-- `STALE` indicator in dashboard header when session data is outdated
-- Version constant — single source of truth, displayed in header and session picker
-
-**Bug fixes:**
-- Session picker: digit keypresses no longer silently dropped (double `poll_key()` removed)
-- Stale detection now works when session file is deleted (`last_mt` reset to 0)
-- All progress bars (CTX, APR, CHR) reset when session data is stale (>5 min without update)
-- 5HL/7DL show 0% when `resets_at` timestamp is in the past — fixed in both files
-- 5HL/7DL handle `used_percentage: null` without crash (`or 0` guard)
-- History trim now fires on every call when triggered by size (was only trimming when >2000 lines)
-- Statusline segment width calculations use dynamic ANSI-strip instead of fragile hardcoded formulas
-- `removed` variable name collision in shrink loop renamed to `_shrunk`
-
-**Security:**
-- TOCTOU fix: `load_state` and `load_history` now use single `open()` + bounded `read()` instead of separate `stat()` + `read()`
-- `_sanitize` now strips C1 control characters (`\x80–\x9f`) in addition to C0 — blocks 8-bit CSI injection on VT220 terminals
-
-### v1.1 — 2026-04-07
-
-**Security:**
-- Path traversal prevention via session ID validation
-- Terminal escape injection protection (control character sanitization)
-- Atomic writes via unpredictable temp filenames (NamedTemporaryFile)
-- File size limits on all JSON/JSONL reads
-- SIGTERM handler for graceful terminal cleanup
-- Temp directory created with restricted permissions (0o700)
-
-**Bug fixes:**
-- History trim now triggers on file size (was never firing due to per-process counter reset)
-- Off-by-1 in statusline segment width calculation (seg_ctx, seg_5hl)
-- Keyboard input (`q`, `r`, `l`) always responsive (polling moved before render check)
-- Render errors caught per-frame (corrupted data no longer crashes TUI)
-
-**Features:**
-- dots12 braille spinner animation in dashboard header (56 frames, 50ms)
-- Full-width separator lines (previously capped at 72 chars)
-- ANSI-aware line truncation (prevents terminal overflow)
-- Smooth resize with gradual section compression
-- Stale .tmp file cleanup in session listing
-- --refresh argument validated and clamped (100-60000ms)
-
-**Cleanup:**
-- Removed dead code (unused imports, variables, functions)
-- Environment variable parsing with safe fallback defaults
-- History file cached by mtime (no unnecessary reloads)
-
-### v1.0 — 2026-04-07
-
-- Initial release
-- Statusline: Nord truecolor, 3-letter codes, enclosed bars, responsive segments
-- Monitor: fullscreen TUI, 5 bar metrics (APR/CHR/CTX/5HL/7DL), stats, legend overlay
-- Responsive resize with 50ms tick, empty line trimming
-- IPC via atomic JSON + JSONL history, burn rate calculation
-- Zero dependencies, cross-platform (Windows/macOS/Linux)
+[Changelog](CHANGELOG.md)
