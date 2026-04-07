@@ -433,18 +433,24 @@ def render_frame(data, hist, cols, rows, show_legend=False):
         fh = rl.get("five_hour")
         if fh:
             pct = round(fh.get("used_percentage", 0), 1)
+            resets = fh.get("resets_at")
+            if resets and resets < time.time():
+                pct = 0.0
             buf.append(f"{C_YEL}{B}5HL{R} {mkbar(pct, C_YEL)}")
             buf.append("")
-            buf.append(f"    {C_FG}{f_cd(fh.get('resets_at'))}{R} {C_RED}to reset{R}")
+            buf.append(f"    {C_FG}{f_cd(resets)}{R} {C_RED}to reset{R}")
             buf.append("")
 
         # ── 7DL ─────────────────────────────────────────────
         sd = rl.get("seven_day")
         if sd:
             pct = round(sd.get("used_percentage", 0), 1)
+            resets = sd.get("resets_at")
+            if resets and resets < time.time():
+                pct = 0.0
             buf.append(f"{C_GRN}{B}7DL{R} {mkbar(pct, C_GRN)}")
             buf.append("")
-            buf.append(f"    {C_FG}{f_cd(sd.get('resets_at'))}{R} {C_RED}to reset{R}")
+            buf.append(f"    {C_FG}{f_cd(resets)}{R} {C_RED}to reset{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
 

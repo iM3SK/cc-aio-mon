@@ -128,6 +128,9 @@ def seg_5hl(data):
     if not fh:
         return None
     pct = round(fh.get("used_percentage", 0))
+    resets = fh.get("resets_at")
+    if resets and resets < time.time():
+        pct = 0
     c = cpc(pct)
     bar = mkbar(pct, C_YEL)
     text = f"{C_YEL}{B}5HL{R} {bar} {c}{pct} %{R}"
@@ -142,6 +145,9 @@ def seg_7dl(data):
     if not sd:
         return None
     pct = round(sd.get("used_percentage", 0))
+    resets = sd.get("resets_at")
+    if resets and resets < time.time():
+        pct = 0
     c = cpc(pct)
     text = f"{C_GRN}{B}7DL{R} {c}{pct} %{R}"
     return text, 4 + len(str(pct)) + 2
