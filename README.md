@@ -37,13 +37,22 @@
 ```bash
 # 1. Download
 git clone https://github.com/iM3SK/cc-aio-mon.git
+```
 
-# 2. Configure Claude Code statusline
-# Add to ~/.claude/settings.json:
-#   "statusLine": {"type": "command", "command": "python \"/path/to/statusline.py\""}
+**2. Configure statusline** — add to `~/.claude/settings.json`:
 
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python \"/path/to/cc-aio-mon/statusline.py\""
+  }
+}
+```
+
+```bash
 # 3. Launch the dashboard
-python monitor.py
+python cc-aio-mon/monitor.py
 ```
 
 That's it. Two files, zero dependencies, no install step.
