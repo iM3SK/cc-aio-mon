@@ -18,9 +18,13 @@
 
 *Statusline — compact one-line status below Claude Code input*
 
-<img src="screenshots/dashboard-compact.png" width="360" alt="Dashboard compact"> <img src="screenshots/dashboard-full.png" width="360" alt="Dashboard full">
+<img src="screenshots/dashboard-compact.png" width="360" alt="Dashboard compact">
 
-*Dashboard — compact view (left) vs full view with all metrics (right)*
+*Dashboard — compact view*
+
+<img src="screenshots/dashboard-full.png" width="360" alt="Dashboard full">
+
+*Dashboard — full view with all metrics*
 
 <img src="screenshots/legend.png" width="360" alt="Legend">
 
