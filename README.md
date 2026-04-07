@@ -2,13 +2,11 @@
 
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue) ![License MIT](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-windows%20%7C%20macos%20%7C%20linux-lightgrey) ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 
-**Real-time terminal dashboard for Claude Code** — monitor context window usage, API rate limits, session costs, and burn rate directly in your terminal. Zero dependencies, single-file Python, cross-platform.
-
-> The most compact Claude Code monitor available — all critical metrics in a single terminal window. Track token usage, spending, and rate limits at a glance. Know exactly when your context window fills up, how fast you're burning through your quota, and what each session costs — all without leaving the terminal.
+**Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies, single-file Python, cross-platform.
 
 <img src="screenshots/full.png" width="720" alt="Full setup — statusline and dashboard side by side">
 
-*Statusline integrated in Claude Code (left) + fullscreen TUI dashboard (right)*
+*Statusline in Claude Code (left) + fullscreen TUI dashboard (right)*
 
 <details>
 <summary>More screenshots</summary>
@@ -16,7 +14,7 @@
 
 <img src="screenshots/statusline.png" width="500" alt="Statusline">
 
-*Statusline — compact one-line status below Claude Code input*
+*Statusline — one-line status below Claude Code input*
 
 <img src="screenshots/dashboard-compact.png" width="360" alt="Dashboard compact">
 
@@ -34,8 +32,9 @@
 
 ## Quick Start
 
+**1. Download**
+
 ```bash
-# 1. Download
 git clone https://github.com/iM3SK/cc-aio-mon.git
 ```
 
@@ -50,12 +49,15 @@ git clone https://github.com/iM3SK/cc-aio-mon.git
 }
 ```
 
+**3. Launch the dashboard**
+
 ```bash
-# 3. Launch the dashboard
 python cc-aio-mon/monitor.py
 ```
 
-That's it. Two files, zero dependencies, no install step.
+Two files, zero dependencies, no install step.
+
+---
 
 ## Table of Contents
 
@@ -84,16 +86,16 @@ Claude Code is powerful but opaque about resource consumption. You can't see how
 
 ## Features
 
-- **Most compact monitor** — 16 metrics in one screen. No scrolling, no tabs, no wasted space. Everything visible at a glance, even in a small terminal window.
-- **Zero dependencies** — stdlib-only Python. No pip install, no venv, no node_modules. Just copy and run.
-- **Two-tier architecture** — lightweight statusline (runs on each Claude Code update) + fullscreen TUI dashboard for deep monitoring.
+- **Most compact monitor** — 16 metrics in one screen. No scrolling, no tabs, no wasted space.
+- **Zero dependencies** — stdlib-only Python. No pip install, no venv, no node_modules.
+- **Two-tier architecture** — lightweight statusline (updates on each Claude Code event) + fullscreen TUI dashboard.
 - **Real-time metrics** — context window, API ratio, cache hit rate, 5-hour and 7-day rate limits, cost, burn rate, context full ETA.
-- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. Auto-detects platform for keyboard input.
-- **Nord color palette** — truecolor ANSI output with consistent color-coded sections. Clean separator lines, no box-drawing clutter.
-- **Responsive layout** — statusline drops segments to fit narrow terminals. Monitor adapts smoothly to any terminal size with ANSI-aware line truncation.
+- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux.
+- **Nord color palette** — truecolor ANSI output with consistent color-coded sections.
+- **Responsive layout** — statusline drops segments to fit narrow terminals. Dashboard adapts to any terminal size with ANSI-aware truncation.
 - **Multi-session support** — auto-detects active sessions. Numbered picker when multiple sessions are running.
-- **Animated spinner** — dots12 braille animation in dashboard header shows the monitor is alive.
-- **Security hardened** — path traversal prevention, terminal escape injection protection, atomic file writes, file size limits.
+- **Animated spinner** — braille animation in dashboard header shows the monitor is alive.
+- **Security hardened** — path traversal prevention, escape injection protection, atomic file writes, file size limits.
 
 ## Installation
 
@@ -104,11 +106,11 @@ git clone https://github.com/iM3SK/cc-aio-mon.git
 cd cc-aio-mon
 ```
 
-Or just download the two files — `statusline.py` and `monitor.py`. That's it.
+Or just download `statusline.py` and `monitor.py` — that's all you need.
 
 ### 2. Configure Claude Code
 
-Add the statusline command to `~/.claude/settings.json`:
+Add the statusline to `~/.claude/settings.json`:
 
 ```json
 {
@@ -119,13 +121,13 @@ Add the statusline command to `~/.claude/settings.json`:
 }
 ```
 
-On Windows use forward slashes:
+On Windows, use forward slashes:
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "python \"C:/Users/you/cc-aio-mon/statusline.py\""
+    "command": "python \"C:/path/to/statusline.py\""
   }
 }
 ```
@@ -142,7 +144,7 @@ alias mon='python /path/to/monitor.py'
 
 Runs automatically on each Claude Code status update. Outputs a single colored line below the input area. Segments drop from right when the terminal is narrow.
 
-### Monitor
+### Dashboard
 
 ```bash
 python monitor.py              # auto-detect session
@@ -166,7 +168,7 @@ python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 | Code | Color | Metric |
 |------|-------|--------|
-| APR | green | API Ratio — time spent in API calls vs total session duration |
+| APR | green | API Ratio — time in API calls vs total session duration |
 | CHR | white | Cache Hit Rate — cache reads vs total cache operations |
 | CTX | cyan | Context Window — percentage of token limit consumed |
 | 5HL | yellow | 5-Hour Rate Limit — quota consumed in current 5-hour window |
@@ -178,19 +180,19 @@ python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 |------|-------|--------|
 | LNS | green/red | Lines added / removed in session |
 | CST | cyan | Total session cost (USD) |
-| BRN | yellow | Cost burn rate ($ / min) — computed from session history |
+| BRN | yellow | Cost burn rate ($ / min) |
 | CTR | yellow | Context consumption rate (% / min) |
-| CTF | red | Context Full ETA — predicted time when context hits 100% |
+| CTF | red | Context Full ETA — predicted time to 100% |
 | NOW | white | Current local time |
-| UPD | green | Time since last data update from Claude Code |
+| UPD | green | Time since last data update |
 
 ### Color Thresholds
 
 All progress bars use the same thresholds:
 
 - **Green** (< 50%) — healthy, plenty of headroom
-- **Yellow** (50-79%) — approaching limits, be aware
-- **Red** (>= 80%) — critical, take action soon
+- **Yellow** (50-79%) — approaching limits
+- **Red** (>= 80%) — critical, take action
 
 ## Configuration
 
@@ -198,8 +200,8 @@ All progress bars use the same thresholds:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDE_STATUS_WARN` | `50` | Yellow threshold percentage |
-| `CLAUDE_STATUS_CRIT` | `80` | Red threshold percentage |
+| `CLAUDE_STATUS_WARN` | `50` | Yellow threshold (%) |
+| `CLAUDE_STATUS_CRIT` | `80` | Red threshold (%) |
 
 ```bash
 export CLAUDE_STATUS_WARN=60
@@ -211,15 +213,15 @@ export CLAUDE_STATUS_CRIT=90
 ### Architecture
 
 ```
-Claude Code ──stdin──▶ statusline.py ──▶ terminal (one-line status)
-                            │
-                            ▼
+Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
+                            |
+                            v
                     %TEMP%/claude-aio-monitor/
                     ├── {session_id}.json    (current state, atomic write)
                     └── {session_id}.jsonl   (timestamped history)
-                            │
-                            ▼
-                      monitor.py ──▶ terminal (fullscreen TUI)
+                            |
+                            v
+                      monitor.py ──> terminal (fullscreen TUI)
 ```
 
 1. **statusline.py** receives JSON from Claude Code via stdin on each status update.
@@ -240,20 +242,12 @@ Claude Code ──stdin──▶ statusline.py ──▶ terminal (one-line stat
 | Measure | Protection |
 |---------|------------|
 | Session ID validation | Strict regex `[a-zA-Z0-9_-]{1,128}` prevents path traversal |
-| Input sanitization | Control characters stripped from all JSON data fields before terminal output |
+| Input sanitization | Control characters stripped from all JSON fields before terminal output |
 | File size limits | JSON capped at 1 MB, JSONL at 10 MB — oversized files skipped |
 | Atomic writes | Unpredictable temp filenames prevent symlink/TOCTOU attacks |
 | Directory permissions | Temp directory created with `0o700` where supported |
 | Graceful shutdown | SIGTERM handler + atexit ensure terminal state is always restored |
 | Render isolation | Corrupted data caught per-frame — does not crash the TUI |
-
-### Responsive Layout
-
-- Separator lines span full terminal width
-- All content lines truncated to terminal width (ANSI-aware, preserves escape codes)
-- 50ms tick loop for responsive resize detection
-- Smooth shrink: spacing between sections compresses first, then bottom sections clip
-- Top content always stays stable during resize
 
 ## Requirements
 
@@ -267,7 +261,7 @@ Claude Code ──stdin──▶ statusline.py ──▶ terminal (one-line stat
 **Monitor shows "Waiting for Claude Code session..."**
 - Ensure Claude Code is running with an active session.
 - Check that `statusLine.command` is configured in `~/.claude/settings.json`.
-- Verify temp files exist: check `%TEMP%/claude-aio-monitor/` (Windows) or `/tmp/claude-aio-monitor/` (macOS/Linux).
+- Verify temp files exist: `%TEMP%/claude-aio-monitor/` (Windows) or `/tmp/claude-aio-monitor/` (macOS/Linux).
 
 **Statusline not appearing**
 - Verify the path in `statusLine.command` is correct and uses forward slashes.
@@ -289,8 +283,6 @@ Claude Code ──stdin──▶ statusline.py ──▶ terminal (one-line stat
 | ccusage | CLI usage aggregator | Historical only, no live dashboard |
 | ccstatusline | Status line script | No TUI, no multi-session |
 | **CC AIO MON** | Official statusline JSON | Real-time, zero deps, most compact |
-
-CC AIO MON is the **most compact** and **most complete** Claude Code monitor available. It's the only tool that uses Claude Code's official status line protocol for precise, real-time session data — not estimates from log files. All 16 metrics fit in a single terminal window without scrolling.
 
 ## Contributing
 
