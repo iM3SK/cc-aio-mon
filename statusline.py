@@ -33,6 +33,7 @@ except (ValueError, TypeError):
 
 # Session ID validation — prevent path traversal
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+_ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 
 # ---------------------------------------------------------------------------
 # ANSI — Nord truecolor (same palette as monitor.py)
@@ -59,20 +60,9 @@ def cpc(pct):
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
-H = "\u2500"  # ─
-BF = "\u2588"  # █
-SH = "\u2591"  # ░
-SEP = f" {C_DIM}{H}{R} "
-BAR_W = 10
+SEP = f" {C_DIM}\u2502{R} "  # │
+SEP_VLEN = 3  # " │ "
 
-
-def mkbar(pct, color=None):
-    pct = max(0.0, min(100.0, pct))
-    if color is None:
-        color = cpc(pct)
-    filled = round(pct * BAR_W / 100)
-    empty = BAR_W - filled
-    return f"{C_DIM}[{R}{color}{BF * filled}{R}{C_DIM}{SH * empty}]{R}"
 
 
 def f_dur(ms):
@@ -83,9 +73,21 @@ def f_dur(ms):
         return f"{s}s"
     m, s = divmod(s, 60)
     if m < 60:
-        return f"{m}m{s:02d}s"
+        return f"{m}m {s:02d}s"
     h, m = divmod(m, 60)
-    return f"{h}h{m:02d}m"
+    return f"{h}h {m:02d}m"
+
+
+def f_tok(n):
+    if n is None or n == 0:
+        return "--"
+    if n < 1000:
+        return f"{int(n):,}"
+    if n < 100_000:
+        return f"{n / 1000:.1f}k"
+    if n < 1_000_000:
+        return f"{n / 1000:.0f}k"
+    return f"{n / 1_000_000:.0f}M"
 
 
 def f_cost(usd):
@@ -101,23 +103,34 @@ def f_cost(usd):
 # ---------------------------------------------------------------------------
 def _sanitize(s):
     """Strip control characters to prevent terminal escape injection."""
-    return re.sub(r"[\x00-\x1f\x7f]", "", str(s))
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(s))
 
 
 def seg_model(data):
     name = _sanitize(data.get("model", {}).get("display_name", ""))
-    name = name.replace("(1M context)", "(1M CTX)")
+    # Shorten known model names
+    name = name.replace(" (1M context)", "").replace(" (200k)", "")
     text = f"{B}{C_WHT}{name}{R}"
-    return text, len(name)
+    return text, len(_ANSI_RE.sub("", text))
+
+
+def _num(v, default=0):
+    """Safely coerce value to float (handles None, strings, etc.)."""
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
 
 
 def seg_ctx(data):
     cw = data.get("context_window", {})
-    pct = round(cw.get("used_percentage") or 0)
+    pct = round(_num(cw.get("used_percentage")))
+    total = cw.get("context_window_size", 0) or 0
+    used = int(total * pct / 100) if total else 0
     c = cpc(pct)
-    bar = mkbar(pct, C_CYN)
-    text = f"{C_CYN}{B}CTX{R} {bar} {c}{pct} %{R}"
-    return text, 4 + BAR_W + 2 + 1 + len(str(pct)) + 2
+    tok = f" {C_DIM}{f_tok(used)}/{f_tok(total)}{R}" if total else ""
+    text = f"{C_CYN}{B}CTX{R} {c}{pct}%{R}{tok}"
+    return text, len(_ANSI_RE.sub("", text))
 
 
 def seg_5hl(data):
@@ -127,14 +140,13 @@ def seg_5hl(data):
     fh = rl.get("five_hour")
     if not fh:
         return None
-    pct = round(fh.get("used_percentage", 0))
+    pct = round(_num(fh.get("used_percentage")))
     resets = fh.get("resets_at")
     if resets and resets < time.time():
         pct = 0
     c = cpc(pct)
-    bar = mkbar(pct, C_YEL)
-    text = f"{C_YEL}{B}5HL{R} {bar} {c}{pct} %{R}"
-    return text, 4 + BAR_W + 2 + 1 + len(str(pct)) + 2
+    text = f"{C_YEL}{B}5HL{R} {c}{pct}%{R}"
+    return text, len(_ANSI_RE.sub("", text))
 
 
 def seg_7dl(data):
@@ -144,13 +156,13 @@ def seg_7dl(data):
     sd = rl.get("seven_day")
     if not sd:
         return None
-    pct = round(sd.get("used_percentage", 0))
+    pct = round(_num(sd.get("used_percentage")))
     resets = sd.get("resets_at")
     if resets and resets < time.time():
         pct = 0
     c = cpc(pct)
-    text = f"{C_GRN}{B}7DL{R} {c}{pct} %{R}"
-    return text, 4 + len(str(pct)) + 2
+    text = f"{C_GRN}{B}7DL{R} {c}{pct}%{R}"
+    return text, len(_ANSI_RE.sub("", text))
 
 
 def seg_cost(data):
@@ -158,18 +170,9 @@ def seg_cost(data):
     if usd <= 0:
         return None
     text = f_cost(usd)
-    return f"{C_CYN}{B}CST{R} {C_CYN}{text}{R}", 4 + len(text)
+    out = f"{C_CYN}{B}CST{R} {C_CYN}{text}{R}"
+    return out, len(_ANSI_RE.sub("", out))
 
-
-def seg_lns(data):
-    cost = data.get("cost", {})
-    added = cost.get("total_lines_added", 0) or 0
-    removed = cost.get("total_lines_removed", 0) or 0
-    if added == 0 and removed == 0:
-        return None
-    text = f"{C_DIM}LNS{R} {C_GRN}+{added:,}{R} {C_RED}-{removed:,}{R}"
-    vlen = 4 + 1 + len(f"{added:,}") + 1 + 1 + len(f"{removed:,}")
-    return text, vlen
 
 
 def seg_dur(data):
@@ -177,7 +180,8 @@ def seg_dur(data):
     if ms <= 0:
         return None
     d = f_dur(ms)
-    return f"{C_GRN}DUR{R} {C_GRN}{d}{R}", 4 + len(d)
+    text = f"{C_GRN}{B}DUR{R} {C_GRN}{d}{R}"
+    return text, len(_ANSI_RE.sub("", text))
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +190,7 @@ def seg_dur(data):
 def build_line(data, cols):
     segments = []
     used = 0
-    sep_vlen = 3  # " ─ "
+    sep_vlen = SEP_VLEN
 
     def try_add(seg):
         nonlocal used
@@ -201,11 +205,10 @@ def build_line(data, cols):
         return True
 
     try_add(seg_model(data))
+    try_add(seg_cost(data))
     try_add(seg_ctx(data))
     try_add(seg_5hl(data))
     try_add(seg_7dl(data))
-    try_add(seg_cost(data))
-    try_add(seg_lns(data))
     try_add(seg_dur(data))
 
     return SEP.join(segments)
@@ -240,7 +243,6 @@ def main():
 # ---------------------------------------------------------------------------
 # IPC — shared state for monitor.py
 # ---------------------------------------------------------------------------
-HISTORY_MAX_LINES = 2000
 HISTORY_TRIM_TO = 1000
 MAX_FILE_SIZE = 1_048_576  # 1 MB
 
@@ -283,7 +285,7 @@ def write_shared_state(data: dict):
 def _trim_history(path: pathlib.Path):
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-        if len(lines) > HISTORY_MAX_LINES:
+        if len(lines) > HISTORY_TRIM_TO:
             trimmed = "\n".join(lines[-HISTORY_TRIM_TO:]) + "\n"
             fd = tempfile.NamedTemporaryFile(
                 dir=path.parent, suffix=".tmp", delete=False,

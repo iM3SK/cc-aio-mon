@@ -100,9 +100,18 @@ C_WHT = E + "38;2;216;222;233m"
 C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 
+VERSION = "1.3"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
+
+
+def _num(v, default=0):
+    """Safely coerce value to float (handles None, strings, etc.)."""
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
 
 
 def vlen(s):
@@ -114,6 +123,7 @@ def truncate(s, maxw):
     """Truncate string to maxw visible characters, preserving ANSI codes."""
     vis = 0
     i = 0
+    truncated = False
     while i < len(s) and vis < maxw:
         m = _ANSI_RE.match(s, i)
         if m:
@@ -121,6 +131,8 @@ def truncate(s, maxw):
         else:
             vis += 1
             i += 1
+    if i < len(s):
+        truncated = True
     # Include any trailing ANSI reset sequences
     while i < len(s):
         m = _ANSI_RE.match(s, i)
@@ -128,12 +140,16 @@ def truncate(s, maxw):
             i = m.end()
         else:
             break
-    return s[:i]
+    result = s[:i]
+    # Append reset if truncated mid-color to prevent bleed
+    if truncated and R not in result[max(0, len(result) - 10):]:
+        result += R
+    return result
 
 
 def _sanitize(s):
     """Strip control characters to prevent terminal escape injection."""
-    return re.sub(r"[\x00-\x1f\x7f]", "", str(s))
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(s))
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +171,10 @@ def f_tok(n):
     if n < 1000:
         return f"{int(n):,}"
     if n < 100_000:
-        return f"{n / 1000:.1f} k"
+        return f"{n / 1000:.1f}k"
     if n < 1_000_000:
-        return f"{n / 1000:.0f} k"
-    return f"{n / 1_000_000:.0f} M"
+        return f"{n / 1000:.0f}k"
+    return f"{n / 1_000_000:.0f}M"
 
 
 def f_cost(usd):
@@ -277,10 +293,12 @@ def load_state(sid):
         return None
     try:
         p = DATA_DIR / f"{sid}.json"
-        if p.stat().st_size > MAX_FILE_SIZE:
+        with open(p, "rb") as fh:
+            raw = fh.read(MAX_FILE_SIZE + 1)
+        if len(raw) > MAX_FILE_SIZE:
             return None
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return json.loads(raw.decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
@@ -289,9 +307,11 @@ def load_history(sid, n=120):
         return []
     try:
         p = DATA_DIR / f"{sid}.jsonl"
-        if p.stat().st_size > MAX_FILE_SIZE * 10:
+        with open(p, "rb") as fh:
+            raw = fh.read(MAX_FILE_SIZE * 10 + 1)
+        if len(raw) > MAX_FILE_SIZE * 10:
             return []
-        lines = p.read_text(encoding="utf-8").splitlines()
+        lines = raw.decode("utf-8").splitlines()
         out = []
         for ln in lines[-n:]:
             try:
@@ -299,7 +319,7 @@ def load_history(sid, n=120):
             except json.JSONDecodeError:
                 pass
         return out
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return []
 
 
@@ -313,17 +333,17 @@ def calc_rates(hist):
     dt = t1 - t0
     if dt < 10:
         return None, None
-    c0 = hist[0].get("cost", {}).get("total_cost_usd", 0) or 0
-    c1 = hist[-1].get("cost", {}).get("total_cost_usd", 0) or 0
-    x0 = hist[0].get("context_window", {}).get("used_percentage", 0) or 0
-    x1 = hist[-1].get("context_window", {}).get("used_percentage", 0) or 0
+    c0 = _num(hist[0].get("cost", {}).get("total_cost_usd"))
+    c1 = _num(hist[-1].get("cost", {}).get("total_cost_usd"))
+    x0 = _num(hist[0].get("context_window", {}).get("used_percentage"))
+    x1 = _num(hist[-1].get("context_window", {}).get("used_percentage"))
     return (c1 - c0) / dt * 60, (x1 - x0) / dt * 60
 
 
 # ---------------------------------------------------------------------------
 # Spinner
 # ---------------------------------------------------------------------------
-# dots12 spinner (cli-spinners) — 56 frames, 80ms interval
+# dots12 spinner (cli-spinners) — 56 frames, 50ms interval
 _SPIN = [
     "⢀⠀","⡀⠀","⠄⠀","⢂⠀","⡂⠀","⠅⠀","⢃⠀","⡃⠀",
     "⠍⠀","⢋⠀","⡋⠀","⠍⠁","⢋⠁","⡋⠁","⠍⠉","⠋⠉",
@@ -351,7 +371,7 @@ def spin():
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
-def render_frame(data, hist, cols, rows, show_legend=False):
+def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     if show_legend:
         return render_legend(cols, rows)
 
@@ -364,25 +384,35 @@ def render_frame(data, hist, cols, rows, show_legend=False):
     sname = _sanitize(data.get("session_name", ""))
 
     cw = data.get("context_window", {})
-    ctx_pct = round(cw.get("used_percentage") or 0, 1)
+    ctx_pct = round(_num(cw.get("used_percentage")), 1)
     ctx_total = cw.get("context_window_size", 0)
     usage = cw.get("current_usage") or {}
     exceeds = data.get("exceeds_200k_tokens", False)
 
     rl = data.get("rate_limits")
     cost_d = data.get("cost", {})
-    usd = cost_d.get("total_cost_usd", 0) or 0
-    dur = cost_d.get("total_duration_ms", 0) or 0
-    api_dur = cost_d.get("total_api_duration_ms", 0) or 0
-    added = cost_d.get("total_lines_added", 0) or 0
-    removed = cost_d.get("total_lines_removed", 0) or 0
+    usd = _num(cost_d.get("total_cost_usd"))
+    dur = _num(cost_d.get("total_duration_ms"))
+    api_dur = _num(cost_d.get("total_api_duration_ms"))
+    added = int(_num(cost_d.get("total_lines_added")))
+    removed = int(_num(cost_d.get("total_lines_removed")))
     cpm, xpm = calc_rates(hist)
+
+    # -- Stale session: zero out all live metrics --
+    if stale:
+        ctx_pct = 0.0
+        usage = {}
+        exceeds = False
+        dur = 0
+        api_dur = 0
+        cpm, xpm = None, None
 
     SW = W
 
     # ── Header ──────────────────────────────────────────────
     buf.append(sep(SW))
-    hp = [f"{C_CYN}{spin()}{R} {C_WHT}{B}CC AIO MON 1.0{R}", f"{C_CYN}{model_str}{R}"]
+    stale_tag = f"  {C_RED}{B}STALE{R}" if stale else ""
+    hp = [f"{C_CYN}{spin()}{R} {C_WHT}{B}CC AIO MON {VERSION}{R}{stale_tag}", f"{C_CYN}{model_str}{R}"]
     if sname:
         hp.append(f"{C_FG}{sname}{R}")
     buf.append("  ".join(hp))
@@ -416,13 +446,14 @@ def render_frame(data, hist, cols, rows, show_legend=False):
     buf.append("")
 
     # ── CTX ─────────────────────────────────────────────────
+    ctx_used = int(ctx_total * ctx_pct / 100) if ctx_total else 0
     buf.append(f"{C_CYN}{B}CTX{R} {mkbar(ctx_pct, C_CYN)}")
     buf.append("")
     warn = f"  {C_RED}{B}! >200k{R}" if exceeds else ""
     if any([inp, out]):
-        buf.append(f"    {C_CYN}{f_tok(ctx_total)}{R}{warn} {C_DIM}/{R} {C_WHT}in:{R} {C_WHT}{f_tok(inp)}{R} {C_DIM}/{R} {C_WHT}out:{R} {C_WHT}{f_tok(out)}{R}")
+        buf.append(f"    {C_CYN}{f_tok(ctx_used)}{R} {C_DIM}/{R} {C_CYN}{f_tok(ctx_total)}{R}{warn} {C_DIM}/{R} {C_WHT}in:{R} {C_WHT}{f_tok(inp)}{R} {C_DIM}/{R} {C_WHT}out:{R} {C_WHT}{f_tok(out)}{R}")
     else:
-        buf.append(f"    {C_CYN}{f_tok(ctx_total)}{R}{warn}")
+        buf.append(f"    {C_CYN}{f_tok(ctx_used)}{R} {C_DIM}/{R} {C_CYN}{f_tok(ctx_total)}{R}{warn}")
         buf.append(f"    {C_DIM}awaiting first api call{R}")
     buf.append("")
     buf.append(sep(SW))
@@ -432,7 +463,7 @@ def render_frame(data, hist, cols, rows, show_legend=False):
     if rl:
         fh = rl.get("five_hour")
         if fh:
-            pct = round(fh.get("used_percentage", 0), 1)
+            pct = round(_num(fh.get("used_percentage")), 1)
             resets = fh.get("resets_at")
             if resets and resets < time.time():
                 pct = 0.0
@@ -444,7 +475,7 @@ def render_frame(data, hist, cols, rows, show_legend=False):
         # ── 7DL ─────────────────────────────────────────────
         sd = rl.get("seven_day")
         if sd:
-            pct = round(sd.get("used_percentage", 0), 1)
+            pct = round(_num(sd.get("used_percentage")), 1)
             resets = sd.get("resets_at")
             if resets and resets < time.time():
                 pct = 0.0
@@ -500,13 +531,13 @@ def render_frame(data, hist, cols, rows, show_legend=False):
     # Shrink: remove empty lines bottom-up (sections compress smoothly)
     target = rows - 1
     while len(buf) > target:
-        removed = False
+        _shrunk = False
         for i in range(len(buf) - 1, -1, -1):
             if buf[i] == "":
                 buf.pop(i)
-                removed = True
+                _shrunk = True
                 break
-        if not removed:
+        if not _shrunk:
             break
     # Last resort: clip from bottom if still too tall
     if len(buf) > target:
@@ -537,7 +568,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_CYN}CTX  Context Window{R}")
     buf.append(f"{C_YEL}5HL  5-Hour Rate Limit{R}")
     buf.append(f"{C_GRN}7DL  7-Day Rate Limit{R}")
-    buf.append(f"{C_GRN}LNS  Lines Changed{R}")
+    buf.append(f"{C_DIM}LNS  Lines Changed{R}")
     buf.append(f"{C_CYN}CST  Session Cost{R}")
     buf.append(f"{C_YEL}BRN  Burn Rate ($ / min){R}")
     buf.append(f"{C_YEL}CTR  Context Rate (% / min){R}")
@@ -560,7 +591,7 @@ def render_picker(sessions, cols, rows):
     W = cols
     buf = []
     buf.append(sep(W))
-    buf.append(f"  {C_WHT}{B}CC AIO MON 1.0{R}")
+    buf.append(f"  {C_WHT}{B}CC AIO MON {VERSION}{R}")
     buf.append(sep(W))
     buf.append("")
 
@@ -573,7 +604,8 @@ def render_picker(sessions, cols, rows):
         for i, s in enumerate(sessions):
             stale = f" {C_RED}(stale){R}" if s["stale"] else f" {C_GRN}(live){R}"
             nm = s["session_name"] or s["id"][:16]
-            buf.append(f"  {C_CYN}[{i + 1}]{R}  {B}{nm}{R}  {C_DIM}{s['model']}{R}  {C_DIM}{s['cwd']}{R}{stale}")
+            line = f"  {C_CYN}[{i + 1}]{R}  {B}{nm}{R}  {C_DIM}{s['model']}{R}  {C_DIM}{s['cwd']}{R}{stale}"
+            buf.append(truncate(line, W))
 
     buf.append("")
     buf.append(sep(W))
@@ -645,6 +677,7 @@ def main():
         return
     show_legend = False
     last_mt = 0
+    last_seen = 0  # monotonic timestamp of last successful data load
     last_data = None
     last_size = (0, 0)
     last_hist_mt = 0
@@ -685,14 +718,12 @@ def main():
                     sid = active[0]["id"]
                 elif not active:
                     flush(render_picker([], cols, rows), cols)
-                    k = poll_key()
                     if k == "q":
                         break
                     time.sleep(tick)
                     continue
                 else:
                     flush(render_picker(active, cols, rows), cols)
-                    k = poll_key()
                     if k == "q":
                         break
                     if k and k.isdigit():
@@ -716,6 +747,9 @@ def main():
                     if d:
                         last_data = d
                         last_mt = mt
+                        last_seen = time.monotonic()
+                    elif mt == 0:
+                        last_mt = 0
 
             if last_data is None:
                 flush(render_picker([], cols, rows), cols)
@@ -730,8 +764,9 @@ def main():
             if hmt != last_hist_mt:
                 last_hist = load_history(sid)
                 last_hist_mt = hmt
+            is_stale = (time.monotonic() - last_seen) > 300 if last_seen else False
             try:
-                flush(render_frame(last_data, last_hist, cols, rows, show_legend), cols)
+                flush(render_frame(last_data, last_hist, cols, rows, show_legend, stale=is_stale), cols)
             except (TypeError, ValueError, KeyError, ZeroDivisionError):
                 pass  # corrupted data — skip frame, retry next tick
 
