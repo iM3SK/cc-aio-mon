@@ -47,6 +47,7 @@ B = E + "1m"
 C_RED = E + "38;2;191;97;106m"
 C_GRN = E + "38;2;163;190;140m"
 C_YEL = E + "38;2;235;203;139m"
+C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
 C_CYN = E + "38;2;136;192;208m"
 C_WHT = E + "38;2;216;222;233m"
 C_DIM = E + "38;2;76;86;106m"
@@ -256,7 +257,7 @@ def seg_cost(data):
     usd = _num(data.get("cost", {}).get("total_cost_usd"))
     if usd <= 0:
         return None
-    text = f"{C_CYN}CST{RB} {C_CYN}{B}{f_cost(usd)}{RB}"
+    text = f"{C_ORN}CST{RB} {C_ORN}{B}{f_cost(usd)}{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -265,7 +266,7 @@ def seg_dur(data):
     ms = _num(data.get("cost", {}).get("total_duration_ms"))
     if ms <= 0:
         return None
-    text = f"{C_GRN}DUR{RB} {C_GRN}{f_dur(ms)}{RB}"
+    text = f"{C_DIM}DUR{RB} {C_DIM}{f_dur(ms)}{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -284,14 +285,14 @@ def seg_chr(data):
         c = C_YEL
     else:
         c = C_RED
-    text = f"{C_WHT}{B}CHR{RB} {c}{pct}%{RB}"
+    text = f"{C_GRN}{B}CHR{RB} {c}{pct}%{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 
 def seg_brn(brn):
     if brn is None or brn <= 0.0001:
         return None
-    text = f"{C_YEL}BRN{RB} {C_YEL}{B}{brn:.4f} $/m{RB}"
+    text = f"{C_ORN}BRN{RB} {C_ORN}{B}{brn:.4f} $/m{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -336,7 +337,7 @@ def seg_ctf(ctr, data):
 
 def seg_now():
     now_str = datetime.now().strftime("%H:%M:%S")
-    text = f"{C_WHT}NOW{RB} {C_WHT}{B}{now_str}{RB}"
+    text = f"{C_DIM}NOW{RB} {C_DIM}{now_str}{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 

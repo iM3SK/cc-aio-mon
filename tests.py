@@ -19,6 +19,9 @@ from statusline import (
     R,
     RB,
     EL,
+    C_GRN,
+    C_ORN,
+    C_DIM,
     _get_terminal_width,
     _sanitize,
     _num as sl_num,
@@ -426,6 +429,10 @@ class TestSegCost(unittest.TestCase):
         self.assertIn("CST", _ANSI_RE.sub("", text))
         self.assertIn("1.23", _ANSI_RE.sub("", text))
 
+    def test_uses_orange(self):
+        text, _ = seg_cost(_full_data())
+        self.assertIn(C_ORN, text)
+
     def test_zero_cost(self):
         d = _full_data()
         d["cost"]["total_cost_usd"] = 0
@@ -440,6 +447,10 @@ class TestSegDur(unittest.TestCase):
         self.assertIn("DUR", _ANSI_RE.sub("", text))
         self.assertIn("2m", _ANSI_RE.sub("", text))
 
+    def test_uses_dim(self):
+        text, _ = seg_dur(_full_data())
+        self.assertIn(C_DIM, text)
+
     def test_zero_duration(self):
         d = _full_data()
         d["cost"]["total_duration_ms"] = 0
@@ -452,6 +463,10 @@ class TestSegChr(unittest.TestCase):
         text, vl = seg_chr(_full_data())
         self.assertEqual(vl, _vlen(text))
         self.assertIn("CHR", _ANSI_RE.sub("", text))
+
+    def test_label_uses_green(self):
+        text, _ = seg_chr(_full_data())
+        self.assertIn(C_GRN, text)
 
     def test_no_cache_data(self):
         d = _full_data()
@@ -487,6 +502,10 @@ class TestSegBrn(unittest.TestCase):
         text, vl = seg_brn(0.0512)
         self.assertEqual(vl, _vlen(text))
         self.assertIn("BRN", _ANSI_RE.sub("", text))
+
+    def test_uses_orange(self):
+        text, _ = seg_brn(0.05)
+        self.assertIn(C_ORN, text)
 
     def test_none(self):
         self.assertIsNone(seg_brn(None))
@@ -548,6 +567,10 @@ class TestSegNow(unittest.TestCase):
         plain = _ANSI_RE.sub("", text)
         self.assertIn("NOW", plain)
         self.assertRegex(plain, r"\d{2}:\d{2}:\d{2}")
+
+    def test_uses_dim(self):
+        text, _ = seg_now()
+        self.assertIn(C_DIM, text)
 
 
 # ---------------------------------------------------------------------------

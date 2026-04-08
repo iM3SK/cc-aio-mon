@@ -111,6 +111,7 @@ B = E + "1m"
 C_RED = E + "38;2;191;97;106m"
 C_GRN = E + "38;2;163;190;140m"
 C_YEL = E + "38;2;235;203;139m"
+C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
 C_CYN = E + "38;2;136;192;208m"
 C_WHT = E + "38;2;216;222;233m"
 C_DIM = E + "38;2;76;86;106m"
@@ -520,7 +521,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
         apr_pct = round(api_dur / dur * 100, 1)
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
         buf.append("")
-        buf.append(f"    {c(C_GRN)}DUR {f_dur(dur)}{R} {C_DIM}/{R} {c(C_GRN)}API {f_dur(api_dur)}{R}")
+        buf.append(f"    {c(C_DIM)}DUR {f_dur(dur)}{R} {C_DIM}/{R} {c(C_DIM)}API {f_dur(api_dur)}{R}")
     else:
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
         buf.append("")
@@ -533,11 +534,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     if any([cr, cwt]):
         total_cache = cr + cwt
         chr_pct = round(cr / total_cache * 100, 1) if total_cache > 0 else 0
-        buf.append(f"{c(C_WHT)}{B}CHR{R} {mkbar(chr_pct, c(C_WHT))}")
+        buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(chr_pct, c(C_GRN))}")
         buf.append("")
         buf.append(f"    {c(C_GRN)}c.r:{R} {c(C_GRN)}{f_tok(cr)}{R} {C_DIM}/{R} {c(C_GRN)}c.w:{R} {c(C_GRN)}{f_tok(cwt)}{R}")
     else:
-        buf.append(f"{c(C_WHT)}{B}CHR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(0, C_DIM)}")
         buf.append("")
         buf.append(f"    {C_DIM}no cache data{R}")
     buf.append("")
@@ -598,9 +599,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append("")
 
     # ── Stats ───────────────────────────────────────────────
-    buf.append(f"{c(C_CYN)}CST  {B}{f_cost(usd)}{R}")
+    buf.append(f"{c(C_ORN)}CST  {B}{f_cost(usd)}{R}")
     brn_val = f"{cpm:.4f} $ / min" if cpm and cpm > 0.0001 else "collecting..."
-    buf.append(f"{c(C_YEL)}BRN  {B}{brn_val}{R}")
+    buf.append(f"{c(C_ORN)}BRN  {B}{brn_val}{R}")
     ctr_val = f"{xpm:.2f} % / min" if xpm and xpm > 0.001 else "--"
     buf.append(f"{c(C_YEL)}CTR  {ctr_val}{R}")
     ctf_val = "--"
@@ -610,7 +611,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append(f"{c(C_RED)}CTF  {B}{ctf_val}{R}")
     buf.append("")
     now = datetime.now().strftime("%H:%M:%S")
-    buf.append(f"{c(C_WHT)}NOW  {B}{now}{R}")
+    buf.append(f"{c(C_DIM)}NOW  {now}{R}")
 
     sid_str = str(data.get("session_id", "default"))
     if _SID_RE.match(sid_str):
@@ -622,7 +623,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             age_s = "?"
     else:
         age_s = "?"
-    buf.append(f"{c(C_GRN)}UPD  {age_s}{R}")
+    buf.append(f"{c(C_DIM)}UPD  {age_s}{R}")
 
     buf.append("")
 
@@ -644,21 +645,21 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}{B}LEGEND{R}")
     buf.append(sep(SW))
     buf.append(f"{C_GRN}APR  API Ratio (API time / total){R}")
-    buf.append(f"{C_GRN}DUR  Session Duration{R}")
-    buf.append(f"{C_GRN}API  API Time{R}")
-    buf.append(f"{C_WHT}CHR  Cache Hit Rate (read / total){R}")
+    buf.append(f"{C_DIM}DUR  Session Duration{R}")
+    buf.append(f"{C_DIM}API  API Time{R}")
+    buf.append(f"{C_GRN}CHR  Cache Hit Rate (read / total){R}")
     buf.append(f"{C_GRN}c.r  Cache Read Tokens{R}")
     buf.append(f"{C_GRN}c.w  Cache Write Tokens{R}")
     buf.append(f"{C_CYN}CTX  Context Window{R}")
     buf.append(f"{C_YEL}5HL  5-Hour Rate Limit{R}")
-    buf.append(f"{C_GRN}7DL  7-Day Rate Limit{R}")
+    buf.append(f"{C_YEL}7DL  7-Day Rate Limit{R}")
     buf.append(f"{C_DIM}LNS  Lines Changed{R}")
-    buf.append(f"{C_CYN}CST  Session Cost{R}")
-    buf.append(f"{C_YEL}BRN  Burn Rate ($ / min){R}")
+    buf.append(f"{C_ORN}CST  Session Cost{R}")
+    buf.append(f"{C_ORN}BRN  Burn Rate ($ / min){R}")
     buf.append(f"{C_YEL}CTR  Context Rate (% / min){R}")
     buf.append(f"{C_RED}CTF  Context Full (ETA){R}")
-    buf.append(f"{C_WHT}NOW  Current Time{R}")
-    buf.append(f"{C_GRN}UPD  Last Data Update{R}")
+    buf.append(f"{C_DIM}NOW  Current Time{R}")
+    buf.append(f"{C_DIM}UPD  Last Data Update{R}")
     buf.append("")
     buf.append(f"{C_WHT}{B}KEYS{R}")
     buf.append(sep(SW))

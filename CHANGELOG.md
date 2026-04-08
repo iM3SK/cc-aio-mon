@@ -2,11 +2,22 @@
 
 ## v1.4.2 — 2026-04-08
 
+**Color scheme redesign:**
+- Colors now grouped by semantic category instead of arbitrary assignment
+- Added `C_ORN` (nord12 aurora orange, 208/135/112) for cost/finance metrics
+- CST and BRN changed from cyan/yellow to **orange** — finance metrics visually distinct
+- CHR changed from white to **green** — performance metric, grouped with APR
+- DUR changed from green to **dim** — utility/time, not a health metric
+- NOW changed from white to **dim** — lowest visual priority
+- UPD changed from green to **dim** — utility metric
+- Legend overlay updated to match new color scheme
+- Both `statusline.py` and `monitor.py` palettes synchronized
+
 **Bug fixes:**
 - Statusline bar background now extends to full terminal width in fullscreen — `R` (full ANSI reset) inside segments was killing `BG_BAR` background color; replaced with `RB` (reset + re-apply bar bg) so background persists through all segments, separators, spacer, and `EL` erase-to-end-of-line
 
 **Other:**
-- `tests.py` expanded from 41 to 91 tests — added 50 statusline tests: `_sanitize`, `_get_terminal_width`, all 13 segment builders, `build_line` layout, `RB` bar background persistence (regression tests for the fullscreen fix), `_calc_rates`
+- `tests.py` expanded from 41 to 96 tests — added 55 statusline tests: `_sanitize`, `_get_terminal_width`, all 13 segment builders with color assertions, `build_line` layout, `RB` bar background persistence (regression tests for the fullscreen fix), `_calc_rates`
 
 ## v1.4.1 — 2026-04-08
 
