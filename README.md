@@ -198,7 +198,7 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 ### IPC Details
 
 - State files: atomic write via `NamedTemporaryFile` + `os.replace()` (no partial reads)
-- History: append-only JSONL, auto-trimmed when file exceeds 1 MB (keeps last 1000 entries)
+- History: append-only JSONL written only after the snapshot write succeeds — keeps `.json` and `.jsonl` in sync; auto-trimmed when file exceeds 1 MB (keeps last 1000 entries)
 - Stale `.tmp` files older than 60 seconds cleaned up automatically
 - Session detection: files older than 30 minutes marked as stale — all metrics dimmed (last known values preserved), header shows `STALE`
 

@@ -167,7 +167,8 @@ BAR_W = 25     # fixed bar width for ALL metrics
 # Formatting
 # ---------------------------------------------------------------------------
 def f_tok(n):
-    if n is None or n == 0:
+    n = _num(n, 0)
+    if n == 0:
         return "--"
     if n < 1000:
         return f"{int(n):,}"
@@ -179,7 +180,8 @@ def f_tok(n):
 
 
 def f_cost(usd):
-    if usd is None or usd <= 0:
+    usd = _num(usd, 0)
+    if usd <= 0:
         return "--"
     if usd < 0.01:
         return f"{usd:.4f} $"
@@ -189,6 +191,7 @@ def f_cost(usd):
 def f_cd(epoch):
     if epoch is None:
         return "--"
+    epoch = _num(epoch, 0)
     diff = int(epoch - time.time())
     if diff <= 0:
         return "now"
@@ -203,7 +206,8 @@ def f_cd(epoch):
 
 
 def f_dur(ms):
-    if ms is None or ms <= 0:
+    ms = _num(ms, 0)
+    if ms <= 0:
         return "--"
     s = int(ms / 1000)
     if s < 60:
@@ -386,6 +390,42 @@ def spin_line():
     return _LINE[_line_idx % len(_LINE)]
 
 
+def _fit_buf_height(buf, rows, *, clip_tail=False):
+    """Stlačí prázdne riadky zdola. Dashboard: drží spodné 3 riadky (pätička), zvyšok zhora. Legenda/picker: drží spodok."""
+    try:
+        rows = int(rows)
+    except (TypeError, ValueError):
+        rows = 24
+    rows = max(1, rows)
+    target = max(1, rows - 1)
+    tail = []
+    if not clip_tail:
+        n = min(3, max(0, target - 1))
+        if n and len(buf) >= n:
+            tail = buf[-n:]
+            del buf[-n:]
+    sub_target = target - len(tail)
+    while len(buf) > sub_target:
+        shrunk = False
+        for i in range(len(buf) - 1, -1, -1):
+            if buf[i] == "":
+                buf.pop(i)
+                shrunk = True
+                break
+        if not shrunk:
+            break
+    if len(buf) > sub_target:
+        if clip_tail:
+            buf[:] = buf[-sub_target:]
+        else:
+            buf[:] = buf[:sub_target]
+    while len(buf) < sub_target:
+        buf.append("")
+    buf.extend(tail)
+    while len(buf) < target:
+        buf.append("")
+
+
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
@@ -403,7 +443,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     cw = data.get("context_window", {})
     ctx_pct = round(_num(cw.get("used_percentage")), 1)
-    ctx_total = cw.get("context_window_size", 0)
+    ctx_total = _num(cw.get("context_window_size"), 0)
     usage = cw.get("current_usage") or {}
     exceeds = data.get("exceeds_200k_tokens", False)
 
@@ -451,10 +491,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append(sep(SW))
     buf.append("")
 
-    inp = usage.get("input_tokens", 0)
-    out = usage.get("output_tokens", 0)
-    cr = usage.get("cache_read_input_tokens", 0)
-    cwt = usage.get("cache_creation_input_tokens", 0)
+    inp = _num(usage.get("input_tokens", 0))
+    out = _num(usage.get("output_tokens", 0))
+    cr = _num(usage.get("cache_read_input_tokens", 0))
+    cwt = _num(usage.get("cache_creation_input_tokens", 0))
 
     # ── APR — API Ratio ─────────────────────────────────────
     if dur > 0:
@@ -568,25 +608,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
 
-    # Shrink: remove empty lines bottom-up (sections compress smoothly)
-    target = rows - 1
-    while len(buf) > target:
-        _shrunk = False
-        for i in range(len(buf) - 1, -1, -1):
-            if buf[i] == "":
-                buf.pop(i)
-                _shrunk = True
-                break
-        if not _shrunk:
-            break
-    # Last resort: clip from bottom if still too tall
-    if len(buf) > target:
-        buf = buf[:target]
-
-    # Pad if terminal is bigger
-    while len(buf) < target:
-        buf.append("")
-
+    _fit_buf_height(buf, rows, clip_tail=False)
     return buf
 
 
@@ -626,9 +648,7 @@ def render_legend(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    while len(buf) < rows - 1:
-        buf.append("")
-
+    _fit_buf_height(buf, rows, clip_tail=True)
     return buf
 
 
@@ -659,9 +679,7 @@ def render_picker(sessions, cols, rows):
     buf.append(sep(W))
     buf.append(f"  {C_DIM}press 1-9 to select {H} q to quit{R}")
 
-    while len(buf) < rows - 1:
-        buf.append("")
-
+    _fit_buf_height(buf, rows, clip_tail=True)
     return buf
 
 

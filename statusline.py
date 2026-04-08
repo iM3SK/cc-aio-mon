@@ -64,9 +64,17 @@ SEP = f" {C_DIM}\u2502{R} "  # │
 SEP_VLEN = 3  # " │ "
 
 
+def _num(v, default=0):
+    """Safely coerce value to float (handles None, strings, etc.)."""
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+
 
 def f_dur(ms):
-    if ms is None or ms <= 0:
+    ms = _num(ms, 0)
+    if ms <= 0:
         return "--"
     s = int(ms / 1000)
     if s < 60:
@@ -79,7 +87,8 @@ def f_dur(ms):
 
 
 def f_tok(n):
-    if n is None or n == 0:
+    n = _num(n, 0)
+    if n == 0:
         return "--"
     if n < 1000:
         return f"{int(n):,}"
@@ -91,7 +100,8 @@ def f_tok(n):
 
 
 def f_cost(usd):
-    if usd is None or usd <= 0:
+    usd = _num(usd, 0)
+    if usd <= 0:
         return "--"
     if usd < 0.01:
         return f"{usd:.4f} $"
@@ -114,21 +124,13 @@ def seg_model(data):
     return text, len(_ANSI_RE.sub("", text))
 
 
-def _num(v, default=0):
-    """Safely coerce value to float (handles None, strings, etc.)."""
-    try:
-        return float(v) if v is not None else default
-    except (TypeError, ValueError):
-        return default
-
-
 def seg_ctx(data):
     cw = data.get("context_window", {})
     pct = round(_num(cw.get("used_percentage")))
-    total = cw.get("context_window_size", 0) or 0
+    total = _num(cw.get("context_window_size"), 0)
     used = int(total * pct / 100) if total else 0
     c = cpc(pct)
-    tok = f" {C_DIM}{f_tok(used)}/{f_tok(total)}{R}" if total else ""
+    tok = f" {C_DIM}{f_tok(used)}/{f_tok(int(total))}{R}" if total else ""
     text = f"{C_CYN}{B}CTX{R} {c}{pct}%{R}{tok}"
     return text, len(_ANSI_RE.sub("", text))
 
@@ -257,22 +259,34 @@ def write_shared_state(data: dict):
     except OSError:
         base.mkdir(exist_ok=True)
 
+    # Serialize once — same rules for snapshot and history (avoid TypeError mid-write)
+    try:
+        snapshot = json.dumps(data)
+        entry = json.dumps({**data, "t": time.time()})
+    except (TypeError, ValueError):
+        return
+
     # Atomic write of current state via unpredictable temp file
     target = base / f"{sid}.json"
+    snapshot_ok = False
     try:
         fd = tempfile.NamedTemporaryFile(
             dir=base, suffix=".tmp", delete=False, mode="w", encoding="utf-8"
         )
-        fd.write(json.dumps(data))
+        fd.write(snapshot)
         fd.close()
         pathlib.Path(fd.name).replace(target)
+        snapshot_ok = True
     except OSError:
         pass
+
+    # History must stay aligned with the latest snapshot (avoid BRN/CTR vs stale JSON)
+    if not snapshot_ok:
+        return
 
     # Append to history JSONL + trim if needed
     hist = base / f"{sid}.jsonl"
     try:
-        entry = json.dumps({**data, "t": time.time()})
         with open(hist, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
         # Trim based on actual file size
