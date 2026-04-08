@@ -130,14 +130,14 @@ Left-aligned (always visible):
 | APR | green | API Ratio — time in API calls vs total session duration |
 | CTX | cyan | Context Window — percentage and token count (used/total) |
 | CHR | green | Cache Hit Rate — cache reads vs total cache operations |
-| 5HL | yellow | 5-Hour Rate Limit — quota consumed in current 5-hour window |
-| 7DL | yellow | 7-Day Rate Limit — quota consumed in current 7-day window |
+| 5HL | dynamic | 5-Hour Rate Limit — green/yellow/red by usage % |
+| 7DL | dynamic | 7-Day Rate Limit — green/yellow/red by usage % |
 
 Right-aligned (dropped from right when terminal is narrow):
 
 | Code | Color | Metric |
 |------|-------|--------|
-| BRN | orange | Cost burn rate ($ / min) |
+| BRN | orange | Cost burn rate ($/min) |
 | CTR | yellow | Context consumption rate (% / min) |
 | CTF | red | Context Full ETA — predicted time to 100% |
 | CST | orange | Total session cost (USD) |
@@ -155,12 +155,12 @@ Right-aligned (dropped from right when terminal is narrow):
 | c.r | green | Cache read tokens (sub-stat under CHR) |
 | c.w | green | Cache write tokens (sub-stat under CHR) |
 | CTX | cyan | Context Window — percentage and token count (used/total) |
-| 5HL | yellow | 5-Hour Rate Limit — quota consumed in current 5-hour window |
-| 7DL | yellow | 7-Day Rate Limit — quota consumed in current 7-day window |
+| 5HL | dynamic | 5-Hour Rate Limit — green/yellow/red by usage % |
+| 7DL | dynamic | 7-Day Rate Limit — green/yellow/red by usage % |
 | LNS | dim | Lines added (green) / removed (red) in session |
 | CST | orange | Total session cost (USD) |
-| BRN | orange | Cost burn rate ($ / min) |
-| CTR | yellow | Context consumption rate (% / min) |
+| BRN | orange | Cost burn rate ($/min) |
+| CTR | yellow | Context consumption rate (%/min) |
 | CTF | red | Context Full ETA — predicted time to 100% |
 | NOW | dim | Current local time |
 | UPD | dim | Time since last data update |

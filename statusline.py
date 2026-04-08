@@ -233,7 +233,7 @@ def seg_5hl(data):
     if resets > 0 and resets < time.time():
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{C_YEL}{B}5HL{RB} {c}{pct}%{RB}"
+    text = f"{c}{B}5HL{RB} {c}{pct}%{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -248,8 +248,8 @@ def seg_7dl(data):
     resets = _num(sd.get("resets_at"), 0)
     if resets > 0 and resets < time.time():
         pct = 0
-    c = cpc_base(pct, C_GRN)
-    text = f"{C_GRN}{B}7DL{RB} {c}{pct}%{RB}"
+    c = cpc_base(pct, C_YEL)
+    text = f"{c}{B}7DL{RB} {c}{pct}%{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 

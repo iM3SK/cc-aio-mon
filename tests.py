@@ -11,7 +11,11 @@ import time
 import unittest
 
 # Import target functions directly
-from monitor import _fit_buf_height, calc_rates, f_tok, f_cost, f_dur, f_cd, _num
+from monitor import (
+    _fit_buf_height, calc_rates, f_tok, f_cost, f_dur, f_cd, _num,
+    _limit_color, _reset_color,
+    C_RED as M_RED, C_YEL as M_YEL, C_GRN as M_GRN, C_DIM as M_DIM,
+)
 
 from statusline import (
     _ANSI_RE,
@@ -20,6 +24,8 @@ from statusline import (
     RB,
     EL,
     C_GRN,
+    C_YEL,
+    C_RED,
     C_ORN,
     C_DIM,
     _get_terminal_width,
@@ -131,6 +137,43 @@ class TestFitBufHeight(unittest.TestCase):
         buf = ["x"] * 9
         _fit_buf_height(buf, 10, clip_tail=True)
         self.assertEqual(len(buf), 9)
+
+
+# ---------------------------------------------------------------------------
+# _limit_color / _reset_color (monitor)
+# ---------------------------------------------------------------------------
+class TestLimitColor(unittest.TestCase):
+
+    def test_low_usage_yellow(self):
+        self.assertEqual(_limit_color(20), M_YEL)
+
+    def test_mid_usage_yellow(self):
+        self.assertEqual(_limit_color(55), M_YEL)
+
+    def test_high_usage_red(self):
+        self.assertEqual(_limit_color(85), M_RED)
+
+
+class TestResetColor(unittest.TestCase):
+
+    def test_lots_of_time_green(self):
+        # Reset in 4h out of 5h window = 80% remaining → green
+        self.assertEqual(_reset_color(time.time() + 14400, 18000), M_GRN)
+
+    def test_some_time_yellow(self):
+        # Reset in 1.5h out of 5h window = 30% remaining → yellow
+        self.assertEqual(_reset_color(time.time() + 5400, 18000), M_YEL)
+
+    def test_little_time_red(self):
+        # Reset in 15min out of 5h window = 5% remaining → red
+        self.assertEqual(_reset_color(time.time() + 900, 18000), M_RED)
+
+    def test_just_reset_green(self):
+        # Reset epoch in the past → just reset
+        self.assertEqual(_reset_color(time.time() - 10, 18000), M_GRN)
+
+    def test_no_data_dim(self):
+        self.assertEqual(_reset_color(0, 18000), M_DIM)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +442,18 @@ class TestSeg5hl(unittest.TestCase):
         self.assertEqual(vl, _vlen(text))
         self.assertIn("5HL", _ANSI_RE.sub("", text))
 
+    def test_low_usage_yellow(self):
+        d = _full_data()
+        d["rate_limits"]["five_hour"]["used_percentage"] = 20
+        text, _ = seg_5hl(d)
+        self.assertIn(C_YEL, text)
+
+    def test_high_usage_red(self):
+        d = _full_data()
+        d["rate_limits"]["five_hour"]["used_percentage"] = 85
+        text, _ = seg_5hl(d)
+        self.assertIn(C_RED, text)
+
     def test_no_rate_limits(self):
         self.assertIsNone(seg_5hl({"rate_limits": None}))
         self.assertIsNone(seg_5hl({}))
@@ -416,6 +471,12 @@ class TestSeg7dl(unittest.TestCase):
         text, vl = seg_7dl(_full_data())
         self.assertEqual(vl, _vlen(text))
         self.assertIn("7DL", _ANSI_RE.sub("", text))
+
+    def test_base_color_yellow(self):
+        d = _full_data()
+        d["rate_limits"]["seven_day"]["used_percentage"] = 10
+        text, _ = seg_7dl(d)
+        self.assertIn(C_YEL, text)  # base is now yellow, not green
 
     def test_none(self):
         self.assertIsNone(seg_7dl({}))

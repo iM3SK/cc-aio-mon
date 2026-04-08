@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.5 — 2026-04-08
+
+**Visual overhaul:**
+- Rate limits (5HL, 7DL) now use dynamic colors based on usage % — green (<50%), yellow (50-79%), red (>=80%) — in both statusline and dashboard. 7DL base color changed from green to yellow (same category as 5HL)
+- "to reset" countdown reformatted: `reset in: 3d 23h` with inverse time coloring — green when plenty of time remains, red when window is almost expired
+- Context alert changed from hardcoded `! >200k` to dynamic `! CTX>80%` — works for any context size (200k, 1M)
+- Header line now has `BG_BAR` background extending to full terminal width (same Nord polar night as statusline)
+- Sub-stat separators changed from ` / ` (dim slash with spaces) to `│` (dim vertical bar, no spaces) — more compact
+- Stats section (CST, BRN, CTR, CTF, NOW, UPD) compacted from 6 rows to 3 rows with `│` separators
+- BRN/CTR unit format compacted: `$ / min` → `$/min`, `% / min` → `%/min`
+- Legend updated with dynamic color notes for rate limits
+
+**New helpers:**
+- `_limit_color(pct)` — dynamic color for rate limit metrics
+- `_reset_color(resets_epoch, window_secs)` — inverse countdown color
+
+**Other:**
+- `tests.py` expanded from 96 to 107 tests — added `_limit_color`, `_reset_color`, dynamic color assertions for 5HL/7DL segments
+
 ## v1.4.2 — 2026-04-08
 
 **Color scheme redesign:**
