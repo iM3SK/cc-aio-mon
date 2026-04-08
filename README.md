@@ -15,13 +15,6 @@
 | ccstatusline | Status line script | No TUI, no multi-session |
 | **CC AIO MON** | Official statusline JSON | Real-time, zero deps, most compact |
 
-<img src="screenshots/cc-aio-mon-dashboard.png" width="480" alt="CC AIO MON v1.5.2 — fullscreen TUI dashboard">
-
-*Fullscreen TUI dashboard with all metrics*
-
-<img src="screenshots/cc-aio-mon-statusline.png" width="600" alt="CC AIO MON v1.5.2 — statusline below Claude Code input">
-
-*Statusline — single line below Claude Code input*
 
 ## Quick Start
 
