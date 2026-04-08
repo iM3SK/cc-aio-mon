@@ -4,9 +4,7 @@
 
 **Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies (stdlib only): `monitor.py`, `statusline.py`, and shared `rates.py`, cross-platform.
 
-<img src="screenshots/setup-full.png" width="720" alt="CC AIO MON v1.5.2 — Claude Code left, full dashboard right">
-
-*Claude Code with statusline (left) + fullscreen TUI dashboard (right)*
+<img src="screenshots/cc-aio-mon-banner.png" width="720" alt="CC AIO MON v1.5.2 — real-time terminal monitor for Claude Code">
 
 ### How is this different?
 
@@ -17,35 +15,13 @@
 | ccstatusline | Status line script | No TUI, no multi-session |
 | **CC AIO MON** | Official statusline JSON | Real-time, zero deps, most compact |
 
-<details>
-<summary>More screenshots</summary>
-<br>
+<img src="screenshots/cc-aio-mon-dashboard.png" width="480" alt="CC AIO MON v1.5.2 — fullscreen TUI dashboard">
 
-<img src="screenshots/statusline.png" width="600" alt="Statusline — Opus 4.6  │  CST  │  CTX  │  5HL  │  7DL  │  DUR">
+*Fullscreen TUI dashboard with all metrics*
 
-*Statusline — single line below Claude Code input, text-only format*
+<img src="screenshots/cc-aio-mon-statusline.png" width="600" alt="CC AIO MON v1.5.2 — statusline below Claude Code input">
 
-<img src="screenshots/setup-compact.png" width="720" alt="CC AIO MON v1.5.2 — Claude Code left, compact dashboard right">
-
-*Claude Code with statusline (left) + compact dashboard (right)*
-
-<img src="screenshots/dashboard-compact.png" width="360" alt="Dashboard compact view">
-
-*Dashboard — compact view with all metrics*
-
-<img src="screenshots/dashboard-full.png" width="360" alt="Dashboard full view">
-
-*Dashboard — full view with expanded sections*
-
-<img src="screenshots/session-picker.png" width="360" alt="Session picker — select from active Claude Code sessions">
-
-*Session picker — shown on launch when multiple sessions detected*
-
-<img src="screenshots/legend.png" width="360" alt="Legend overlay — abbreviation definitions for all metrics">
-
-*Legend overlay — toggle with `l` key*
-
-</details>
+*Statusline — single line below Claude Code input*
 
 ## Quick Start
 
