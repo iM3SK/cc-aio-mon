@@ -515,8 +515,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     session_label = sname or (sid_str[:16] if _SID_RE.match(sid_str) else "default")
 
     buf.append(sep(SW))
+    hp_plain = f"CC AIO MON {VERSION}  {model_str}"
+    hp_pad = max(0, SW - len(hp_plain))
     hp_text = f"{C_WHT}{B}CC AIO MON {VERSION}{R}{BG_BAR}  {C_CYN}{model_str}{R}{BG_BAR}"
-    buf.append(f"{BG_BAR}{hp_text}{EL}{R}")
+    buf.append(f"{BG_BAR}{hp_text}{' ' * hp_pad}{R}")
 
     # ── Session status line (always visible) ────────────────
     if stale:
@@ -675,8 +677,8 @@ def render_legend(cols, rows):
     buf.append(f"{C_GRN}c.r  Cache Read Tokens{R}")
     buf.append(f"{C_GRN}c.w  Cache Write Tokens{R}")
     buf.append(f"{C_CYN}CTX  Context Window{R}")
-    buf.append(f"{C_YEL}5HL  5-Hour Rate Limit (dynamic color){R}")
-    buf.append(f"{C_YEL}7DL  7-Day Rate Limit (dynamic color){R}")
+    buf.append(f"{C_YEL}5HL  5-Hour Rate Limit{R}")
+    buf.append(f"{C_YEL}7DL  7-Day Rate Limit{R}")
     buf.append(f"{C_DIM}LNS  Lines Changed{R}")
     buf.append(f"{C_ORN}CST  Session Cost{R}")
     buf.append(f"{C_ORN}BRN  Burn Rate ($ / min){R}")
