@@ -64,7 +64,7 @@ Two files, zero dependencies, no install step. Optionally add a shell alias: `al
 
 Runs automatically on each Claude Code status update. Outputs a single colored line below the input area with Nord bar background that extends to full terminal width. Left side: model, API ratio, context %, cache hit rate, rate limits. Right side: burn rate, context rate, context full ETA, cost, duration, clock. Right segments drop when the terminal is narrow.
 
-<img src="screenshots/cc-aio-mon-statusline.png" width="720" alt="CC AIO MON v1.5.2 — built-in status line for Claude Code">
+<img src="screenshots/cc-aio-mon-statusline.png" width="480" alt="CC AIO MON v1.5.2 — built-in status line for Claude Code">
 
 ### Dashboard
 
