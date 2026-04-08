@@ -104,6 +104,7 @@ VERSION = "1.3"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
+STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 
 
 def _num(v, default=0):
@@ -277,7 +278,7 @@ def list_sessions():
             d = json.loads(f.read_text(encoding="utf-8"))
             sessions.append({
                 "id": sid, "mtime": mt, "age": age,
-                "stale": age > 300,
+                "stale": age > STALE_THRESHOLD,
                 "model": _sanitize(d.get("model", {}).get("display_name", "?")),
                 "session_name": _sanitize(d.get("session_name", "")),
                 "cwd": _sanitize(d.get("cwd", "")),
@@ -398,17 +399,12 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     removed = int(_num(cost_d.get("total_lines_removed")))
     cpm, xpm = calc_rates(hist)
 
-    # -- Stale session: zero out all live metrics --
-    if stale:
-        ctx_pct = 0.0
-        usage = {}
-        exceeds = False
-        dur = 0
-        api_dur = 0
-        cpm, xpm = None, None
-        usd = 0
-        added = 0
-        removed = 0
+    # -- Stale session: dim color palette, keep last known values --
+    _C = C_DIM if stale else None  # override color when stale
+
+    def c(normal):
+        """Return dim color when stale, normal color otherwise."""
+        return _C if _C else normal
 
     SW = W
 
@@ -430,11 +426,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     # ── APR — API Ratio ─────────────────────────────────────
     if dur > 0:
         apr_pct = round(api_dur / dur * 100, 1)
-        buf.append(f"{C_GRN}{B}APR{R} {mkbar(apr_pct, C_GRN)}")
+        buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
         buf.append("")
-        buf.append(f"    {C_GRN}DUR {f_dur(dur)}{R} {C_DIM}/{R} {C_GRN}API {f_dur(api_dur)}{R}")
+        buf.append(f"    {c(C_GRN)}DUR {f_dur(dur)}{R} {C_DIM}/{R} {c(C_GRN)}API {f_dur(api_dur)}{R}")
     else:
-        buf.append(f"{C_GRN}{B}APR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
         buf.append("")
         buf.append(f"    {C_DIM}no active session{R}")
     buf.append("")
@@ -445,11 +441,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     if any([cr, cwt]):
         total_cache = cr + cwt
         chr_pct = round(cr / total_cache * 100, 1) if total_cache > 0 else 0
-        buf.append(f"{C_WHT}{B}CHR{R} {mkbar(chr_pct, C_WHT)}")
+        buf.append(f"{c(C_WHT)}{B}CHR{R} {mkbar(chr_pct, c(C_WHT))}")
         buf.append("")
-        buf.append(f"    {C_GRN}c.r:{R} {C_GRN}{f_tok(cr)}{R} {C_DIM}/{R} {C_GRN}c.w:{R} {C_GRN}{f_tok(cwt)}{R}")
+        buf.append(f"    {c(C_GRN)}c.r:{R} {c(C_GRN)}{f_tok(cr)}{R} {C_DIM}/{R} {c(C_GRN)}c.w:{R} {c(C_GRN)}{f_tok(cwt)}{R}")
     else:
-        buf.append(f"{C_WHT}{B}CHR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"{c(C_WHT)}{B}CHR{R} {mkbar(0, C_DIM)}")
         buf.append("")
         buf.append(f"    {C_DIM}no cache data{R}")
     buf.append("")
@@ -458,13 +454,13 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     # ── CTX ─────────────────────────────────────────────────
     ctx_used = int(ctx_total * ctx_pct / 100) if ctx_total else 0
-    buf.append(f"{C_CYN}{B}CTX{R} {mkbar(ctx_pct, C_CYN)}")
+    buf.append(f"{c(C_CYN)}{B}CTX{R} {mkbar(ctx_pct, c(C_CYN))}")
     buf.append("")
-    warn = f"  {C_RED}{B}! >200k{R}" if exceeds else ""
+    warn = f"  {c(C_RED)}{B}! >200k{R}" if exceeds else ""
     if any([inp, out]):
-        buf.append(f"    {C_CYN}{f_tok(ctx_used)}{R} {C_DIM}/{R} {C_CYN}{f_tok(ctx_total)}{R}{warn} {C_DIM}/{R} {C_WHT}in:{R} {C_WHT}{f_tok(inp)}{R} {C_DIM}/{R} {C_WHT}out:{R} {C_WHT}{f_tok(out)}{R}")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}/{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn} {C_DIM}/{R} {c(C_WHT)}in:{R} {c(C_WHT)}{f_tok(inp)}{R} {C_DIM}/{R} {c(C_WHT)}out:{R} {c(C_WHT)}{f_tok(out)}{R}")
     else:
-        buf.append(f"    {C_CYN}{f_tok(ctx_used)}{R} {C_DIM}/{R} {C_CYN}{f_tok(ctx_total)}{R}{warn}")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}/{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn}")
         buf.append(f"    {C_DIM}awaiting first api call{R}")
     buf.append("")
     buf.append(sep(SW))
@@ -478,9 +474,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             resets = fh.get("resets_at")
             if resets and resets < time.time():
                 pct = 0.0
-            buf.append(f"{C_YEL}{B}5HL{R} {mkbar(pct, C_YEL)}")
+            buf.append(f"{c(C_YEL)}{B}5HL{R} {mkbar(pct, c(C_YEL))}")
             buf.append("")
-            buf.append(f"    {C_FG}{f_cd(resets)}{R} {C_RED}to reset{R}")
+            buf.append(f"    {c(C_FG)}{f_cd(resets)}{R} {c(C_RED)}to reset{R}")
             buf.append("")
 
         # ── 7DL ─────────────────────────────────────────────
@@ -490,9 +486,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             resets = sd.get("resets_at")
             if resets and resets < time.time():
                 pct = 0.0
-            buf.append(f"{C_GRN}{B}7DL{R} {mkbar(pct, C_GRN)}")
+            buf.append(f"{c(C_GRN)}{B}7DL{R} {mkbar(pct, c(C_GRN))}")
             buf.append("")
-            buf.append(f"    {C_FG}{f_cd(resets)}{R} {C_RED}to reset{R}")
+            buf.append(f"    {c(C_FG)}{f_cd(resets)}{R} {c(C_RED)}to reset{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
 
@@ -501,25 +497,25 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     # ── LNS ─────────────────────────────────────────────────
     if added or removed:
-        buf.append(f"{C_DIM}LNS{R}  {C_GRN}+{added:,}{R} {C_RED}-{removed:,}{R}")
+        buf.append(f"{C_DIM}LNS{R}  {c(C_GRN)}+{added:,}{R} {c(C_RED)}-{removed:,}{R}")
 
     buf.append(sep(SW))
     buf.append("")
 
     # ── Stats ───────────────────────────────────────────────
-    buf.append(f"{C_CYN}CST  {B}{f_cost(usd)}{R}")
+    buf.append(f"{c(C_CYN)}CST  {B}{f_cost(usd)}{R}")
     brn_val = f"{cpm:.4f} $ / min" if cpm and cpm > 0.0001 else "collecting..."
-    buf.append(f"{C_YEL}BRN  {B}{brn_val}{R}")
+    buf.append(f"{c(C_YEL)}BRN  {B}{brn_val}{R}")
     ctr_val = f"{xpm:.2f} % / min" if xpm and xpm > 0.001 else "--"
-    buf.append(f"{C_YEL}CTR  {ctr_val}{R}")
+    buf.append(f"{c(C_YEL)}CTR  {ctr_val}{R}")
     ctf_val = "--"
     if xpm and xpm > 0 and ctx_pct < 100:
         rem_pct = 100 - ctx_pct
         ctf_val = datetime.fromtimestamp(time.time() + (rem_pct / xpm) * 60).strftime("%H:%M")
-    buf.append(f"{C_RED}CTF  {B}{ctf_val}{R}")
+    buf.append(f"{c(C_RED)}CTF  {B}{ctf_val}{R}")
     buf.append("")
     now = datetime.now().strftime("%H:%M:%S")
-    buf.append(f"{C_WHT}NOW  {B}{now}{R}")
+    buf.append(f"{c(C_WHT)}NOW  {B}{now}{R}")
 
     sid_str = str(data.get("session_id", "default"))
     if _SID_RE.match(sid_str):
@@ -531,7 +527,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             age_s = "?"
     else:
         age_s = "?"
-    buf.append(f"{C_GRN}UPD  {age_s}{R}")
+    buf.append(f"{c(C_GRN)}UPD  {age_s}{R}")
 
     buf.append("")
 
@@ -773,9 +769,11 @@ def main():
             except OSError:
                 hmt = 0
             if hmt != last_hist_mt:
-                last_hist = load_history(sid)
+                h = load_history(sid)
+                if h:
+                    last_hist = h
                 last_hist_mt = hmt
-            is_stale = (time.monotonic() - last_seen) > 300 if last_seen else False
+            is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
             try:
                 flush(render_frame(last_data, last_hist, cols, rows, show_legend, stale=is_stale), cols)
             except (TypeError, ValueError, KeyError, ZeroDivisionError):

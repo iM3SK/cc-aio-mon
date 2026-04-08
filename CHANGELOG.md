@@ -11,8 +11,10 @@
 - All 6 segments fit in 80 columns (previously only 3 of 8 were visible)
 
 **Bug fixes:**
-- APR and CHR sections no longer disappear when session is stale — show 0% placeholder bar with descriptive text instead of blank space
-- Stale session now zeroes CST, LNS (added/removed) — previously showed leftover data from last active session
+- Stale sessions no longer zero out all metrics — last known values preserved with dimmed colors instead of blank bars
+- Stale threshold increased from 5 minutes to 30 minutes (`STALE_THRESHOLD` constant) — Claude Code emits no events during idle, 5 min was too aggressive
+- `load_history` error no longer replaces good history with empty list — prevents BRN/CTR/CTF from disappearing on transient I/O errors
+- APR and CHR sections show 0% placeholder bar with descriptive text when no data available (independent of stale state)
 - DUR segment label now bold (consistent with all other segment labels)
 - Spinner comment corrected (50ms, not 80ms)
 - Legend LNS color fixed to match render (dim, not green)

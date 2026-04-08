@@ -86,7 +86,7 @@ Two files, zero dependencies, no install step. Optionally add a shell alias: `al
 - **Nord color palette** — truecolor ANSI output with consistent color-coded sections.
 - **Responsive layout** — statusline drops segments to fit narrow terminals. Dashboard adapts to any terminal size.
 - **Multi-session support** — auto-detects active sessions. Numbered picker when multiple sessions are running.
-- **Stale detection** — session data older than 5 minutes resets all bars to zero and shows `STALE` in the header.
+- **Stale detection** — session data older than 30 minutes dims all metrics and shows `STALE` in the header. Last known values remain visible.
 - **Security hardened** — path traversal prevention, escape injection protection, atomic file reads/writes, file size limits.
 
 ## Usage
@@ -106,7 +106,7 @@ python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Session Picker
 
-When multiple Claude Code sessions are running, the monitor shows an interactive session picker on launch. Press `1-9` to select a session. Sessions marked `(stale)` haven't received updates in over 5 minutes. With a single active session, the monitor connects automatically.
+When multiple Claude Code sessions are running, the monitor shows an interactive session picker on launch. Press `1-9` to select a session. Sessions marked `(stale)` haven't received updates in over 30 minutes. With a single active session, the monitor connects automatically.
 
 ### Keyboard Shortcuts
 
@@ -199,7 +199,7 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 - State files: atomic write via `NamedTemporaryFile` + `os.replace()` (no partial reads)
 - History: append-only JSONL, auto-trimmed when file exceeds 1 MB (keeps last 1000 entries)
 - Stale `.tmp` files older than 60 seconds cleaned up automatically
-- Session detection: files older than 5 minutes marked as stale — all progress bars reset to zero, header shows `STALE`
+- Session detection: files older than 30 minutes marked as stale — all metrics dimmed (last known values preserved), header shows `STALE`
 
 ### Security
 
