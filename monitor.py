@@ -13,6 +13,7 @@ Usage:
 import argparse
 import atexit
 import json
+import os
 import pathlib
 import platform
 import re
@@ -30,6 +31,7 @@ IS_WIN = platform.system() == "Windows"
 _term_state = None
 
 if IS_WIN:
+    import ctypes
     import msvcrt
 
     def poll_key():
@@ -42,7 +44,21 @@ if IS_WIN:
         return None
 
     def _setup_term():
-        pass
+        """Enable VT/ANSI processing on Windows console."""
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        ENABLE_PROCESSED_OUTPUT = 0x0001
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            if handle == -1 or handle == 0:
+                return
+            mode = ctypes.c_ulong(0)
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return
+            new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT
+            kernel32.SetConsoleMode(handle, new_mode)
+        except Exception:
+            pass
 
     def _restore_term():
         pass
@@ -100,7 +116,7 @@ C_WHT = E + "38;2;216;222;233m"
 C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
@@ -732,6 +748,18 @@ def main():
             nm = s["session_name"] or "--"
             print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag}")
         return
+
+    # Terminal capability checks — must run before any ANSI output
+    if not sys.stdout.isatty():
+        sys.exit(
+            "Error: stdout is not a TTY.\n"
+            "Run monitor.py directly in a terminal — do not pipe or redirect output."
+        )
+    if os.environ.get("TERM") == "dumb":
+        sys.exit(
+            "Error: dumb terminal detected (TERM=dumb).\n"
+            "Use a terminal with ANSI support: Windows Terminal, iTerm2, xterm, Kitty, Alacritty."
+        )
 
     _setup_term()
     sys.stdout.write(ALT_ON + HIDE_CUR + CLR)

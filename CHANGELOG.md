@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.2 — 2026-04-08
+
+**Bug fixes:**
+- Statusline bar background now extends to full terminal width in fullscreen — `R` (full ANSI reset) inside segments was killing `BG_BAR` background color; replaced with `RB` (reset + re-apply bar bg) so background persists through all segments, separators, spacer, and `EL` erase-to-end-of-line
+
+**Other:**
+- `tests.py` expanded from 41 to 91 tests — added 50 statusline tests: `_sanitize`, `_get_terminal_width`, all 13 segment builders, `build_line` layout, `RB` bar background persistence (regression tests for the fullscreen fix), `_calc_rates`
+
 ## v1.4.1 — 2026-04-08
 
 **Bug fixes:**

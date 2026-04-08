@@ -93,7 +93,7 @@ Two files, zero dependencies, no install step. Optionally add a shell alias: `al
 
 ### Statusline
 
-Runs automatically on each Claude Code status update. Outputs a single colored line below the input area: model, cost, context %, rate limits, duration. Segments drop from right when the terminal is narrow.
+Runs automatically on each Claude Code status update. Outputs a single colored line below the input area with Nord bar background that extends to full terminal width. Left side: model, API ratio, context %, cache hit rate, rate limits. Right side: burn rate, context rate, context full ETA, cost, duration, clock. Right segments drop when the terminal is narrow.
 
 ### Dashboard
 
@@ -122,14 +122,27 @@ The session picker is shown on launch when multiple sessions are available or ac
 
 ### Statusline Segments
 
+Left-aligned (always visible):
+
 | Code | Color | Metric |
 |------|-------|--------|
 | (model) | white | Model display name |
-| CST | cyan | Total session cost (USD) |
+| APR | green | API Ratio — time in API calls vs total session duration |
 | CTX | cyan | Context Window — percentage and token count (used/total) |
+| CHR | white | Cache Hit Rate — cache reads vs total cache operations |
 | 5HL | yellow | 5-Hour Rate Limit — quota consumed in current 5-hour window |
 | 7DL | green | 7-Day Rate Limit — quota consumed in current 7-day window |
+
+Right-aligned (dropped from right when terminal is narrow):
+
+| Code | Color | Metric |
+|------|-------|--------|
+| BRN | yellow | Cost burn rate ($ / min) |
+| CTR | yellow | Context consumption rate (% / min) |
+| CTF | red | Context Full ETA — predicted time to 100% |
+| CST | cyan | Total session cost (USD) |
 | DUR | green | Session duration |
+| NOW | white | Current local time |
 
 ### Dashboard Metrics
 
@@ -234,6 +247,12 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 **Statusline not appearing**
 - Verify the path in `statusLine.command` is correct and uses forward slashes.
 - Test manually: `echo '{"context_window": {"used_percentage": 42}}' | python statusline.py`
+
+**Raw escape codes visible / characters scrolling down the screen**
+- Your terminal does not support ANSI escape sequences. The monitor now detects this on startup and exits with an error instead of rendering garbled output.
+- Use a terminal with ANSI support: **Windows Terminal**, iTerm2, xterm, Kitty, Alacritty, or any modern terminal emulator.
+- Terminals known to cause this: standalone `cmd.exe`, some older PowerShell console windows, any terminal with `TERM=dumb`.
+- Quick test: `python -c "print('\033[32mGREEN\033[0m')"` — if you see `[32mGREEN[0m` instead of colored text, your terminal lacks ANSI support.
 
 **Garbled output / encoding errors on Windows**
 - Run `chcp 65001` in your terminal for UTF-8 mode.
