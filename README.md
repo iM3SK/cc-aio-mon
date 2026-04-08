@@ -106,7 +106,7 @@ python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Session Picker
 
-The session picker is shown on launch when multiple sessions are available or accessible anytime by pressing `s`. Press `1-9` to select a session. The picker lists both live and stale sessions — sessions marked `(stale)` haven't received updates in over 30 minutes. With a single active session, the monitor connects automatically without showing the picker.
+The session picker is shown on launch when multiple sessions are available or accessible anytime by pressing `s`. Press `1-20` to select a session. The picker lists both live and stale sessions — sessions marked `(stale)` haven't received updates in over 30 minutes. With a single active session, the monitor connects automatically without showing the picker.
 
 ### Keyboard Shortcuts
 
@@ -116,7 +116,7 @@ The session picker is shown on launch when multiple sessions are available or ac
 | `r` | Force refresh data (resets stale timer) |
 | `l` | Toggle legend overlay |
 | `s` | Switch session (return to picker) |
-| `1-9` | Select session (picker) |
+| `1-20` | Select session (picker) |
 
 ## Metrics Reference
 

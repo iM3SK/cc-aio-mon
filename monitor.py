@@ -644,7 +644,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}r{R}    {C_DIM}Refresh (reset stale){R}")
     buf.append(f"{C_WHT}s{R}    {C_DIM}Session picker{R}")
     buf.append(f"{C_WHT}l{R}    {C_DIM}Legend toggle{R}")
-    buf.append(f"{C_WHT}1-9{R}  {C_DIM}Select session{R}")
+    buf.append(f"{C_WHT}1-20{R} {C_DIM}Select session{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
@@ -677,7 +677,7 @@ def render_picker(sessions, cols, rows):
 
     buf.append("")
     buf.append(sep(W))
-    buf.append(f"  {C_DIM}press 1-9 to select {H} q to quit{R}")
+    buf.append(f"  {C_DIM}press 1-20 to select {H} q to quit{R}")
 
     _fit_buf_height(buf, rows, clip_tail=True)
     return buf
