@@ -500,28 +500,28 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append("")
 
     # ── 5HL ─────────────────────────────────────────────────
-    if rl:
+    if rl is not None:
         fh = rl.get("five_hour")
         if fh:
             pct = round(_num(fh.get("used_percentage")), 1)
-            resets = fh.get("resets_at")
-            if resets and resets < time.time():
+            resets = _num(fh.get("resets_at"), 0)
+            if resets > 0 and resets < time.time():
                 pct = 0.0
             buf.append(f"{c(C_YEL)}{B}5HL{R} {mkbar(pct, c(C_YEL))}")
             buf.append("")
-            buf.append(f"    {c(C_FG)}{f_cd(resets)}{R} {c(C_RED)}to reset{R}")
+            buf.append(f"    {c(C_FG)}{f_cd(resets if resets > 0 else None)}{R} {c(C_RED)}to reset{R}")
             buf.append("")
 
         # ── 7DL ─────────────────────────────────────────────
         sd = rl.get("seven_day")
         if sd:
             pct = round(_num(sd.get("used_percentage")), 1)
-            resets = sd.get("resets_at")
-            if resets and resets < time.time():
+            resets = _num(sd.get("resets_at"), 0)
+            if resets > 0 and resets < time.time():
                 pct = 0.0
             buf.append(f"{c(C_GRN)}{B}7DL{R} {mkbar(pct, c(C_GRN))}")
             buf.append("")
-            buf.append(f"    {c(C_FG)}{f_cd(resets)}{R} {c(C_RED)}to reset{R}")
+            buf.append(f"    {c(C_FG)}{f_cd(resets if resets > 0 else None)}{R} {c(C_RED)}to reset{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
 

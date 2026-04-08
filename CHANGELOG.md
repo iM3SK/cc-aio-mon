@@ -17,6 +17,10 @@
 
 **Bug fixes:**
 - Fixed ghost header duplication at bottom of screen — flush now clears remaining lines below buffer (`\033[J`)
+- `seg_cost` and `seg_dur` in statusline.py now use `_num()` — prevents TypeError when values arrive as strings
+- `resets_at` timestamps in 5HL/7DL normalized via `_num()` in both statusline.py and monitor.py — prevents TypeError on non-numeric values
+- History JSONL timestamp `"t"` can no longer be overwritten by upstream data (`{**data, "t": ...}` instead of `{"t": ..., **data}`)
+- `rate_limits: {}` (empty dict) no longer treated as missing — uses `is not None` check in monitor.py
 
 ## v1.3 — 2026-04-08
 

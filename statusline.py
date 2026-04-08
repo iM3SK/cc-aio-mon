@@ -141,8 +141,8 @@ def seg_5hl(data):
     if not fh:
         return None
     pct = round(_num(fh.get("used_percentage")))
-    resets = fh.get("resets_at")
-    if resets and resets < time.time():
+    resets = _num(fh.get("resets_at"), 0)
+    if resets > 0 and resets < time.time():
         pct = 0
     c = cpc(pct)
     text = f"{C_YEL}{B}5HL{R} {c}{pct}%{R}"
@@ -157,8 +157,8 @@ def seg_7dl(data):
     if not sd:
         return None
     pct = round(_num(sd.get("used_percentage")))
-    resets = sd.get("resets_at")
-    if resets and resets < time.time():
+    resets = _num(sd.get("resets_at"), 0)
+    if resets > 0 and resets < time.time():
         pct = 0
     c = cpc(pct)
     text = f"{C_GRN}{B}7DL{R} {c}{pct}%{R}"
@@ -166,7 +166,7 @@ def seg_7dl(data):
 
 
 def seg_cost(data):
-    usd = data.get("cost", {}).get("total_cost_usd", 0) or 0
+    usd = _num(data.get("cost", {}).get("total_cost_usd"))
     if usd <= 0:
         return None
     text = f_cost(usd)
@@ -176,7 +176,7 @@ def seg_cost(data):
 
 
 def seg_dur(data):
-    ms = data.get("cost", {}).get("total_duration_ms", 0) or 0
+    ms = _num(data.get("cost", {}).get("total_duration_ms"))
     if ms <= 0:
         return None
     d = f_dur(ms)
@@ -272,7 +272,7 @@ def write_shared_state(data: dict):
     # Append to history JSONL + trim if needed
     hist = base / f"{sid}.jsonl"
     try:
-        entry = json.dumps({"t": time.time(), **data})
+        entry = json.dumps({**data, "t": time.time()})
         with open(hist, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
         # Trim based on actual file size
