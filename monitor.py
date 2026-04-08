@@ -566,7 +566,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     # ── Footer ──────────────────────────────────────────────
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R} {C_DIM}quit{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R} {C_DIM}refresh{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R} {C_DIM}sessions{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R} {C_DIM}legend{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
 
     # Shrink: remove empty lines bottom-up (sections compress smoothly)
     target = rows - 1
@@ -615,6 +615,14 @@ def render_legend(cols, rows):
     buf.append(f"{C_RED}CTF  Context Full (ETA){R}")
     buf.append(f"{C_WHT}NOW  Current Time{R}")
     buf.append(f"{C_GRN}UPD  Last Data Update{R}")
+    buf.append("")
+    buf.append(f"{C_WHT}{B}KEYS{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_WHT}q{R}    {C_DIM}Quit{R}")
+    buf.append(f"{C_WHT}r{R}    {C_DIM}Refresh (reset stale){R}")
+    buf.append(f"{C_WHT}s{R}    {C_DIM}Session picker{R}")
+    buf.append(f"{C_WHT}l{R}    {C_DIM}Legend toggle{R}")
+    buf.append(f"{C_WHT}1-9{R}  {C_DIM}Select session{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
@@ -668,6 +676,8 @@ def flush(buf, cols=None):
         out.append(truncate(line, cols))
         out.append(EL)
         out.append("\n")
+    # Clear any leftover lines below the buffer from previous frames
+    out.append(E + "J")  # erase from cursor to end of screen
     out.append(SYNC_OFF)
     sys.stdout.write("".join(out))
     sys.stdout.flush()

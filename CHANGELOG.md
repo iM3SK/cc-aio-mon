@@ -12,6 +12,11 @@
 - Header now text-only (removed dots12 braille spinner) — displays `CC AIO MON 1.4  model`
 - Removed `STALE` tag from header (replaced by session status line showing inactive duration)
 - Separator line moved below session status (was between header and content)
+- Footer shortcuts condensed: `[q]qt [r]rf [s]se [l]le`
+- Legend overlay now includes KEYS section with all keyboard shortcuts
+
+**Bug fixes:**
+- Fixed ghost header duplication at bottom of screen — flush now clears remaining lines below buffer (`\033[J`)
 
 ## v1.3 — 2026-04-08
 
