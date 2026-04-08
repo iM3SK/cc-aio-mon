@@ -1,0 +1,26 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.os == 'windows-latest' && '3.12' || matrix.python-version }}
+      - name: Compile check
+        run: python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"
+      - name: Run tests
+        run: python tests.py
+    # Skip duplicate python versions on Windows (only 3.12)
+    # Ubuntu tests both 3.8 and 3.12 for compat coverage
