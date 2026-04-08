@@ -246,7 +246,7 @@ def main():
 # IPC — shared state for monitor.py
 # ---------------------------------------------------------------------------
 HISTORY_TRIM_TO = 1000
-MAX_FILE_SIZE = 1_048_576  # 1 MB
+MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with monitor.py
 
 
 def write_shared_state(data: dict):

@@ -103,7 +103,7 @@ C_FG = E + "38;2;180;186;200m"
 VERSION = "1.4"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
-MAX_FILE_SIZE = 1_048_576  # 1 MB
+MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 
 
@@ -335,6 +335,9 @@ def calc_rates(hist):
     if len(hist) < 2:
         return None, None
     t0, t1 = hist[0].get("t", 0), hist[-1].get("t", 0)
+    # Sanity: reject missing or implausible timestamps (pre-2020)
+    if t0 < 1_577_836_800 or t1 < 1_577_836_800:
+        return None, None
     dt = t1 - t0
     if dt < 10:
         return None, None
@@ -562,6 +565,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             buf.append(f"{c(C_GRN)}{B}7DL{R} {mkbar(pct, c(C_GRN))}")
             buf.append("")
             buf.append(f"    {c(C_FG)}{f_cd(resets if resets > 0 else None)}{R} {c(C_RED)}to reset{R}")
+
+        if not fh and not sd:
+            buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
 
