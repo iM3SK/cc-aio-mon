@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.1 — 2026-04-08
+
+**Bug fixes:**
+- `rate_limits: {}` (empty object) now shows "Rate limits: no data" instead of silently rendering nothing — distinct from the `null` branch which shows "subscription data unavailable"
+- `calc_rates` rejects timestamps older than 2020-01-01 — prevents nonsense BRN/CTR values when `"t"` field is missing or corrupt in history
+
+**Other:**
+- `MAX_FILE_SIZE` comments in both files note keep-in-sync requirement
+- `tests.py` added — 41 stdlib unittest cases: `_fit_buf_height` (clip modes, edge rows), `calc_rates` (sanity guards), `_num`, formatters (`f_tok`, `f_cost`, `f_dur`, `f_cd`)
+
 ## v1.4 — 2026-04-08
 
 **Features:**

@@ -100,7 +100,7 @@ C_WHT = E + "38;2;216;222;233m"
 C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 
-VERSION = "1.4"
+VERSION = "1.4.1"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
