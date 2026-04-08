@@ -15,7 +15,6 @@ import os
 import pathlib
 import platform
 import re
-import shutil
 import struct
 import sys
 import tempfile
@@ -324,7 +323,10 @@ def seg_ctf(ctr, data):
     if ctx_pct >= 100:
         return None
     rem_pct = 100 - ctx_pct
-    eta = datetime.fromtimestamp(time.time() + (rem_pct / ctr) * 60).strftime("%H:%M")
+    try:
+        eta = datetime.fromtimestamp(time.time() + (rem_pct / ctr) * 60).strftime("%H:%M")
+    except (OverflowError, OSError, ValueError):
+        return None
     text = f"{C_RED}CTF{RB} {C_RED}{B}{eta}{RB}"
     return text, len(_ANSI_RE.sub("", text))
 

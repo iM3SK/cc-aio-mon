@@ -611,13 +611,16 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append(sep(SW))
     buf.append("")
 
-    # ── Stats (compact: 3 rows of 2) ─────────────────────────
+    # ── Stats (compact: CST/BRN/CTR/CTF + NOW/UPD) ───────────
     brn_val = f"{cpm:.4f} $/min" if cpm and cpm > 0.0001 else "collecting..."
     ctr_val = f"{xpm:.2f} %/min" if xpm and xpm > 0.001 else "--"
     ctf_val = "--"
     if xpm and xpm > 0 and ctx_pct < 100:
         rem_pct = 100 - ctx_pct
-        ctf_val = datetime.fromtimestamp(time.time() + (rem_pct / xpm) * 60).strftime("%H:%M")
+        try:
+            ctf_val = datetime.fromtimestamp(time.time() + (rem_pct / xpm) * 60).strftime("%H:%M")
+        except (OverflowError, OSError, ValueError):
+            ctf_val = "--"
     now = datetime.now().strftime("%H:%M:%S")
     sid_str = str(data.get("session_id", "default"))
     if _SID_RE.match(sid_str):
@@ -679,7 +682,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}r{R}    {C_DIM}Refresh (reset stale){R}")
     buf.append(f"{C_WHT}s{R}    {C_DIM}Session picker{R}")
     buf.append(f"{C_WHT}l{R}    {C_DIM}Legend toggle{R}")
-    buf.append(f"{C_WHT}1-20{R} {C_DIM}Select session{R}")
+    buf.append(f"{C_WHT}1-9{R}  {C_DIM}Select session{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
@@ -712,7 +715,7 @@ def render_picker(sessions, cols, rows):
 
     buf.append("")
     buf.append(sep(W))
-    buf.append(f"  {C_DIM}press 1-20 to select {H} q to quit{R}")
+    buf.append(f"  {C_DIM}press 1-9 to select {H} q to quit{R}")
 
     _fit_buf_height(buf, rows, clip_tail=True)
     return buf
@@ -892,8 +895,8 @@ def main():
             is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
             try:
                 flush(render_frame(last_data, last_hist, cols, rows, show_legend, stale=is_stale), cols)
-            except (TypeError, ValueError, KeyError, ZeroDivisionError):
-                pass  # corrupted data — skip frame, retry next tick
+            except (TypeError, ValueError, KeyError, ZeroDivisionError, OverflowError, OSError):
+                pass  # corrupted data or datetime overflow — skip frame, retry next tick
 
             time.sleep(tick)
 

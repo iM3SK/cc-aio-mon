@@ -78,7 +78,7 @@ python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Session Picker
 
-The session picker is shown on launch when multiple sessions are available or accessible anytime by pressing `s`. Press `1-20` to select a session. The picker lists both live and stale sessions — sessions marked `(stale)` haven't received updates in over 30 minutes. With a single active session, the monitor connects automatically without showing the picker.
+The session picker is shown on launch when multiple sessions are available or accessible anytime by pressing `s`. Press `1-9` to select a session. The picker lists both live and stale sessions — sessions marked `(stale)` haven't received updates in over 30 minutes. With exactly one session (active, not stale), the monitor connects automatically without showing the picker.
 
 ### Keyboard Shortcuts
 
@@ -88,7 +88,7 @@ The session picker is shown on launch when multiple sessions are available or ac
 | `r` | Force refresh data (resets stale timer) |
 | `l` | Toggle legend overlay |
 | `s` | Switch session (return to picker) |
-| `1-20` | Select session (picker) |
+| `1-9` | Select session (picker) |
 
 ## Metrics Reference
 
@@ -102,8 +102,8 @@ Left-aligned (always visible):
 | APR | green | API Ratio — time in API calls vs total session duration |
 | CTX | cyan | Context Window — percentage and token count (used/total) |
 | CHR | green | Cache Hit Rate — cache reads vs total cache operations |
-| 5HL | dynamic | 5-Hour Rate Limit — yellow/orange/red by usage % |
-| 7DL | dynamic | 7-Day Rate Limit — yellow/orange/red by usage % |
+| 5HL | dynamic | 5-Hour Rate Limit — yellow/red by usage % |
+| 7DL | dynamic | 7-Day Rate Limit — yellow/red by usage % |
 
 Right-aligned (dropped from right when terminal is narrow):
 
@@ -127,8 +127,8 @@ Right-aligned (dropped from right when terminal is narrow):
 | c.r | green | Cache read tokens (sub-stat under CHR, displayed as `c.r: 43.6k`) |
 | c.w | green | Cache write tokens (sub-stat under CHR, displayed as `c.w: 728`) |
 | CTX | cyan | Context Window — percentage and token count (used/total) |
-| 5HL | dynamic | 5-Hour Rate Limit — yellow/orange/red by usage %, shows reset countdown |
-| 7DL | dynamic | 7-Day Rate Limit — yellow/orange/red by usage %, shows reset countdown |
+| 5HL | dynamic | 5-Hour Rate Limit — yellow/red by usage %, shows reset countdown |
+| 7DL | dynamic | 7-Day Rate Limit — yellow/red by usage %, shows reset countdown |
 | LNS | dim | Lines added (green) / removed (red) in session |
 | CST | orange | Total session cost (USD) — displayed on its own line |
 | BRN | orange | Cost burn rate ($/min) — displayed on its own line |
