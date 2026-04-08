@@ -11,6 +11,8 @@
 - All 6 segments fit in 80 columns (previously only 3 of 8 were visible)
 
 **Bug fixes:**
+- APR and CHR sections no longer disappear when session is stale — show 0% placeholder bar with descriptive text instead of blank space
+- Stale session now zeroes CST, LNS (added/removed) — previously showed leftover data from last active session
 - DUR segment label now bold (consistent with all other segment labels)
 - Spinner comment corrected (50ms, not 80ms)
 - Legend LNS color fixed to match render (dim, not green)

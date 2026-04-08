@@ -406,6 +406,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
         dur = 0
         api_dur = 0
         cpm, xpm = None, None
+        usd = 0
+        added = 0
+        removed = 0
 
     SW = W
 
@@ -430,6 +433,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
         buf.append(f"{C_GRN}{B}APR{R} {mkbar(apr_pct, C_GRN)}")
         buf.append("")
         buf.append(f"    {C_GRN}DUR {f_dur(dur)}{R} {C_DIM}/{R} {C_GRN}API {f_dur(api_dur)}{R}")
+    else:
+        buf.append(f"{C_GRN}{B}APR{R} {mkbar(0, C_DIM)}")
+        buf.append("")
+        buf.append(f"    {C_DIM}no active session{R}")
     buf.append("")
     buf.append(sep(SW))
     buf.append("")
@@ -441,6 +448,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
         buf.append(f"{C_WHT}{B}CHR{R} {mkbar(chr_pct, C_WHT)}")
         buf.append("")
         buf.append(f"    {C_GRN}c.r:{R} {C_GRN}{f_tok(cr)}{R} {C_DIM}/{R} {C_GRN}c.w:{R} {C_GRN}{f_tok(cwt)}{R}")
+    else:
+        buf.append(f"{C_WHT}{B}CHR{R} {mkbar(0, C_DIM)}")
+        buf.append("")
+        buf.append(f"    {C_DIM}no cache data{R}")
     buf.append("")
     buf.append(sep(SW))
     buf.append("")
