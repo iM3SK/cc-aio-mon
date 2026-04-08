@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude AIO Monitor — statusline for Claude Code.
 
-Single-file, zero-dependency status line script.
+Stdlib-only status line script (uses rates.py for BRN/CTR).
 Reads JSON from stdin (Claude Code status line protocol), outputs ANSI-colored text.
 Responsive layout adapts to terminal width.
 
@@ -21,6 +21,8 @@ import sys
 import tempfile
 import time
 from datetime import datetime
+
+from rates import calc_rates as _calc_rates
 
 # ---------------------------------------------------------------------------
 # Config
@@ -314,14 +316,6 @@ def seg_apr(data):
     return text, len(_ANSI_RE.sub("", text))
 
 
-def seg_lns(data):
-    added = int(_num(data.get("cost", {}).get("total_lines_added")))
-    removed = int(_num(data.get("cost", {}).get("total_lines_removed")))
-    if not added and not removed:
-        return None
-    text = f"{C_DIM}LNS{RB} {C_GRN}+{added:,}{RB} {C_RED}-{removed:,}{RB}"
-    return text, len(_ANSI_RE.sub("", text))
-
 
 def seg_ctf(ctr, data):
     if ctr is None or ctr <= 0:
@@ -447,27 +441,6 @@ def _load_history_for_rates(sid, n=120):
         return out
     except (OSError, UnicodeDecodeError):
         return []
-
-
-def _calc_rates(hist):
-    """Return (brn $/min, ctr %/min) from history, or (None, None) if insufficient data."""
-    if len(hist) < 2:
-        return None, None
-    try:
-        t0 = float(hist[0].get("t", 0))
-        t1 = float(hist[-1].get("t", 0))
-        dt = t1 - t0
-        if dt < 10 or t0 < 1577836800:  # minimum 10s window, timestamps post-2020
-            return None, None
-        c0 = _num(hist[0].get("cost", {}).get("total_cost_usd"))
-        c1 = _num(hist[-1].get("cost", {}).get("total_cost_usd"))
-        brn = (c1 - c0) / dt * 60 if c1 >= c0 else None
-        x0 = _num(hist[0].get("context_window", {}).get("used_percentage"))
-        x1 = _num(hist[-1].get("context_window", {}).get("used_percentage"))
-        ctr = (x1 - x0) / dt * 60 if x1 >= x0 else None
-        return brn, ctr
-    except (TypeError, ValueError, ZeroDivisionError):
-        return None, None
 
 
 def write_shared_state(data: dict):

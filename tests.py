@@ -10,6 +10,8 @@ import sys
 import time
 import unittest
 
+import rates
+
 # Import target functions directly
 from monitor import (
     _fit_buf_height, calc_rates, f_tok, f_cost, f_dur, f_cd, _num,
@@ -46,7 +48,6 @@ from statusline import (
     seg_ctr,
     seg_apr,
     seg_ctf,
-    seg_lns,
     seg_now,
     build_line,
 )
@@ -210,6 +211,28 @@ class TestCalcRates(unittest.TestCase):
     def test_missing_t_field(self):
         hist = [{"cost": {"total_cost_usd": 0}}, {"t": 1_600_000_060, "cost": {"total_cost_usd": 1}}]
         self.assertEqual(calc_rates(hist), (None, None))
+
+    def test_implausible_t1_pre2020(self):
+        """Both endpoints must pass MIN_EPOCH (statusline used to check only t0)."""
+        hist = [self._entry(1_600_000_000, 0, 0), self._entry(1_546_300_860, 1, 10)]
+        self.assertEqual(calc_rates(hist), (None, None))
+
+    def test_decreasing_cost_brn_none(self):
+        hist = [self._entry(1_600_000_000, 1.0, 50.0), self._entry(1_600_000_060, 0.5, 55.0)]
+        brn, ctr = calc_rates(hist)
+        self.assertIsNone(brn)
+        self.assertIsNotNone(ctr)
+
+    def test_decreasing_ctx_ctr_none(self):
+        hist = [self._entry(1_600_000_000, 0.0, 60.0), self._entry(1_600_000_060, 0.1, 50.0)]
+        brn, ctr = calc_rates(hist)
+        self.assertIsNotNone(brn)
+        self.assertIsNone(ctr)
+
+    def test_shared_module_identity(self):
+        from monitor import calc_rates as m_cr
+        self.assertIs(m_cr, rates.calc_rates)
+        self.assertIs(sl_calc_rates, rates.calc_rates)
 
 
 # ---------------------------------------------------------------------------
@@ -603,22 +626,6 @@ class TestSegCtf(unittest.TestCase):
         self.assertIsNone(seg_ctf(2.0, d))
 
 
-class TestSegLns(unittest.TestCase):
-
-    def test_basic(self):
-        text, vl = seg_lns(_full_data())
-        self.assertEqual(vl, _vlen(text))
-        plain = _ANSI_RE.sub("", text)
-        self.assertIn("LNS", plain)
-        self.assertIn("+150", plain)
-        self.assertIn("-30", plain)
-
-    def test_zero_lines(self):
-        d = _full_data()
-        d["cost"]["total_lines_added"] = 0
-        d["cost"]["total_lines_removed"] = 0
-        self.assertIsNone(seg_lns(d))
-
 
 class TestSegNow(unittest.TestCase):
 
@@ -717,31 +724,6 @@ class TestBarBackgroundPersistence(unittest.TestCase):
         last_escape = last_sgr[-1].group()
         self.assertIn("48;2;46;52;64", last_escape,
                        "BG_BAR must be active when EL fires")
-
-
-# ---------------------------------------------------------------------------
-# Statusline _calc_rates (own copy)
-# ---------------------------------------------------------------------------
-class TestSlCalcRates(unittest.TestCase):
-
-    def _entry(self, t, cost, ctx_pct):
-        return {"t": t, "cost": {"total_cost_usd": cost},
-                "context_window": {"used_percentage": ctx_pct}}
-
-    def test_basic(self):
-        hist = [self._entry(1_600_000_000, 0.0, 10.0),
-                self._entry(1_600_000_060, 0.06, 20.0)]
-        brn, ctr = sl_calc_rates(hist)
-        self.assertAlmostEqual(brn, 0.06, places=5)
-        self.assertAlmostEqual(ctr, 10.0, places=5)
-
-    def test_empty(self):
-        self.assertEqual(sl_calc_rates([]), (None, None))
-
-    def test_short_window(self):
-        hist = [self._entry(1_600_000_000, 0, 0),
-                self._entry(1_600_000_005, 1, 10)]
-        self.assertEqual(sl_calc_rates(hist), (None, None))
 
 
 if __name__ == "__main__":

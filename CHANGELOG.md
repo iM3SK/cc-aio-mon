@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.5.2 — 2026-04-08
+
+**Internal:**
+- `rates.py` — shared `calc_rates()` for `monitor.py` and `statusline.py` (one implementation: both timestamps ≥ 2020, non-increasing cost/context → `None` for that metric)
+- `tests.py` — parity/identity tests plus edge cases for decreasing cost/context and bad `t1`
+- Removed dead `seg_lns()` from `statusline.py` (was never called in `build_line()`)
+- Fixed `VERSION` constant: `"1.5"` → `"1.5.2"`
+- Fixed legend colors: 5HL/7DL legend entries now use yellow (base color) instead of green
+- Fixed README: screenshot alt texts updated from v1.4 to v1.5.2; 5HL/7DL color description corrected to yellow/orange/red
+
+## v1.5.1 — 2026-04-08
+
+**Bug fixes:**
+- Fixed: spacing around `│` separators in detail lines — now display as ` │ ` with spaces instead of bare `│`
+- Fixed: stats section (CST, BRN, CTR, CTF, NOW, UPD) now vertically stacked on individual lines instead of paired side-by-side for better readability
+
 ## v1.5 — 2026-04-08
 
 **Visual overhaul:**
@@ -30,6 +46,8 @@
 - NOW changed from white to **dim** — lowest visual priority
 - UPD changed from green to **dim** — utility metric
 - Legend overlay updated to match new color scheme
+- Restored CHR segment to statusline (was removed in v1.3)
+- CST moved from left to right side in statusline layout
 - Both `statusline.py` and `monitor.py` palettes synchronized
 
 **Bug fixes:**

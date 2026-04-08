@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude AIO Monitor — fullscreen TUI dashboard for Claude Code.
 
-Single-file, zero-dependency terminal dashboard.
+Terminal dashboard (monitor.py + rates.py). Stdlib only.
 Reads shared state from statusline.py via temp files.
 
 Usage:
@@ -23,6 +23,8 @@ import sys
 import tempfile
 import time
 from datetime import datetime
+
+from rates import calc_rates
 
 # ---------------------------------------------------------------------------
 # Platform — keyboard input abstraction
@@ -118,7 +120,7 @@ C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.5"
+VERSION = "1.5.2"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
@@ -371,26 +373,6 @@ def load_history(sid, n=120):
 
 
 # ---------------------------------------------------------------------------
-# Burn rate
-# ---------------------------------------------------------------------------
-def calc_rates(hist):
-    if len(hist) < 2:
-        return None, None
-    t0, t1 = hist[0].get("t", 0), hist[-1].get("t", 0)
-    # Sanity: reject missing or implausible timestamps (pre-2020)
-    if t0 < 1_577_836_800 or t1 < 1_577_836_800:
-        return None, None
-    dt = t1 - t0
-    if dt < 10:
-        return None, None
-    c0 = _num(hist[0].get("cost", {}).get("total_cost_usd"))
-    c1 = _num(hist[-1].get("cost", {}).get("total_cost_usd"))
-    x0 = _num(hist[0].get("context_window", {}).get("used_percentage"))
-    x1 = _num(hist[-1].get("context_window", {}).get("used_percentage"))
-    return (c1 - c0) / dt * 60, (x1 - x0) / dt * 60
-
-
-# ---------------------------------------------------------------------------
 # Spinner
 # ---------------------------------------------------------------------------
 # dots12 spinner (cli-spinners) — 56 frames, 50ms interval
@@ -548,7 +530,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
         apr_pct = round(api_dur / dur * 100, 1)
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
         buf.append("")
-        buf.append(f"    {c(C_DIM)}DUR {f_dur(dur)}{R}{C_DIM}\u2502{R}{c(C_DIM)}API {f_dur(api_dur)}{R}")
+        buf.append(f"    {c(C_DIM)}DUR {f_dur(dur)}{R} {C_DIM}\u2502{R} {c(C_DIM)}API {f_dur(api_dur)}{R}")
     else:
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
         buf.append("")
@@ -563,7 +545,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
         chr_pct = round(cr / total_cache * 100, 1) if total_cache > 0 else 0
         buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(chr_pct, c(C_GRN))}")
         buf.append("")
-        buf.append(f"    {c(C_GRN)}c.r:{R} {c(C_GRN)}{f_tok(cr)}{R}{C_DIM}\u2502{R}{c(C_GRN)}c.w:{R} {c(C_GRN)}{f_tok(cwt)}{R}")
+        buf.append(f"    {c(C_GRN)}c.r:{R} {c(C_GRN)}{f_tok(cr)}{R} {C_DIM}\u2502{R} {c(C_GRN)}c.w:{R} {c(C_GRN)}{f_tok(cwt)}{R}")
     else:
         buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(0, C_DIM)}")
         buf.append("")
@@ -578,9 +560,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append("")
     warn = f"  {c(C_RED)}{B}! CTX>80%{R}" if ctx_pct >= 80 else ""
     if any([inp, out]):
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{C_DIM}\u2502{R}{c(C_CYN)}{f_tok(ctx_total)}{R}{warn}{C_DIM}\u2502{R}{c(C_WHT)}in:{R} {c(C_WHT)}{f_tok(inp)}{R}{C_DIM}\u2502{R}{c(C_WHT)}out:{R} {c(C_WHT)}{f_tok(out)}{R}")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}\u2502{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn} {C_DIM}\u2502{R} {c(C_WHT)}in:{R} {c(C_WHT)}{f_tok(inp)}{R} {C_DIM}\u2502{R} {c(C_WHT)}out:{R} {c(C_WHT)}{f_tok(out)}{R}")
     else:
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{C_DIM}\u2502{R}{c(C_CYN)}{f_tok(ctx_total)}{R}{warn}")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}\u2502{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn}")
         buf.append(f"    {C_DIM}awaiting first api call{R}")
     buf.append("")
     buf.append(sep(SW))
@@ -647,9 +629,13 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             age_s = "?"
     else:
         age_s = "?"
-    buf.append(f"{c(C_ORN)}CST {B}{f_cost(usd)}{R}{C_DIM}\u2502{R}{c(C_ORN)}BRN {B}{brn_val}{R}")
-    buf.append(f"{c(C_YEL)}CTR {ctr_val}{R}{C_DIM}\u2502{R}{c(C_RED)}CTF {B}{ctf_val}{R}")
-    buf.append(f"{c(C_DIM)}NOW {now}{R}{C_DIM}\u2502{R}{c(C_DIM)}UPD {age_s}{R}")
+    buf.append(f"{c(C_ORN)}CST  {B}{f_cost(usd)}{R}")
+    buf.append(f"{c(C_ORN)}BRN  {B}{brn_val}{R}")
+    buf.append(f"{c(C_YEL)}CTR  {ctr_val}{R}")
+    buf.append(f"{c(C_RED)}CTF  {B}{ctf_val}{R}")
+    buf.append("")
+    buf.append(f"{c(C_DIM)}NOW  {now}{R}")
+    buf.append(f"{c(C_DIM)}UPD  {age_s}{R}")
 
     buf.append("")
 
@@ -677,8 +663,8 @@ def render_legend(cols, rows):
     buf.append(f"{C_GRN}c.r  Cache Read Tokens{R}")
     buf.append(f"{C_GRN}c.w  Cache Write Tokens{R}")
     buf.append(f"{C_CYN}CTX  Context Window{R}")
-    buf.append(f"{C_YEL}5HL  5-Hour Rate Limit{R}")
-    buf.append(f"{C_YEL}7DL  7-Day Rate Limit{R}")
+    buf.append(f"{C_YEL}5HL  5-Hour Rate Limit (color: usage %){R}")
+    buf.append(f"{C_YEL}7DL  7-Day Rate Limit (color: usage %){R}")
     buf.append(f"{C_DIM}LNS  Lines Changed{R}")
     buf.append(f"{C_ORN}CST  Session Cost{R}")
     buf.append(f"{C_ORN}BRN  Burn Rate ($ / min){R}")
@@ -900,9 +886,8 @@ def main():
             except OSError:
                 hmt = 0
             if hmt != last_hist_mt:
-                h = load_history(sid)
-                if h:
-                    last_hist = h
+                # Always replace (even []) so BRN/CTR don't stay stale when jsonl is cleared/truncated
+                last_hist = load_history(sid)
                 last_hist_mt = hmt
             is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
             try:

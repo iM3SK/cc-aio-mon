@@ -2,9 +2,9 @@
 
 ![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue) ![License MIT](https://img.shields.io/badge/license-MIT-green) ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 
-**Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies, single-file Python, cross-platform.
+**Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies (stdlib only): `monitor.py`, `statusline.py`, and shared `rates.py`, cross-platform.
 
-<img src="screenshots/setup-full.png" width="720" alt="CC AIO MON v1.4 — Claude Code left, full dashboard right">
+<img src="screenshots/setup-full.png" width="720" alt="CC AIO MON v1.5.2 — Claude Code left, full dashboard right">
 
 *Claude Code with statusline (left) + fullscreen TUI dashboard (right)*
 
@@ -21,11 +21,11 @@
 <summary>More screenshots</summary>
 <br>
 
-<img src="screenshots/statusline.png" width="600" alt="Statusline — Opus 4.6 │ CST │ CTX │ 5HL │ 7DL │ DUR">
+<img src="screenshots/statusline.png" width="600" alt="Statusline — Opus 4.6  │  CST  │  CTX  │  5HL  │  7DL  │  DUR">
 
 *Statusline — single line below Claude Code input, text-only format*
 
-<img src="screenshots/setup-compact.png" width="720" alt="CC AIO MON v1.4 — Claude Code left, compact dashboard right">
+<img src="screenshots/setup-compact.png" width="720" alt="CC AIO MON v1.5.2 — Claude Code left, compact dashboard right">
 
 *Claude Code with statusline (left) + compact dashboard (right)*
 
@@ -130,8 +130,8 @@ Left-aligned (always visible):
 | APR | green | API Ratio — time in API calls vs total session duration |
 | CTX | cyan | Context Window — percentage and token count (used/total) |
 | CHR | green | Cache Hit Rate — cache reads vs total cache operations |
-| 5HL | dynamic | 5-Hour Rate Limit — green/yellow/red by usage % |
-| 7DL | dynamic | 7-Day Rate Limit — green/yellow/red by usage % |
+| 5HL | dynamic | 5-Hour Rate Limit — yellow/orange/red by usage % |
+| 7DL | dynamic | 7-Day Rate Limit — yellow/orange/red by usage % |
 
 Right-aligned (dropped from right when terminal is narrow):
 
@@ -149,21 +149,46 @@ Right-aligned (dropped from right when terminal is narrow):
 | Code | Color | Metric |
 |------|-------|--------|
 | APR | green | API Ratio — time in API calls vs total session duration |
-| DUR | dim | Session duration (sub-stat under APR) |
-| API | dim | API time (sub-stat under APR) |
+| DUR | dim | Session duration (sub-stat under APR, displayed as `DUR 10m 04s`) |
+| API | dim | API time (sub-stat under APR, displayed as `API 2m 35s`) |
 | CHR | green | Cache Hit Rate — cache reads vs total cache operations |
-| c.r | green | Cache read tokens (sub-stat under CHR) |
-| c.w | green | Cache write tokens (sub-stat under CHR) |
+| c.r | green | Cache read tokens (sub-stat under CHR, displayed as `c.r: 43.6k`) |
+| c.w | green | Cache write tokens (sub-stat under CHR, displayed as `c.w: 728`) |
 | CTX | cyan | Context Window — percentage and token count (used/total) |
-| 5HL | dynamic | 5-Hour Rate Limit — green/yellow/red by usage % |
-| 7DL | dynamic | 7-Day Rate Limit — green/yellow/red by usage % |
+| 5HL | dynamic | 5-Hour Rate Limit — yellow/orange/red by usage %, shows reset countdown |
+| 7DL | dynamic | 7-Day Rate Limit — yellow/orange/red by usage %, shows reset countdown |
 | LNS | dim | Lines added (green) / removed (red) in session |
-| CST | orange | Total session cost (USD) |
-| BRN | orange | Cost burn rate ($/min) |
-| CTR | yellow | Context consumption rate (%/min) |
-| CTF | red | Context Full ETA — predicted time to 100% |
-| NOW | dim | Current local time |
-| UPD | dim | Time since last data update |
+| CST | orange | Total session cost (USD) — displayed on its own line |
+| BRN | orange | Cost burn rate ($/min) — displayed on its own line |
+| CTR | yellow | Context consumption rate (%/min) — displayed on its own line |
+| CTF | red | Context Full ETA — predicted time to 100%, displayed on its own line |
+| NOW | dim | Current local time — displayed on its own line |
+| UPD | dim | Time since last data update — displayed on its own line |
+
+### Reading the Dashboard
+
+**APR (API Ratio)** — How much of your session time is spent waiting for the API vs thinking/typing. A low APR (e.g. 15%) means Claude is responding quickly relative to total session time. A high APR means most time is spent in API calls.
+- Sub-stats: `DUR` = total session duration, `API` = time spent in API calls.
+
+**CHR (Cache Hit Rate)** — Percentage of cached tokens that were read (reused) vs created (new). High CHR (>90%) means prompt caching is working well — you're paying less for repeated context. Low CHR means most cache tokens are being written, not reused.
+- Sub-stats: `c.r` = cache read tokens, `c.w` = cache write (creation) tokens.
+
+**CTX (Context Window)** — How full the context window is. When it hits 100%, Claude Code will start compressing earlier messages. Watch the bar and plan accordingly.
+- Sub-stats: used tokens, total window size, input/output token counts.
+
+**5HL / 7DL (Rate Limits)** — Usage against Anthropic's 5-hour and 7-day rate limits. When either hits 100%, you're throttled until the window resets. The countdown shows time remaining until reset.
+
+**LNS (Lines Changed)** — Lines added (+) and removed (-) during the session.
+
+**CST (Cost)** — Total session cost in USD.
+
+**BRN (Burn Rate)** — Cost per minute ($/min). Calculated from session history — how fast you're spending.
+
+**CTR (Context Rate)** — Context consumption rate (%/min). How fast the context window is filling up.
+
+**CTF (Context Full)** — Estimated wall-clock time (HH:MM) when context will hit 100%, based on current CTR. If CTR is zero or context is not growing, shows `--`.
+
+**NOW** — Current local time. **UPD** — Time since last data update from Claude Code.
 
 ### Color Thresholds
 
@@ -264,7 +289,7 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 
 ## Contributing
 
-Contributions welcome. Keep zero-dependency (stdlib only), keep single-file (`statusline.py` and `monitor.py` self-contained), test on Windows and at least one Unix platform. Run `python -c "import py_compile; py_compile.compile('statusline.py', doraise=True); py_compile.compile('monitor.py', doraise=True)"` before submitting.
+Contributions welcome. Keep zero-dependency (stdlib only), ship `rates.py` alongside the two entry scripts, test on Windows and at least one Unix platform. Run `python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"` before submitting.
 
 ## License
 
