@@ -4,7 +4,7 @@
 
 **Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies, single-file Python, cross-platform.
 
-<img src="screenshots/setup-full.png" width="720" alt="CC AIO MON v1.3 — Claude Code left, full dashboard right">
+<img src="screenshots/setup-full.png" width="720" alt="CC AIO MON v1.4 — Claude Code left, full dashboard right">
 
 *Claude Code with statusline (left) + fullscreen TUI dashboard (right)*
 
@@ -25,7 +25,7 @@
 
 *Statusline — single line below Claude Code input, text-only format*
 
-<img src="screenshots/setup-compact.png" width="720" alt="CC AIO MON v1.3 — Claude Code left, compact dashboard right">
+<img src="screenshots/setup-compact.png" width="720" alt="CC AIO MON v1.4 — Claude Code left, compact dashboard right">
 
 *Claude Code with statusline (left) + compact dashboard (right)*
 
@@ -85,8 +85,8 @@ Two files, zero dependencies, no install step. Optionally add a shell alias: `al
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux.
 - **Nord color palette** — truecolor ANSI output with consistent color-coded sections.
 - **Responsive layout** — statusline drops segments to fit narrow terminals. Dashboard adapts to any terminal size.
-- **Multi-session support** — auto-detects active sessions. Numbered picker when multiple sessions are running.
-- **Stale detection** — session data older than 30 minutes dims all metrics and shows `STALE` in the header. Last known values remain visible.
+- **Multi-session support** — auto-detects active sessions. Numbered picker when multiple sessions are running. Session switching available anytime via `s` key.
+- **Stale detection** — session data older than 30 minutes dims all metrics and shows inactive duration in the session status line. Last known values remain visible.
 - **Security hardened** — path traversal prevention, escape injection protection, atomic file reads/writes, file size limits.
 
 ## Usage
@@ -106,15 +106,16 @@ python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Session Picker
 
-When multiple Claude Code sessions are running, the monitor shows an interactive session picker on launch. Press `1-9` to select a session. Sessions marked `(stale)` haven't received updates in over 30 minutes. With a single active session, the monitor connects automatically.
+The session picker is shown on launch when multiple sessions are available or accessible anytime by pressing `s`. Press `1-9` to select a session. The picker lists both live and stale sessions — sessions marked `(stale)` haven't received updates in over 30 minutes. With a single active session, the monitor connects automatically without showing the picker.
 
 ### Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `r` | Force refresh data |
+| `r` | Force refresh data (resets stale timer) |
 | `l` | Toggle legend overlay |
+| `s` | Switch session (return to picker) |
 | `1-9` | Select session (picker) |
 
 ## Metrics Reference

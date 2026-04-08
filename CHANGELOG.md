@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.4 — 2026-04-08
+
+**Features:**
+- Session status line — new always-visible line below header showing session state (active/inactive with duration, animated line spinner)
+- Session switching at runtime — press `s` to return to session picker and switch sessions anytime
+- Session picker shows all sessions — both live and stale sessions now listed (auto-select triggers only when exactly one live session)
+- Manual refresh resets stale — pressing `r` now resets stale timer for immediate recovery if session is still alive
+
+**Layout changes:**
+- Header now text-only (removed dots12 braille spinner) — displays `CC AIO MON 1.4  model`
+- Removed `STALE` tag from header (replaced by session status line showing inactive duration)
+- Separator line moved below session status (was between header and content)
+
 ## v1.3 — 2026-04-08
 
 **Statusline redesign:**

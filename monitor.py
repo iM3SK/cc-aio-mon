@@ -100,7 +100,7 @@ C_WHT = E + "38;2;216;222;233m"
 C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 
-VERSION = "1.3"
+VERSION = "1.4"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
@@ -369,6 +369,23 @@ def spin():
     return _SPIN[_spin_idx % len(_SPIN)]
 
 
+# line spinner (cli-spinners) — 4 frames, 130ms interval
+_LINE = ["-", "\\", "|", "/"]
+_line_idx = 0
+_line_last = 0.0
+LINE_INTERVAL = 0.13
+
+
+def spin_line():
+    """Return 1-char line spinner frame, auto-advance on interval."""
+    global _line_idx, _line_last
+    now = time.monotonic()
+    if now - _line_last >= LINE_INTERVAL:
+        _line_idx += 1
+        _line_last = now
+    return _LINE[_line_idx % len(_LINE)]
+
+
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
@@ -409,12 +426,28 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     SW = W
 
     # ── Header ──────────────────────────────────────────────
+    sid_str = str(data.get("session_id", "default"))
+    session_label = sname or (sid_str[:16] if _SID_RE.match(sid_str) else "default")
+
     buf.append(sep(SW))
-    stale_tag = f"  {C_RED}{B}STALE{R}" if stale else ""
-    hp = [f"{C_CYN}{spin()}{R} {C_WHT}{B}CC AIO MON {VERSION}{R}{stale_tag}", f"{C_CYN}{model_str}{R}"]
-    if sname:
-        hp.append(f"{C_FG}{sname}{R}")
+    hp = [f"{C_WHT}{B}CC AIO MON {VERSION}{R}", f"{C_CYN}{model_str}{R}"]
     buf.append("  ".join(hp))
+
+    # ── Session status line (always visible) ────────────────
+    if stale:
+        _stale_age = ""
+        _sid_safe = str(data.get("session_id", "default"))
+        if _SID_RE.match(_sid_safe):
+            try:
+                _mt = (DATA_DIR / f"{_sid_safe}.json").stat().st_mtime
+                _idle = int(time.time() - _mt)
+                _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
+            except OSError:
+                pass
+        buf.append(f"{C_RED}{B}Session Inactive {spin_line()}{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
+    else:
+        buf.append(f"{C_GRN}{B}Session Active {spin_line()}{R}  {C_FG}{session_label}{R}")
+
     buf.append(sep(SW))
     buf.append("")
 
@@ -533,7 +566,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     # ── Footer ──────────────────────────────────────────────
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R} {C_DIM}quit{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R} {C_DIM}refresh{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R} {C_DIM}legend{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R} {C_DIM}quit{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R} {C_DIM}refresh{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R} {C_DIM}sessions{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R} {C_DIM}legend{R}")
 
     # Shrink: remove empty lines bottom-up (sections compress smoothly)
     target = rows - 1
@@ -706,6 +739,14 @@ def main():
                 break
             elif k == "r":
                 last_mt = 0
+                last_seen = time.monotonic()  # reset stale on manual refresh
+            elif k == "s":
+                sid = None
+                last_data = None
+                last_mt = 0
+                last_seen = 0
+                last_hist_mt = 0
+                last_hist = []
             elif k == "l":
                 show_legend = not show_legend
             elif show_legend and k is not None:
@@ -717,26 +758,27 @@ def main():
                 time.sleep(tick)
                 continue
 
-            # Auto-detect session
+            # Auto-detect / pick session
             if sid is None:
                 sessions = list_sessions()
                 active = [s for s in sessions if not s["stale"]]
-                if len(active) == 1:
+                if len(active) == 1 and len(sessions) == 1:
                     sid = active[0]["id"]
-                elif not active:
+                elif not sessions:
                     flush(render_picker([], cols, rows), cols)
                     if k == "q":
                         break
                     time.sleep(tick)
                     continue
                 else:
-                    flush(render_picker(active, cols, rows), cols)
+                    flush(render_picker(sessions, cols, rows), cols)
                     if k == "q":
                         break
                     if k and k.isdigit():
                         idx = int(k) - 1
-                        if 0 <= idx < len(active):
-                            sid = active[idx]["id"]
+                        if 0 <= idx < len(sessions):
+                            sid = sessions[idx]["id"]
+                            last_seen = time.monotonic()
                     time.sleep(tick)
                     continue
 
