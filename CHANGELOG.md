@@ -3,21 +3,23 @@
 ## v1.6.0 — 2026-04-09
 
 **Features:**
-- Braille sparkline trend bars for BRN, CTR, and CST — 8-level glyphs (`⠀⣀⣄⣤⣦⣶⣷⣿`) showing per-minute rate history over the last hour, padded to BAR_W with shade characters
+- BRN/CTR/CST progress bars with fixed ranges (0-1.0 $/min, 0-5.0 %/min, 0-$50) — same visual style as APR/CHR/CTX/5HL/7DL
 - Smart warnings system — automatic header alerts for: CTF < 30 min, 5HL/7DL > 80%, BRN above configurable threshold
-- Cross-session cost aggregation — TDY (today) and WEK (this week) totals across all active sessions, cached with 30s TTL
+- Cross-session cost aggregation — TDY (today) and WEK (this week) totals under CST, cached with 30s TTL
 - `CLAUDE_WARN_BRN` env var — configurable burn rate warning threshold (default 0.50 $/min)
 
 **Layout changes:**
 - Compact layout — removed empty lines between metric sections
 - Separators changed from `│` to `-` in sub-stat detail lines
-- Stats section reordered: BRN → CTR → CST → CTF → TDY/WEK → NOW/UPD → LNS
-- BRN/CTR/CST now show sparkline bars inline when trend data available
+- CTX sub-stat simplified: used tokens + in/out (removed redundant total, shown in header model name)
+- Removed CTF (Context Full ETA) — low value metric, context % + rate sufficient
+- TDY/WEK moved under CST as sub-stats
 - LNS on own line below NOW/UPD: white label, green added count, red removed count
-- Footer tail protection reduced from 3 to 2 lines (fixes padding gap above NOW)
+- Legend overlay: BG_BAR header background, metric ranges inline, cleaned up entries
+- Footer uses full terminal height (no wasted bottom row)
 
 **Other:**
-- `tests.py` expanded from 107 to 130 tests — added sparkline (`make_sparkline`, `mksparkbar`, `extract_spark_values`) and warnings (`collect_warnings`) test suites
+- `tests.py` — 118 tests (removed sparkline tests, added fixed-range constant tests)
 - VERSION bumped to `1.6.0`
 
 ## v1.5.2 — 2026-04-08

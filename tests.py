@@ -15,9 +15,8 @@ import rates
 # Import target functions directly
 from monitor import (
     _fit_buf_height, calc_rates, f_tok, f_cost, f_dur, f_cd, _num,
-    _limit_color, _reset_color,
-    make_sparkline, mksparkbar, extract_spark_values, collect_warnings,
-    SPARK_W, WARN_BRN,
+    _limit_color, _reset_color, collect_warnings,
+    WARN_BRN, BRN_MAX, CTR_MAX, CST_MAX,
     C_RED as M_RED, C_YEL as M_YEL, C_GRN as M_GRN, C_DIM as M_DIM,
     C_ORN as M_ORN,
 )
@@ -66,28 +65,25 @@ class TestFitBufHeight(unittest.TestCase):
     def test_clip_tail_pads_short_buf(self):
         buf = ["a", "b"]
         _fit_buf_height(buf, 10, clip_tail=True)
-        self.assertEqual(len(buf), 9)  # rows - 1
+        self.assertEqual(len(buf), 10)
 
     def test_clip_tail_removes_empty_lines(self):
         buf = ["a", "", "b", "", "c", "", "", ""]
         _fit_buf_height(buf, 5, clip_tail=True)
-        self.assertLessEqual(len(buf), 4)
+        self.assertLessEqual(len(buf), 5)
 
     def test_clip_tail_clips_bottom_when_too_tall(self):
         buf = [str(i) for i in range(30)]
         _fit_buf_height(buf, 10, clip_tail=True)
-        self.assertEqual(len(buf), 9)
-        # Last entries preserved (bottom kept)
+        self.assertEqual(len(buf), 10)
         self.assertEqual(buf[-1], "29")
 
     def test_clip_tail_rows_zero(self):
-        # rows=0 → max(1, 0)=1 → target=max(1, 0)=1 → buf padded to 1
         buf = ["a", "b", "c"]
         _fit_buf_height(buf, 0, clip_tail=True)
         self.assertEqual(len(buf), 1)
 
     def test_clip_tail_rows_one(self):
-        # rows=1 → target=max(1, 0)=1 → buf padded/clipped to 1
         buf = ["a", "b", "c"]
         _fit_buf_height(buf, 1, clip_tail=True)
         self.assertEqual(len(buf), 1)
@@ -95,39 +91,37 @@ class TestFitBufHeight(unittest.TestCase):
     def test_clip_tail_rows_two(self):
         buf = ["x"] * 10
         _fit_buf_height(buf, 2, clip_tail=True)
-        self.assertEqual(len(buf), 1)
+        self.assertEqual(len(buf), 2)
 
     # -- clip_tail=False (dashboard) -----------------------------------------
 
     def test_dashboard_preserves_tail(self):
-        # Last 2 lines = footer; they must survive clipping
         footer = ["sep", "[q]qt"]
         body = ["line"] * 20
         buf = body + footer
         _fit_buf_height(buf, 10, clip_tail=False)
-        self.assertEqual(len(buf), 9)
+        self.assertEqual(len(buf), 10)
         self.assertEqual(buf[-2:], footer)
 
     def test_dashboard_pads_when_short(self):
         buf = ["a", "b", "footer1", "footer2"]
         _fit_buf_height(buf, 20, clip_tail=False)
-        self.assertEqual(len(buf), 19)
+        self.assertEqual(len(buf), 20)
 
     def test_dashboard_removes_empty_lines_from_body(self):
         footer = ["f1", "f2"]
         body = ["a", "", "b", "", "c", ""]
         buf = body + footer
         _fit_buf_height(buf, 8, clip_tail=False)
-        self.assertEqual(len(buf), 7)
+        self.assertEqual(len(buf), 8)
         self.assertEqual(buf[-2:], footer)
 
     def test_dashboard_rows_invalid_string(self):
         buf = ["a", "b"]
-        _fit_buf_height(buf, "bad", clip_tail=False)  # should not raise
+        _fit_buf_height(buf, "bad", clip_tail=False)
         self.assertIsInstance(buf, list)
 
     def test_dashboard_rows_negative(self):
-        # rows=-5 → max(1, -5)=1 → target=max(1, 0)=1
         buf = ["a", "b"]
         _fit_buf_height(buf, -5, clip_tail=False)
         self.assertEqual(len(buf), 1)
@@ -135,12 +129,12 @@ class TestFitBufHeight(unittest.TestCase):
     def test_empty_buf(self):
         buf = []
         _fit_buf_height(buf, 10, clip_tail=True)
-        self.assertEqual(len(buf), 9)
+        self.assertEqual(len(buf), 10)
 
     def test_buf_exactly_target(self):
-        buf = ["x"] * 9
+        buf = ["x"] * 10
         _fit_buf_height(buf, 10, clip_tail=True)
-        self.assertEqual(len(buf), 9)
+        self.assertEqual(len(buf), 10)
 
 
 # ---------------------------------------------------------------------------
@@ -730,86 +724,18 @@ class TestBarBackgroundPersistence(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Sparkline
+# Fixed-range bars (BRN/CTR/CST)
 # ---------------------------------------------------------------------------
-class TestMakeSparkline(unittest.TestCase):
+class TestFixedRangeConstants(unittest.TestCase):
 
-    def test_empty_returns_empty(self):
-        self.assertEqual(make_sparkline([]), [])
+    def test_brn_max_positive(self):
+        self.assertGreater(BRN_MAX, 0)
 
-    def test_single_value_returns_empty(self):
-        self.assertEqual(make_sparkline([5.0]), [])
+    def test_ctr_max_positive(self):
+        self.assertGreater(CTR_MAX, 0)
 
-    def test_flat_returns_empty(self):
-        self.assertEqual(make_sparkline([3.0] * 20), [])
-
-    def test_width_respected(self):
-        self.assertEqual(len(make_sparkline([1, 2, 3, 4, 5], width=10)), 10)
-        self.assertEqual(len(make_sparkline([1, 2, 3, 4, 5], width=5)), 5)
-
-    def test_ascending_last_is_high(self):
-        result = make_sparkline(list(range(20)))
-        self.assertGreaterEqual(result[-1], 6)
-
-    def test_descending_first_is_high(self):
-        result = make_sparkline(list(range(20, 0, -1)))
-        self.assertGreaterEqual(result[0], 6)
-
-    def test_values_are_ints_0_to_7(self):
-        result = make_sparkline([1, 2, 3, 4, 5, 6, 7, 8])
-        for v in result:
-            self.assertIsInstance(v, int)
-            self.assertGreaterEqual(v, 0)
-            self.assertLessEqual(v, 7)
-
-    def test_none_values_filtered(self):
-        result = make_sparkline([None, 1, None, 5, None])
-        self.assertEqual(len(result), SPARK_W)
-
-
-class TestMkSparkbar(unittest.TestCase):
-
-    def test_returns_bar_with_brackets(self):
-        result = mksparkbar([1, 2, 3, 4, 5, 6, 7, 8], M_ORN)
-        self.assertIsNotNone(result)
-        plain = _ANSI_RE.sub("", result)
-        self.assertTrue(plain.startswith("["))
-        self.assertTrue(plain.endswith("]"))
-
-    def test_returns_none_when_no_data(self):
-        self.assertIsNone(mksparkbar([], M_ORN))
-
-    def test_bar_contains_shade_for_zero(self):
-        # All ascending — first bucket might be 0 → shade char
-        result = mksparkbar(list(range(1, 20)), M_ORN)
-        self.assertIsNotNone(result)
-
-
-class TestExtractSparkValues(unittest.TestCase):
-
-    def _entry(self, t, cost):
-        return {"t": t, "cost": {"total_cost_usd": cost}}
-
-    def test_basic(self):
-        now = time.time()
-        hist = [self._entry(now - 120, 0.0), self._entry(now - 60, 0.06), self._entry(now, 0.12)]
-        vals = extract_spark_values(hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
-        self.assertEqual(len(vals), 2)
-        self.assertGreater(vals[0], 0)
-
-    def test_empty_hist(self):
-        self.assertEqual(extract_spark_values([], lambda e: 0), [])
-
-    def test_old_entries_filtered(self):
-        hist = [self._entry(1000, 0), self._entry(1060, 1)]  # ancient timestamps
-        vals = extract_spark_values(hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
-        self.assertEqual(vals, [])
-
-    def test_sub_5s_skipped(self):
-        now = time.time()
-        hist = [self._entry(now - 3, 0.0), self._entry(now, 0.06)]
-        vals = extract_spark_values(hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
-        self.assertEqual(vals, [])
+    def test_cst_max_positive(self):
+        self.assertGreater(CST_MAX, 0)
 
 
 # ---------------------------------------------------------------------------

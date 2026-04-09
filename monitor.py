@@ -125,7 +125,6 @@ _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
-SPARK_W = 12  # sparkline bar width (half of BAR_W)
 
 try:
     WARN_BRN = float(os.environ.get("CLAUDE_WARN_BRN", "0.50"))
@@ -294,69 +293,11 @@ def _reset_color(resets_epoch, window_secs):
 
 
 # ---------------------------------------------------------------------------
-# Sparkline — braille bar with BG, half-width
+# Fixed-range bar for rate/cost metrics
 # ---------------------------------------------------------------------------
-_SPARK_GLYPHS = "\u2800\u28c0\u28c4\u28e4\u28e6\u28f6\u28f7\u28ff"  # 8 levels: ⠀⣀⣄⣤⣦⣶⣷⣿
-
-
-def make_sparkline(values, width=SPARK_W):
-    """Compress float list into braille levels 0-7. Returns list of ints."""
-    clean = [v for v in values if v is not None and isinstance(v, (int, float))]
-    if len(clean) < 2:
-        return []
-    vmin, vmax = min(clean), max(clean)
-    if vmax <= vmin:
-        return []
-    n = len(clean)
-    levels = []
-    for i in range(width):
-        lo = int(i * n / width)
-        hi = max(lo + 1, int((i + 1) * n / width))
-        bucket = clean[lo:hi]
-        avg = sum(bucket) / len(bucket)
-        level = int((avg - vmin) / (vmax - vmin) * 7)
-        levels.append(max(0, min(7, level)))
-    return levels
-
-
-def mksparkbar(values, color, width=SPARK_W):
-    """Returns [░░░░░░░░░░░░░⣀⣄⣤⣦⣶⣷⣿⣷⣶⣤⣀] sparkline with BG, padded to BAR_W."""
-    levels = make_sparkline(values, width)
-    if not levels:
-        return None
-    pad = BAR_W - len(levels)
-    parts = []
-    for _ in range(pad):
-        parts.append(f"{C_DIM}{SH}{R}")
-    for lv in levels:
-        if lv > 0:
-            parts.append(f"{BG_BAR}{color}{_SPARK_GLYPHS[lv]}{R}")
-        else:
-            parts.append(f"{C_DIM}{SH}{R}")
-    inner = "".join(parts)
-    return f"{C_DIM}[{R}{inner}{C_DIM}]{R}"
-
-
-def extract_spark_values(hist, key_fn, cutoff_secs=3600):
-    """Extract per-interval rates from history for sparkline display."""
-    now = time.time()
-    cutoff = now - cutoff_secs
-    window = [e for e in hist
-              if _num(e.get("t"), 0) >= cutoff and _num(e.get("t"), 0) > 1_577_836_800]
-    if len(window) < 2:
-        return []
-    rates = []
-    for i in range(1, len(window)):
-        dt = _num(window[i].get("t")) - _num(window[i - 1].get("t"))
-        if dt < 5:
-            continue
-        v0 = key_fn(window[i - 1])
-        v1 = key_fn(window[i])
-        if v0 is None or v1 is None:
-            continue
-        delta = max(0, v1 - v0)
-        rates.append(delta / dt * 60)
-    return rates
+BRN_MAX = 1.0    # $/min ceiling
+CTR_MAX = 5.0    # %/min ceiling
+CST_MAX = 50.0   # $ ceiling
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +540,7 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
     except (TypeError, ValueError):
         rows = 24
     rows = max(1, rows)
-    target = max(1, rows - 1)
+    target = max(1, rows)
     tail = []
     if not clip_tail:
         n = min(2, max(0, target - 1))
@@ -624,8 +565,6 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
     while len(buf) < sub_target:
         buf.append("")
     buf.extend(tail)
-    while len(buf) < target:
-        buf.append("")
 
 
 # ---------------------------------------------------------------------------
@@ -729,9 +668,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append(f"{c(C_CYN)}{B}CTX{R} {mkbar(ctx_pct, c(C_CYN))}")
     warn = f"  {c(C_RED)}{B}! CTX>80%{R}" if ctx_pct >= 80 else ""
     if any([inp, out]):
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}-{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn} {C_DIM}-{R} {c(C_WHT)}in:{R} {c(C_WHT)}{f_tok(inp)}{R} {C_DIM}-{R} {c(C_WHT)}out:{R} {c(C_WHT)}{f_tok(out)}{R}")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn} {C_DIM}-{R} {c(C_WHT)}in:{R} {c(C_WHT)}{f_tok(inp)}{R} {C_DIM}-{R} {c(C_WHT)}out:{R} {c(C_WHT)}{f_tok(out)}{R}")
     else:
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}-{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn}")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn}")
     buf.append(sep(SW))
 
     # ── 5HL ─────────────────────────────────────────────────
@@ -769,13 +708,6 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     # ── Stats (compact: BRN/CTR/CST/CTF/TDY/NOW) ────────────
     brn_val = f"{cpm:.4f} $/min" if cpm and cpm > 0.0001 else "collecting..."
     ctr_val = f"{xpm:.2f} %/min" if xpm and xpm > 0.001 else "--"
-    ctf_val = "--"
-    if xpm and xpm > 0 and ctx_pct < 100:
-        rem_pct = 100 - ctx_pct
-        try:
-            ctf_val = datetime.fromtimestamp(time.time() + (rem_pct / xpm) * 60).strftime("%H:%M")
-        except (OverflowError, OSError, ValueError):
-            ctf_val = "--"
     now = datetime.now().strftime("%H:%M:%S")
     sid_str = str(data.get("session_id", "default"))
     if _SID_RE.match(sid_str):
@@ -787,36 +719,24 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             age_s = "?"
     else:
         age_s = "?"
-    # ── BRN with sparkline bar ─────────────────────────────
-    brn_spark_vals = extract_spark_values(
-        hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
-    brn_bar = mksparkbar(brn_spark_vals, c(C_ORN))
-    if brn_bar:
-        buf.append(f"{c(C_ORN)}BRN {brn_bar} {B}{brn_val}{R}")
-    else:
-        buf.append(f"{c(C_ORN)}BRN  {B}{brn_val}{R}")
-    # ── CTR with sparkline bar ─────────────────────────────
-    ctr_spark_vals = extract_spark_values(
-        hist, lambda e: _num(e.get("context_window", {}).get("used_percentage")))
-    ctr_bar = mksparkbar(ctr_spark_vals, c(C_YEL))
-    if ctr_bar:
-        buf.append(f"{c(C_YEL)}CTR {ctr_bar} {ctr_val}{R}")
-    else:
-        buf.append(f"{c(C_YEL)}CTR  {ctr_val}{R}")
-    # ── CST with sparkline bar (cost trend) ──────────────
-    cst_spark_vals = extract_spark_values(
-        hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
-    cst_bar = mksparkbar(cst_spark_vals, c(C_ORN))
-    if cst_bar:
-        buf.append(f"{c(C_ORN)}CST {cst_bar} {B}{f_cost(usd)}{R}")
-    else:
-        buf.append(f"{c(C_ORN)}CST  {B}{f_cost(usd)}{R}")
-    buf.append(f"{c(C_RED)}CTF {B}{ctf_val}{R}")
+    # ── BRN — burn rate bar (0 — 1.0 $/min) ──────────────────
+    brn_pct = min(100, cpm / BRN_MAX * 100) if cpm and cpm > 0 else 0
+    buf.append(f"{c(C_ORN)}{B}BRN{R} {mkbar(brn_pct, c(C_ORN))}")
+    buf.append(f"    {c(C_ORN)}{brn_val}{R}")
+    # ── CTR — context rate bar (0 — 5.0 %/min) ─────────────
+    ctr_pct = min(100, xpm / CTR_MAX * 100) if xpm and xpm > 0 else 0
+    buf.append(f"{c(C_YEL)}{B}CTR{R} {mkbar(ctr_pct, c(C_YEL))}")
+    buf.append(f"    {c(C_YEL)}{ctr_val}{R}")
+    # ── CST — session cost bar (0 — $50) ────────────────────
+    cst_pct = min(100, usd / CST_MAX * 100) if usd > 0 else 0
+    buf.append(f"{c(C_ORN)}{B}CST{R} {mkbar(cst_pct, c(C_ORN))}")
+    buf.append(f"    {c(C_ORN)}{f_cost(usd)}{R}")
     # ── Cross-session cost (TDY / WEK) ─────────────────────
     tdy, wek = cached_cross_session_costs()
     tdy_s = f_cost(tdy) if tdy > 0 else "--"
     wek_s = f_cost(wek) if wek > 0 else "--"
-    buf.append(f"{c(C_ORN)}TDY {tdy_s} {C_DIM}-{R} {c(C_ORN)}WEK {wek_s}{R}")
+    buf.append(f"    {c(C_ORN)}TDY {tdy_s} {C_DIM}-{R} {c(C_ORN)}WEK {wek_s}{R}")
+    buf.append(sep(SW))
     buf.append(f"{c(C_WHT)}NOW {now} {C_DIM}-{R} {c(C_WHT)}UPD {age_s}{R}")
     if added or removed:
         buf.append(f"{c(C_WHT)}LNS{R} {c(C_GRN)}{added:,}{R} {C_DIM}-{R} {c(C_RED)}{removed:,}{R}")
@@ -836,26 +756,22 @@ def render_legend(cols, rows):
     SW = cols
     buf = []
     buf.append(sep(SW))
-    buf.append(f"{C_WHT}{B}LEGEND{R}")
+    lg_pad = max(0, SW - 6)  # "LEGEND" = 6 chars
+    buf.append(f"{BG_BAR}{C_WHT}{B}LEGEND{R}{BG_BAR}{' ' * lg_pad}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_GRN}APR  API Ratio (API time / total){R}")
-    buf.append(f"{C_DIM}DUR  Session Duration{R}")
-    buf.append(f"{C_DIM}API  API Time{R}")
-    buf.append(f"{C_GRN}CHR  Cache Hit Rate (read / total){R}")
-    buf.append(f"{C_GRN}c.r  Cache Read Tokens{R}")
-    buf.append(f"{C_GRN}c.w  Cache Write Tokens{R}")
-    buf.append(f"{C_CYN}CTX  Context Window{R}")
-    buf.append(f"{C_YEL}5HL  5-Hour Rate Limit (color: usage %){R}")
-    buf.append(f"{C_YEL}7DL  7-Day Rate Limit (color: usage %){R}")
-    buf.append(f"{C_WHT}LNS  Lines Changed ({C_GRN}added{R} {C_RED}removed{R}){R}")
-    buf.append(f"{C_ORN}CST  Session Cost{R}")
-    buf.append(f"{C_ORN}TDY  Today's Cost (all sessions){R}")
-    buf.append(f"{C_ORN}WEK  This Week's Cost (all sessions){R}")
-    buf.append(f"{C_ORN}BRN  Burn Rate ($ / min) + sparkline trend{R}")
-    buf.append(f"{C_YEL}CTR  Context Rate (% / min) + sparkline trend{R}")
-    buf.append(f"{C_RED}CTF  Context Full (ETA){R}")
-    buf.append(f"{C_DIM}NOW  Current Time{R}")
-    buf.append(f"{C_DIM}UPD  Last Data Update{R}")
+    buf.append(f"{C_GRN}APR{R}  {C_DIM}API Ratio (API time / total){R}")
+    buf.append(f"{C_GRN}CHR{R}  {C_DIM}Cache Hit Rate (read / total){R}")
+    buf.append(f"{C_CYN}CTX{R}  {C_DIM}Context Window{R}")
+    buf.append(f"{C_YEL}5HL{R}  {C_DIM}5-Hour Rate Limit{R}")
+    buf.append(f"{C_YEL}7DL{R}  {C_DIM}7-Day Rate Limit{R}")
+    buf.append(f"{C_ORN}BRN{R}  {C_DIM}Burn Rate{R}  {C_DIM}(0 - {BRN_MAX} $/min){R}")
+    buf.append(f"{C_YEL}CTR{R}  {C_DIM}Context Rate{R}  {C_DIM}(0 - {CTR_MAX} %/min){R}")
+    buf.append(f"{C_ORN}CST{R}  {C_DIM}Session Cost{R}  {C_DIM}(0 - {CST_MAX:.0f} $){R}")
+    buf.append(f"{C_ORN}TDY{R}  {C_DIM}Today's Cost (all sessions){R}")
+    buf.append(f"{C_ORN}WEK{R}  {C_DIM}This Week's Cost (all sessions){R}")
+    buf.append(f"{C_WHT}LNS{R}  {C_DIM}Lines Changed ({C_GRN}added{R} {C_RED}removed{R}{C_DIM}){R}")
+    buf.append(f"{C_WHT}NOW{R}  {C_DIM}Current Time{R}")
+    buf.append(f"{C_WHT}UPD{R}  {C_DIM}Last Data Update{R}")
     buf.append("")
     buf.append(f"{C_WHT}{B}KEYS{R}")
     buf.append(sep(SW))
@@ -909,10 +825,11 @@ def flush(buf, cols=None):
     if cols is None:
         cols = shutil.get_terminal_size((80, 24)).columns
     out = [SYNC_ON, HOME]
-    for line in buf:
+    for i, line in enumerate(buf):
         out.append(truncate(line, cols))
         out.append(EL)
-        out.append("\n")
+        if i < len(buf) - 1:
+            out.append("\n")
     # Clear any leftover lines below the buffer from previous frames
     out.append(E + "J")  # erase from cursor to end of screen
     out.append(SYNC_OFF)
