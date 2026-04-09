@@ -100,26 +100,26 @@ class TestFitBufHeight(unittest.TestCase):
     # -- clip_tail=False (dashboard) -----------------------------------------
 
     def test_dashboard_preserves_tail(self):
-        # Last 3 lines = footer; they must survive clipping
-        footer = ["sep", "[q]qt", ""]
+        # Last 2 lines = footer; they must survive clipping
+        footer = ["sep", "[q]qt"]
         body = ["line"] * 20
         buf = body + footer
         _fit_buf_height(buf, 10, clip_tail=False)
         self.assertEqual(len(buf), 9)
-        self.assertEqual(buf[-3:], footer)
+        self.assertEqual(buf[-2:], footer)
 
     def test_dashboard_pads_when_short(self):
-        buf = ["a", "b", "footer1", "footer2", "footer3"]
+        buf = ["a", "b", "footer1", "footer2"]
         _fit_buf_height(buf, 20, clip_tail=False)
         self.assertEqual(len(buf), 19)
 
     def test_dashboard_removes_empty_lines_from_body(self):
-        footer = ["f1", "f2", "f3"]
+        footer = ["f1", "f2"]
         body = ["a", "", "b", "", "c", ""]
         buf = body + footer
         _fit_buf_height(buf, 8, clip_tail=False)
         self.assertEqual(len(buf), 7)
-        self.assertEqual(buf[-3:], footer)
+        self.assertEqual(buf[-2:], footer)
 
     def test_dashboard_rows_invalid_string(self):
         buf = ["a", "b"]

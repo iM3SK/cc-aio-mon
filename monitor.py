@@ -602,7 +602,7 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
     target = max(1, rows - 1)
     tail = []
     if not clip_tail:
-        n = min(3, max(0, target - 1))
+        n = min(2, max(0, target - 1))
         if n and len(buf) >= n:
             tail = buf[-n:]
             del buf[-n:]
@@ -819,12 +819,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     buf.append(f"{c(C_ORN)}TDY {tdy_s} {C_DIM}-{R} {c(C_ORN)}WEK {wek_s}{R}")
     buf.append(f"{c(C_WHT)}NOW {now} {C_DIM}-{R} {c(C_WHT)}UPD {age_s}{R}")
     if added or removed:
-        buf.append(f"{C_DIM}LNS{R} {c(C_GRN)}+{added:,}{R} {c(C_RED)}-{removed:,}{R}")
+        buf.append(f"{c(C_WHT)}LNS{R} {c(C_GRN)}{added:,}{R} {C_DIM}-{R} {c(C_RED)}{removed:,}{R}")
 
     # ── Footer ──────────────────────────────────────────────
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
-    buf.append("")
 
     _fit_buf_height(buf, rows, clip_tail=False)
     return buf
