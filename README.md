@@ -4,7 +4,7 @@
 
 **Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies (stdlib only): `monitor.py`, `statusline.py`, and shared `rates.py`, cross-platform.
 
-<img src="screenshots/cc-aio-mon-banner.png" alt="CC AIO MON v1.6.0 — real-time terminal monitor for Claude Code">
+<img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON v1.6.0 — fullscreen TUI dashboard">
 
 ### How is this different?
 
@@ -17,7 +17,7 @@
 
 <img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON v1.6.0 — built-in status line">
 
-<img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON v1.6.0 — metric legend">
+<img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON v1.6.0 — legend overlay">
 
 ## Quick Start
 
