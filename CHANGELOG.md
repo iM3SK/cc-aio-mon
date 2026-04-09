@@ -11,9 +11,10 @@
 **Layout changes:**
 - Compact layout — removed empty lines between metric sections
 - Separators changed from `│` to `-` in sub-stat detail lines
-- LNS (lines changed) moved to end of stats section
-- BRN/CTR/CST now show sparkline bars inline when trend data available
 - Stats section reordered: BRN → CTR → CST → CTF → TDY/WEK → NOW/UPD → LNS
+- BRN/CTR/CST now show sparkline bars inline when trend data available
+- LNS on own line below NOW/UPD: white label, green added count, red removed count
+- Footer tail protection reduced from 3 to 2 lines (fixes padding gap above NOW)
 
 **Other:**
 - `tests.py` expanded from 107 to 130 tests — added sparkline (`make_sparkline`, `mksparkbar`, `extract_spark_values`) and warnings (`collect_warnings`) test suites

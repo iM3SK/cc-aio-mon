@@ -140,7 +140,7 @@ Right-aligned (dropped from right when terminal is narrow):
 | WEK | orange | This week's cost aggregated across all sessions |
 | NOW | white | Current local time |
 | UPD | white | Time since last data update |
-| LNS | dim | Lines added (green) / removed (red) in session |
+| LNS | white | Lines changed — added (green) / removed (red) values |
 
 ### Reading the Dashboard
 
@@ -155,7 +155,7 @@ Right-aligned (dropped from right when terminal is narrow):
 
 **5HL / 7DL (Rate Limits)** — Usage against Anthropic's 5-hour and 7-day rate limits. When either hits 100%, you're throttled until the window resets. The countdown shows time remaining until reset.
 
-**LNS (Lines Changed)** — Lines added (+) and removed (-) during the session.
+**LNS (Lines Changed)** — Lines added (green) and removed (red) during the session. Displayed on its own line below NOW/UPD.
 
 **CST (Cost)** — Total session cost in USD.
 

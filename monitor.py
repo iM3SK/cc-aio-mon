@@ -847,7 +847,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_CYN}CTX  Context Window{R}")
     buf.append(f"{C_YEL}5HL  5-Hour Rate Limit (color: usage %){R}")
     buf.append(f"{C_YEL}7DL  7-Day Rate Limit (color: usage %){R}")
-    buf.append(f"{C_DIM}LNS  Lines Changed{R}")
+    buf.append(f"{C_WHT}LNS  Lines Changed ({C_GRN}added{R} {C_RED}removed{R}){R}")
     buf.append(f"{C_ORN}CST  Session Cost{R}")
     buf.append(f"{C_ORN}TDY  Today's Cost (all sessions){R}")
     buf.append(f"{C_ORN}WEK  This Week's Cost (all sessions){R}")
