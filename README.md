@@ -46,7 +46,7 @@ On Windows, use forward slashes: `"python \"C:/path/to/statusline.py\""`
 python cc-aio-mon/monitor.py
 ```
 
-Two files, zero dependencies, no install step. Optionally add a shell alias: `alias mon='python /path/to/monitor.py'`
+Three files, zero dependencies, no install step. Optionally add a shell alias: `alias mon='python /path/to/monitor.py'`
 
 ## Features
 
@@ -55,7 +55,7 @@ Two files, zero dependencies, no install step. Optionally add a shell alias: `al
 - **Two-tier architecture** — lightweight statusline (updates on each Claude Code event) + fullscreen TUI dashboard.
 - **Real-time metrics** — context window, API ratio, 5-hour and 7-day rate limits, cost, burn rate, context rate — all with progress bars and fixed ranges.
 - **Smart warnings** — automatic alerts in header when rate limits > 80% or burn rate exceeds threshold.
-- **Cross-session costs** — TDY (today) and WEK (this week) aggregate cost across all sessions.
+- **Cross-session costs** — TDY (today) and WEK (rolling 7-day) aggregate cost across all sessions.
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux.
 - **Nord color palette** — truecolor ANSI output with consistent color-coded sections.
 - **Responsive layout** — statusline drops segments to fit narrow terminals. Dashboard adapts to any terminal size.
@@ -216,7 +216,7 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
 - State files: atomic write via `NamedTemporaryFile` + `os.replace()` (no partial reads)
 - History: append-only JSONL written only after the snapshot write succeeds — keeps `.json` and `.jsonl` in sync; auto-trimmed when file exceeds 1 MB (keeps last 1000 entries)
 - Stale `.tmp` files older than 60 seconds cleaned up automatically
-- Session detection: files older than 30 minutes marked as stale — all metrics dimmed (last known values preserved), header shows `STALE`
+- Session detection: files older than 30 minutes marked as stale — all metrics dimmed (last known values preserved), session status line shows `Session Inactive` with duration
 
 ### Security
 

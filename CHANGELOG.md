@@ -5,14 +5,14 @@
 **Features:**
 - BRN/CTR/CST progress bars with fixed ranges (0-1.0 $/min, 0-5.0 %/min, 0-$50) — same visual style as APR/CHR/CTX/5HL/7DL
 - Smart warnings system — automatic header alerts for: CTF < 30 min, 5HL/7DL > 80%, BRN above configurable threshold
-- Cross-session cost aggregation — TDY (today) and WEK (this week) totals under CST, cached with 30s TTL
+- Cross-session cost aggregation — TDY (today) and WEK (rolling 7-day) totals under CST, cached with 30s TTL
 - `CLAUDE_WARN_BRN` env var — configurable burn rate warning threshold (default 0.50 $/min)
 
 **Layout changes:**
 - Compact layout — removed empty lines between metric sections
 - Separators changed from `│` to `-` in sub-stat detail lines
 - CTX sub-stat simplified: used tokens + in/out (removed redundant total, shown in header model name)
-- Removed CTF (Context Full ETA) — low value metric, context % + rate sufficient
+- Removed CTF (Context Full ETA) from dashboard — low value metric, context % + rate sufficient. Statusline CTF remains.
 - TDY/WEK moved under CST as sub-stats
 - LNS on own line below NOW/UPD: white label, green added count, red removed count
 - Legend overlay: BG_BAR header background, metric ranges inline, cleaned up entries
