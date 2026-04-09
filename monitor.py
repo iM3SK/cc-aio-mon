@@ -678,9 +678,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             if resets > 0 and resets < time.time():
                 pct = 0.0
             lc = c(_limit_color(pct))
-            buf.append(f"{lc}{B}5HL{R} {mkbar(pct)}")
+            buf.append(f"{lc}{B}5HL{R} {mkbar(pct, c(_limit_color(pct)))}")
             rc = c(_reset_color(resets, 18000))  # 5h window
-            buf.append(f"    {C_WHT}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
+            buf.append(f"    {c(C_WHT)}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
         # ── 7DL ─────────────────────────────────────────────
         sd = rl.get("seven_day")
@@ -690,9 +690,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             if resets > 0 and resets < time.time():
                 pct = 0.0
             lc = c(_limit_color(pct))
-            buf.append(f"{lc}{B}7DL{R} {mkbar(pct)}")
+            buf.append(f"{lc}{B}7DL{R} {mkbar(pct, c(_limit_color(pct)))}")
             rc = c(_reset_color(resets, 604800))  # 7d window
-            buf.append(f"    {C_WHT}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
+            buf.append(f"    {c(C_WHT)}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
         if not fh and not sd:
             buf.append(f"{C_DIM}Rate limits: no data{R}")
