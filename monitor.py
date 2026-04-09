@@ -270,12 +270,10 @@ def mkbar(pct, color=None):
 
 
 def _limit_color(pct):
-    """Dynamic color for rate limit metrics based on usage %."""
+    """Dynamic color for rate limit metrics — yellow base, red >= 80%."""
     if pct >= 80:
         return C_RED
-    if pct >= 50:
-        return C_YEL
-    return C_YEL  # base yellow for healthy limits
+    return C_YEL
 
 
 def _reset_color(resets_epoch, window_secs):
@@ -429,8 +427,6 @@ def list_sessions():
             pass
     sessions = []
     for f in DATA_DIR.glob("*.json"):
-        if f.name.endswith(".tmp"):
-            continue
         sid = f.stem
         if not _SID_RE.match(sid):
             continue
@@ -893,6 +889,7 @@ def main():
         print(f"Invalid session ID: {sid}")
         return
     show_legend = False
+    _render_errors = 0
     last_mt = 0
     last_seen = 0  # monotonic timestamp of last successful data load
     last_data = None
@@ -994,8 +991,10 @@ def main():
             is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
             try:
                 flush(render_frame(last_data, last_hist, cols, rows, show_legend, stale=is_stale), cols)
-            except (TypeError, ValueError, KeyError, ZeroDivisionError, OverflowError, OSError):
-                pass  # corrupted data or datetime overflow — skip frame, retry next tick
+            except (TypeError, ValueError, KeyError, ZeroDivisionError, OverflowError, OSError) as e:
+                _render_errors += 1
+                if _render_errors <= 3:
+                    sys.stderr.write(f"render error #{_render_errors}: {e}\n")
 
             time.sleep(tick)
 
