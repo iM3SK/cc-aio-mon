@@ -534,7 +534,7 @@ def spin_line():
 
 
 def _fit_buf_height(buf, rows, *, clip_tail=False):
-    """Stlačí prázdne riadky zdola. Dashboard: drží spodné 3 riadky (pätička), zvyšok zhora. Legenda/picker: drží spodok."""
+    """Fit buffer to terminal height. Dashboard (clip_tail=False): protects last 2 lines (footer separator + keys). Legend/picker (clip_tail=True): clips from top."""
     try:
         rows = int(rows)
     except (TypeError, ValueError):

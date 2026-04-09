@@ -80,7 +80,7 @@ python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Session Picker
 
-The session picker is shown on launch when multiple sessions are available or accessible anytime by pressing `s`. Press `1-9` to select a session. The picker lists both live and stale sessions — sessions marked `(stale)` haven't received updates in over 30 minutes. With exactly one session (active, not stale), the monitor connects automatically without showing the picker.
+The session picker is shown on launch when multiple sessions are available or accessible anytime by pressing `s`. Press `1-9` to select a session. The picker lists both live and stale sessions — sessions marked `(stale)` haven't received updates in over 30 minutes. With exactly one session file total (active, not stale), the monitor connects automatically without showing the picker. If multiple session files exist (even if only one is active), the picker is shown.
 
 ### Keyboard Shortcuts
 
@@ -159,7 +159,7 @@ Right-aligned (dropped from right when terminal is narrow):
 
 **CST (Cost)** — Total session cost in USD, progress bar with fixed range 0-$50.
 
-**TDY / WEK (Cross-Session Cost)** — Aggregated cost across all sessions for today and the current week. Displayed as sub-stats under CST.
+**TDY / WEK (Cross-Session Cost)** — Aggregated cost across all sessions. TDY = today, WEK = rolling 7-day window (not calendar week). Displayed as sub-stats under CST.
 
 **LNS (Lines Changed)** — Lines added (green) and removed (red) during the session.
 
@@ -167,19 +167,21 @@ Right-aligned (dropped from right when terminal is narrow):
 
 ### Color Thresholds
 
-All progress bars use the same thresholds:
+Most progress bars use these thresholds:
 
 - **Green** (< 50%) — healthy, plenty of headroom
 - **Yellow** (50-79%) — approaching limits
 - **Red** (>= 80%) — critical, take action
 
+Exception: 5HL/7DL rate limit labels use yellow as base color (even below 50%) to distinguish them from performance metrics. The progress bar itself follows the standard green/yellow/red thresholds.
+
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLAUDE_STATUS_WARN` | `50` | Yellow threshold (%) |
-| `CLAUDE_STATUS_CRIT` | `80` | Red threshold (%) |
-| `CLAUDE_WARN_BRN` | `0.50` | Burn rate warning threshold ($/min) |
+| Variable | Default | Scope | Description |
+|----------|---------|-------|-------------|
+| `CLAUDE_STATUS_WARN` | `50` | statusline | Yellow threshold (%) |
+| `CLAUDE_STATUS_CRIT` | `80` | statusline | Red threshold (%) |
+| `CLAUDE_WARN_BRN` | `0.50` | dashboard | Burn rate warning threshold ($/min) |
 
 ```bash
 export CLAUDE_STATUS_WARN=60
