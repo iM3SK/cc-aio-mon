@@ -706,7 +706,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     buf.append(sep(SW))
 
-    # ── Stats (compact: BRN/CTR/CST/CTF/TDY/NOW) ────────────
+    # ── Stats (BRN/CTR/CST/TDY/WEK/NOW/UPD/LNS) ─────────────
     brn_val = f"{cpm:.4f} $/min" if cpm and cpm > 0.0001 else "collecting..."
     ctr_val = f"{xpm:.2f} %/min" if xpm and xpm > 0.001 else "--"
     now = datetime.now().strftime("%H:%M:%S")
