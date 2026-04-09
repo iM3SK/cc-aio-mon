@@ -19,7 +19,7 @@
 - Footer uses full terminal height (no wasted bottom row)
 
 **Other:**
-- `tests.py` — 118 tests (removed sparkline tests, added fixed-range constant tests)
+- `tests.py` — 142 tests (IPC, mkbar, truncate, cross-session costs, fixed-range constants)
 - VERSION bumped to `1.6.0`
 
 ## v1.5.2 — 2026-04-08
