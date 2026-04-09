@@ -54,7 +54,7 @@ Three files, zero dependencies, no install step. Optionally add a shell alias: `
 - **Zero dependencies** — stdlib-only Python. No pip install, no venv, no node_modules.
 - **Two-tier architecture** — lightweight statusline (updates on each Claude Code event) + fullscreen TUI dashboard.
 - **Real-time metrics** — context window, API ratio, 5-hour and 7-day rate limits, cost, burn rate, context rate — all with progress bars and fixed ranges.
-- **Smart warnings** — automatic alerts in header when rate limits > 80% or burn rate exceeds threshold.
+- **Smart warnings** — automatic alerts in header when context fills in < 30 min, rate limits > 80%, or burn rate exceeds threshold.
 - **Cross-session costs** — TDY (today) and WEK (rolling 7-day) aggregate cost across all sessions.
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux.
 - **Nord color palette** — truecolor ANSI output with consistent color-coded sections.
@@ -225,7 +225,7 @@ Both statusline.py and monitor.py import rates.py for shared BRN/CTR calculation
 | Measure | Protection |
 |---------|------------|
 | Session ID validation | Strict regex `[a-zA-Z0-9_-]{1,128}` prevents path traversal |
-| Input sanitization | C0 and C1 control characters (`\x00–\x1f`, `\x7f–\x9f`) stripped from all JSON fields before terminal output |
+| Input sanitization | C0 and C1 control characters (`\x00–\x1f`, `\x7f–\x9f`) stripped from string fields (model, session name, cwd) before terminal output |
 | File size limits | JSON capped at 1 MB, JSONL at 10 MB — oversized files skipped |
 | Atomic writes | Unpredictable temp filenames prevent symlink attacks |
 | TOCTOU prevention | File reads use single open + bounded read instead of separate stat + read |
@@ -254,7 +254,7 @@ Both statusline.py and monitor.py import rates.py for shared BRN/CTR calculation
 - Test manually: `echo '{"context_window": {"used_percentage": 42}}' | python statusline.py`
 
 **Raw escape codes visible / characters scrolling down the screen**
-- Your terminal does not support ANSI escape sequences. The monitor now detects this on startup and exits with an error instead of rendering garbled output.
+- Your terminal does not support ANSI escape sequences. The monitor checks `isatty()` and `TERM=dumb` on startup and exits with an error if either fails.
 - Use a terminal with ANSI support: **Windows Terminal**, iTerm2, xterm, Kitty, Alacritty, or any modern terminal emulator.
 - Terminals known to cause this: standalone `cmd.exe`, some older PowerShell console windows, any terminal with `TERM=dumb`.
 - Quick test: `python -c "print('\033[32mGREEN\033[0m')"` — if you see `[32mGREEN[0m` instead of colored text, your terminal lacks ANSI support.
