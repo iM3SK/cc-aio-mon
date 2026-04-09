@@ -18,7 +18,7 @@ def calc_rates(hist):
     try:
         t0 = float(hist[0].get("t", 0))
         t1 = float(hist[-1].get("t", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return None, None
     if t0 < MIN_EPOCH or t1 < MIN_EPOCH:
         return None, None

@@ -583,7 +583,6 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     ctx_pct = round(_num(cw.get("used_percentage")), 1)
     ctx_total = _num(cw.get("context_window_size"), 0)
     usage = cw.get("current_usage") or {}
-    exceeds = data.get("exceeds_200k_tokens", False)
 
     rl = data.get("rate_limits")
     cost_d = data.get("cost", {})
