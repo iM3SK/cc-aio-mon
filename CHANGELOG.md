@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.6.0 — 2026-04-09
+
+**Features:**
+- Braille sparkline trend bars for BRN, CTR, and CST — 8-level glyphs (`⠀⣀⣄⣤⣦⣶⣷⣿`) showing per-minute rate history over the last hour, padded to BAR_W with shade characters
+- Smart warnings system — automatic header alerts for: CTF < 30 min, 5HL/7DL > 80%, BRN above configurable threshold
+- Cross-session cost aggregation — TDY (today) and WEK (this week) totals across all active sessions, cached with 30s TTL
+- `CLAUDE_WARN_BRN` env var — configurable burn rate warning threshold (default 0.50 $/min)
+
+**Layout changes:**
+- Compact layout — removed empty lines between metric sections
+- Separators changed from `│` to `-` in sub-stat detail lines
+- LNS (lines changed) moved to end of stats section
+- BRN/CTR/CST now show sparkline bars inline when trend data available
+- Stats section reordered: BRN → CTR → CST → CTF → TDY/WEK → NOW/UPD → LNS
+
+**Other:**
+- `tests.py` expanded from 107 to 130 tests — added sparkline (`make_sparkline`, `mksparkbar`, `extract_spark_values`) and warnings (`collect_warnings`) test suites
+- VERSION bumped to `1.6.0`
+
 ## v1.5.2 — 2026-04-08
 
 **Internal:**

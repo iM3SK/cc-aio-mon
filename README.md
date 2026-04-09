@@ -4,7 +4,7 @@
 
 **Real-time terminal monitor for Claude Code** — context window, API rate limits, session costs, and burn rate. Zero dependencies (stdlib only): `monitor.py`, `statusline.py`, and shared `rates.py`, cross-platform.
 
-<img src="screenshots/cc-aio-mon-banner.png" alt="CC AIO MON v1.5.2 — real-time terminal monitor for Claude Code">
+<img src="screenshots/cc-aio-mon-banner.png" alt="CC AIO MON v1.6.0 — real-time terminal monitor for Claude Code">
 
 ### How is this different?
 
@@ -15,9 +15,9 @@
 | ccstatusline | Status line script | No TUI, no multi-session |
 | **CC AIO MON** | Official statusline JSON | Real-time, zero deps, most compact |
 
-<img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON v1.5.2 — built-in status line">
+<img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON v1.6.0 — built-in status line">
 
-<img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON v1.5.2 — metric legend">
+<img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON v1.6.0 — metric legend">
 
 ## Quick Start
 
@@ -54,6 +54,9 @@ Two files, zero dependencies, no install step. Optionally add a shell alias: `al
 - **Zero dependencies** — stdlib-only Python. No pip install, no venv, no node_modules.
 - **Two-tier architecture** — lightweight statusline (updates on each Claude Code event) + fullscreen TUI dashboard.
 - **Real-time metrics** — context window with token counts, API ratio, 5-hour and 7-day rate limits, cost, burn rate, context full ETA.
+- **Sparkline trends** — braille-based mini charts for BRN, CTR, and CST showing per-minute rate history.
+- **Smart warnings** — automatic alerts in header when CTF < 30 min, rate limits > 80%, or burn rate exceeds threshold.
+- **Cross-session costs** — TDY (today) and WEK (this week) aggregate cost across all sessions.
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux.
 - **Nord color palette** — truecolor ANSI output with consistent color-coded sections.
 - **Responsive layout** — statusline drops segments to fit narrow terminals. Dashboard adapts to any terminal size.
@@ -129,13 +132,15 @@ Right-aligned (dropped from right when terminal is narrow):
 | CTX | cyan | Context Window — percentage and token count (used/total) |
 | 5HL | dynamic | 5-Hour Rate Limit — yellow/red by usage %, shows reset countdown |
 | 7DL | dynamic | 7-Day Rate Limit — yellow/red by usage %, shows reset countdown |
+| BRN | orange | Cost burn rate ($/min) with sparkline trend bar |
+| CTR | yellow | Context consumption rate (%/min) with sparkline trend bar |
+| CST | orange | Total session cost (USD) with sparkline trend bar |
+| CTF | red | Context Full ETA — predicted time to 100% |
+| TDY | orange | Today's cost aggregated across all sessions |
+| WEK | orange | This week's cost aggregated across all sessions |
+| NOW | white | Current local time |
+| UPD | white | Time since last data update |
 | LNS | dim | Lines added (green) / removed (red) in session |
-| CST | orange | Total session cost (USD) — displayed on its own line |
-| BRN | orange | Cost burn rate ($/min) — displayed on its own line |
-| CTR | yellow | Context consumption rate (%/min) — displayed on its own line |
-| CTF | red | Context Full ETA — predicted time to 100%, displayed on its own line |
-| NOW | dim | Current local time — displayed on its own line |
-| UPD | dim | Time since last data update — displayed on its own line |
 
 ### Reading the Dashboard
 
@@ -154,9 +159,11 @@ Right-aligned (dropped from right when terminal is narrow):
 
 **CST (Cost)** — Total session cost in USD.
 
-**BRN (Burn Rate)** — Cost per minute ($/min). Calculated from session history — how fast you're spending.
+**BRN (Burn Rate)** — Cost per minute ($/min). Calculated from session history — how fast you're spending. Includes a sparkline trend bar showing per-minute rate over the last hour.
 
-**CTR (Context Rate)** — Context consumption rate (%/min). How fast the context window is filling up.
+**CTR (Context Rate)** — Context consumption rate (%/min). How fast the context window is filling up. Includes a sparkline trend bar.
+
+**TDY / WEK (Cross-Session Cost)** — Aggregated cost across all sessions for today and the current week. Refreshes every 30 seconds.
 
 **CTF (Context Full)** — Estimated wall-clock time (HH:MM) when context will hit 100%, based on current CTR. If CTR is zero or context is not growing, shows `--`.
 
@@ -176,6 +183,7 @@ All progress bars use the same thresholds:
 |----------|---------|-------------|
 | `CLAUDE_STATUS_WARN` | `50` | Yellow threshold (%) |
 | `CLAUDE_STATUS_CRIT` | `80` | Red threshold (%) |
+| `CLAUDE_WARN_BRN` | `0.50` | Burn rate warning threshold ($/min) |
 
 ```bash
 export CLAUDE_STATUS_WARN=60
