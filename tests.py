@@ -16,7 +16,10 @@ import rates
 from monitor import (
     _fit_buf_height, calc_rates, f_tok, f_cost, f_dur, f_cd, _num,
     _limit_color, _reset_color, collect_warnings,
+    truncate, vlen, mkbar,
+    calc_cross_session_costs,
     WARN_BRN, BRN_MAX, CTR_MAX, CST_MAX,
+    BAR_W, MAX_FILE_SIZE, _SID_RE, _ANSI_RE as M_ANSI_RE,
     C_RED as M_RED, C_YEL as M_YEL, C_GRN as M_GRN, C_DIM as M_DIM,
     C_ORN as M_ORN,
 )
@@ -792,6 +795,210 @@ class TestCollectWarnings(unittest.TestCase):
         data["rate_limits"]["five_hour"]["used_percentage"] = 85
         warns = collect_warnings(data, WARN_BRN + 0.5, 5.0)  # CTF + 5HL + BRN
         self.assertGreaterEqual(len(warns), 3)
+
+
+# ---------------------------------------------------------------------------
+# truncate / vlen
+# ---------------------------------------------------------------------------
+class TestVlen(unittest.TestCase):
+
+    def test_plain_text(self):
+        self.assertEqual(vlen("hello"), 5)
+
+    def test_ansi_ignored(self):
+        s = f"\033[31mred\033[0m"
+        self.assertEqual(vlen(s), 3)
+
+    def test_empty(self):
+        self.assertEqual(vlen(""), 0)
+
+
+class TestTruncate(unittest.TestCase):
+
+    def test_short_unchanged(self):
+        self.assertEqual(truncate("abc", 10), "abc")
+
+    def test_exact_length(self):
+        self.assertEqual(vlen(truncate("abcde", 5)), 5)
+
+    def test_truncates_long(self):
+        result = truncate("abcdefghij", 5)
+        self.assertEqual(vlen(result), 5)
+
+    def test_preserves_ansi(self):
+        s = f"\033[31mhello world\033[0m"
+        result = truncate(s, 5)
+        self.assertEqual(vlen(result), 5)
+        self.assertIn("hello", result)
+
+    def test_zero_width(self):
+        result = truncate("abc", 0)
+        self.assertEqual(vlen(result), 0)
+
+
+# ---------------------------------------------------------------------------
+# mkbar
+# ---------------------------------------------------------------------------
+class TestMkbar(unittest.TestCase):
+
+    def test_zero_percent(self):
+        result = mkbar(0)
+        plain = M_ANSI_RE.sub("", result)
+        self.assertIn("0.0", plain)
+        self.assertIn("[", plain)
+        self.assertIn("]", plain)
+
+    def test_100_percent(self):
+        result = mkbar(100)
+        plain = M_ANSI_RE.sub("", result)
+        self.assertIn("100.0", plain)
+
+    def test_clamps_negative(self):
+        result = mkbar(-10)
+        plain = M_ANSI_RE.sub("", result)
+        self.assertIn("0.0", plain)
+
+    def test_clamps_over_100(self):
+        result = mkbar(150)
+        plain = M_ANSI_RE.sub("", result)
+        self.assertIn("100.0", plain)
+
+    def test_green_under_50(self):
+        result = mkbar(30)
+        self.assertIn(M_GRN, result)
+
+    def test_yellow_50_79(self):
+        result = mkbar(60)
+        self.assertIn(M_YEL, result)
+
+    def test_red_over_80(self):
+        result = mkbar(90)
+        self.assertIn(M_RED, result)
+
+    def test_custom_color(self):
+        result = mkbar(30, M_ORN)
+        self.assertIn(M_ORN, result)
+
+    def test_visual_width(self):
+        result = mkbar(50)
+        plain = M_ANSI_RE.sub("", result)
+        # [████░░░]  XX.X %  → brackets + BAR_W + space + percent
+        self.assertIn("[", plain)
+        self.assertIn("]", plain)
+
+
+# ---------------------------------------------------------------------------
+# IPC — write_shared_state / _trim_history
+# ---------------------------------------------------------------------------
+class TestWriteSharedState(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmpdir = tempfile.mkdtemp()
+        self._base = pathlib.Path(self.tmpdir) / "claude-aio-monitor"
+        # Patch tempfile.gettempdir in statusline module
+        import statusline
+        self._orig_gettempdir = statusline.tempfile.gettempdir
+        statusline.tempfile.gettempdir = lambda: self.tmpdir
+        statusline._DATA_DIR = self._base
+
+    def tearDown(self):
+        import shutil, statusline
+        statusline.tempfile.gettempdir = self._orig_gettempdir
+        statusline._DATA_DIR = statusline.pathlib.Path(
+            self._orig_gettempdir()) / "claude-aio-monitor"
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_creates_snapshot_and_history(self):
+        import json
+        from statusline import write_shared_state
+        data = {"session_id": "test123", "cost": {"total_cost_usd": 1.5}}
+        write_shared_state(data)
+        snap = self._base / "test123.json"
+        hist = self._base / "test123.jsonl"
+        self.assertTrue(snap.exists())
+        self.assertTrue(hist.exists())
+        loaded = json.loads(snap.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["session_id"], "test123")
+
+    def test_history_appends(self):
+        from statusline import write_shared_state
+        data = {"session_id": "test456", "cost": {"total_cost_usd": 1.0}}
+        write_shared_state(data)
+        write_shared_state(data)
+        hist = self._base / "test456.jsonl"
+        lines = hist.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+
+    def test_invalid_session_id_uses_default(self):
+        from statusline import write_shared_state
+        data = {"session_id": "../evil", "cost": {"total_cost_usd": 0}}
+        write_shared_state(data)
+        snap = self._base / "default.json"
+        self.assertTrue(snap.exists())
+
+
+class TestTrimHistory(unittest.TestCase):
+
+    def test_trims_when_over_limit(self):
+        import tempfile, pathlib
+        from statusline import _trim_history, HISTORY_TRIM_TO
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl",
+                                          delete=False, encoding="utf-8")
+        lines = [f'{{"i": {i}}}' for i in range(HISTORY_TRIM_TO + 500)]
+        tmp.write("\n".join(lines) + "\n")
+        tmp.close()
+        p = pathlib.Path(tmp.name)
+        _trim_history(p)
+        result = p.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(result), HISTORY_TRIM_TO)
+        p.unlink()
+
+
+# ---------------------------------------------------------------------------
+# calc_cross_session_costs
+# ---------------------------------------------------------------------------
+class TestCalcCrossSesionCosts(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib
+        import monitor
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = monitor.DATA_DIR
+        monitor.DATA_DIR = pathlib.Path(self.tmpdir)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_empty_dir(self):
+        today, week = calc_cross_session_costs()
+        self.assertEqual(today, 0.0)
+        self.assertEqual(week, 0.0)
+
+    def test_single_session(self):
+        import pathlib, json, time
+        from datetime import datetime
+        now = time.time()
+        today_start = datetime.combine(datetime.today().date(),
+                                       datetime.min.time()).timestamp()
+        entries = [
+            json.dumps({"t": today_start - 100, "cost": {"total_cost_usd": 0.0}}),
+            json.dumps({"t": now, "cost": {"total_cost_usd": 5.0}}),
+        ]
+        jl = pathlib.Path(self.tmpdir) / "sess1.jsonl"
+        jl.write_text("\n".join(entries) + "\n", encoding="utf-8")
+        today, week = calc_cross_session_costs()
+        self.assertAlmostEqual(today, 5.0, places=2)
+        self.assertGreater(week, 0.0)
+
+    def test_invalid_sid_skipped(self):
+        import pathlib
+        jl = pathlib.Path(self.tmpdir) / "..evil.jsonl"
+        jl.write_text('{"t": 1, "cost": {"total_cost_usd": 999}}\n', encoding="utf-8")
+        today, week = calc_cross_session_costs()
+        self.assertEqual(today, 0.0)
 
 
 if __name__ == "__main__":
