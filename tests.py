@@ -16,7 +16,10 @@ import rates
 from monitor import (
     _fit_buf_height, calc_rates, f_tok, f_cost, f_dur, f_cd, _num,
     _limit_color, _reset_color,
+    make_sparkline, mksparkbar, extract_spark_values, collect_warnings,
+    SPARK_W, WARN_BRN,
     C_RED as M_RED, C_YEL as M_YEL, C_GRN as M_GRN, C_DIM as M_DIM,
+    C_ORN as M_ORN,
 )
 
 from statusline import (
@@ -724,6 +727,145 @@ class TestBarBackgroundPersistence(unittest.TestCase):
         last_escape = last_sgr[-1].group()
         self.assertIn("48;2;46;52;64", last_escape,
                        "BG_BAR must be active when EL fires")
+
+
+# ---------------------------------------------------------------------------
+# Sparkline
+# ---------------------------------------------------------------------------
+class TestMakeSparkline(unittest.TestCase):
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(make_sparkline([]), [])
+
+    def test_single_value_returns_empty(self):
+        self.assertEqual(make_sparkline([5.0]), [])
+
+    def test_flat_returns_empty(self):
+        self.assertEqual(make_sparkline([3.0] * 20), [])
+
+    def test_width_respected(self):
+        self.assertEqual(len(make_sparkline([1, 2, 3, 4, 5], width=10)), 10)
+        self.assertEqual(len(make_sparkline([1, 2, 3, 4, 5], width=5)), 5)
+
+    def test_ascending_last_is_high(self):
+        result = make_sparkline(list(range(20)))
+        self.assertGreaterEqual(result[-1], 6)
+
+    def test_descending_first_is_high(self):
+        result = make_sparkline(list(range(20, 0, -1)))
+        self.assertGreaterEqual(result[0], 6)
+
+    def test_values_are_ints_0_to_7(self):
+        result = make_sparkline([1, 2, 3, 4, 5, 6, 7, 8])
+        for v in result:
+            self.assertIsInstance(v, int)
+            self.assertGreaterEqual(v, 0)
+            self.assertLessEqual(v, 7)
+
+    def test_none_values_filtered(self):
+        result = make_sparkline([None, 1, None, 5, None])
+        self.assertEqual(len(result), SPARK_W)
+
+
+class TestMkSparkbar(unittest.TestCase):
+
+    def test_returns_bar_with_brackets(self):
+        result = mksparkbar([1, 2, 3, 4, 5, 6, 7, 8], M_ORN)
+        self.assertIsNotNone(result)
+        plain = _ANSI_RE.sub("", result)
+        self.assertTrue(plain.startswith("["))
+        self.assertTrue(plain.endswith("]"))
+
+    def test_returns_none_when_no_data(self):
+        self.assertIsNone(mksparkbar([], M_ORN))
+
+    def test_bar_contains_shade_for_zero(self):
+        # All ascending — first bucket might be 0 → shade char
+        result = mksparkbar(list(range(1, 20)), M_ORN)
+        self.assertIsNotNone(result)
+
+
+class TestExtractSparkValues(unittest.TestCase):
+
+    def _entry(self, t, cost):
+        return {"t": t, "cost": {"total_cost_usd": cost}}
+
+    def test_basic(self):
+        now = time.time()
+        hist = [self._entry(now - 120, 0.0), self._entry(now - 60, 0.06), self._entry(now, 0.12)]
+        vals = extract_spark_values(hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
+        self.assertEqual(len(vals), 2)
+        self.assertGreater(vals[0], 0)
+
+    def test_empty_hist(self):
+        self.assertEqual(extract_spark_values([], lambda e: 0), [])
+
+    def test_old_entries_filtered(self):
+        hist = [self._entry(1000, 0), self._entry(1060, 1)]  # ancient timestamps
+        vals = extract_spark_values(hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
+        self.assertEqual(vals, [])
+
+    def test_sub_5s_skipped(self):
+        now = time.time()
+        hist = [self._entry(now - 3, 0.0), self._entry(now, 0.06)]
+        vals = extract_spark_values(hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
+        self.assertEqual(vals, [])
+
+
+# ---------------------------------------------------------------------------
+# Warnings
+# ---------------------------------------------------------------------------
+class TestCollectWarnings(unittest.TestCase):
+
+    def test_no_warnings_healthy(self):
+        data = _full_data()
+        self.assertEqual(collect_warnings(data, 0.01, 0.1), [])
+
+    def test_ctf_under_30min(self):
+        data = _full_data()
+        data["context_window"]["used_percentage"] = 70
+        warns = collect_warnings(data, 0.01, 5.0)  # 30% / 5 = 6 min
+        self.assertTrue(any("CTF" in w for w in warns))
+
+    def test_ctf_over_30min_no_warn(self):
+        data = _full_data()
+        data["context_window"]["used_percentage"] = 10
+        warns = collect_warnings(data, 0.01, 0.1)  # 90% / 0.1 = 900 min
+        self.assertFalse(any("CTF" in w for w in warns))
+
+    def test_5hl_above_80(self):
+        data = _full_data()
+        data["rate_limits"]["five_hour"]["used_percentage"] = 85
+        warns = collect_warnings(data, 0.01, 0.1)
+        self.assertTrue(any("5HL" in w for w in warns))
+
+    def test_7dl_above_80(self):
+        data = _full_data()
+        data["rate_limits"]["seven_day"]["used_percentage"] = 90
+        warns = collect_warnings(data, 0.01, 0.1)
+        self.assertTrue(any("7DL" in w for w in warns))
+
+    def test_brn_above_threshold(self):
+        warns = collect_warnings(_full_data(), WARN_BRN + 0.01, 0.1)
+        self.assertTrue(any("BRN" in w for w in warns))
+
+    def test_brn_below_threshold(self):
+        warns = collect_warnings(_full_data(), 0.01, 0.1)
+        self.assertFalse(any("BRN" in w for w in warns))
+
+    def test_expired_reset_no_warn(self):
+        data = _full_data()
+        data["rate_limits"]["five_hour"]["used_percentage"] = 90
+        data["rate_limits"]["five_hour"]["resets_at"] = 1000  # far past
+        warns = collect_warnings(data, 0.01, 0.1)
+        self.assertFalse(any("5HL" in w for w in warns))
+
+    def test_multiple_warnings(self):
+        data = _full_data()
+        data["context_window"]["used_percentage"] = 95
+        data["rate_limits"]["five_hour"]["used_percentage"] = 85
+        warns = collect_warnings(data, WARN_BRN + 0.5, 5.0)  # CTF + 5HL + BRN
+        self.assertGreaterEqual(len(warns), 3)
 
 
 if __name__ == "__main__":

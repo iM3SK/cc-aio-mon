@@ -120,11 +120,17 @@ C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.5.2"
+VERSION = "1.6.0"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
+SPARK_W = 12  # sparkline bar width (half of BAR_W)
+
+try:
+    WARN_BRN = float(os.environ.get("CLAUDE_WARN_BRN", "0.50"))
+except (ValueError, TypeError):
+    WARN_BRN = 0.50
 
 
 def _num(v, default=0):
@@ -288,10 +294,179 @@ def _reset_color(resets_epoch, window_secs):
 
 
 # ---------------------------------------------------------------------------
+# Sparkline — braille bar with BG, half-width
+# ---------------------------------------------------------------------------
+_SPARK_GLYPHS = "\u2800\u28c0\u28c4\u28e4\u28e6\u28f6\u28f7\u28ff"  # 8 levels: ⠀⣀⣄⣤⣦⣶⣷⣿
+
+
+def make_sparkline(values, width=SPARK_W):
+    """Compress float list into braille levels 0-7. Returns list of ints."""
+    clean = [v for v in values if v is not None and isinstance(v, (int, float))]
+    if len(clean) < 2:
+        return []
+    vmin, vmax = min(clean), max(clean)
+    if vmax <= vmin:
+        return []
+    n = len(clean)
+    levels = []
+    for i in range(width):
+        lo = int(i * n / width)
+        hi = max(lo + 1, int((i + 1) * n / width))
+        bucket = clean[lo:hi]
+        avg = sum(bucket) / len(bucket)
+        level = int((avg - vmin) / (vmax - vmin) * 7)
+        levels.append(max(0, min(7, level)))
+    return levels
+
+
+def mksparkbar(values, color, width=SPARK_W):
+    """Returns [░░░░░░░░░░░░░⣀⣄⣤⣦⣶⣷⣿⣷⣶⣤⣀] sparkline with BG, padded to BAR_W."""
+    levels = make_sparkline(values, width)
+    if not levels:
+        return None
+    pad = BAR_W - len(levels)
+    parts = []
+    for _ in range(pad):
+        parts.append(f"{C_DIM}{SH}{R}")
+    for lv in levels:
+        if lv > 0:
+            parts.append(f"{BG_BAR}{color}{_SPARK_GLYPHS[lv]}{R}")
+        else:
+            parts.append(f"{C_DIM}{SH}{R}")
+    inner = "".join(parts)
+    return f"{C_DIM}[{R}{inner}{C_DIM}]{R}"
+
+
+def extract_spark_values(hist, key_fn, cutoff_secs=3600):
+    """Extract per-interval rates from history for sparkline display."""
+    now = time.time()
+    cutoff = now - cutoff_secs
+    window = [e for e in hist
+              if _num(e.get("t"), 0) >= cutoff and _num(e.get("t"), 0) > 1_577_836_800]
+    if len(window) < 2:
+        return []
+    rates = []
+    for i in range(1, len(window)):
+        dt = _num(window[i].get("t")) - _num(window[i - 1].get("t"))
+        if dt < 5:
+            continue
+        v0 = key_fn(window[i - 1])
+        v1 = key_fn(window[i])
+        if v0 is None or v1 is None:
+            continue
+        delta = max(0, v1 - v0)
+        rates.append(delta / dt * 60)
+    return rates
+
+
+# ---------------------------------------------------------------------------
+# Smart warnings
+# ---------------------------------------------------------------------------
+def collect_warnings(data, cpm, xpm):
+    """Returns list of warning label strings for active conditions."""
+    warnings = []
+    # CTF — context filling fast
+    if xpm and xpm > 0:
+        ctx_pct = _num(data.get("context_window", {}).get("used_percentage"))
+        if ctx_pct < 100:
+            eta_mins = (100 - ctx_pct) / xpm
+            if eta_mins < 30:
+                warnings.append(f"CTF <{int(eta_mins)}m")
+    # 5HL
+    rl = data.get("rate_limits") or {}
+    fh = rl.get("five_hour") or {}
+    fh_pct = _num(fh.get("used_percentage"))
+    fh_resets = _num(fh.get("resets_at"), 0)
+    if fh_resets > 0 and fh_resets < time.time():
+        fh_pct = 0
+    if fh_pct > 80:
+        warnings.append(f"5HL {fh_pct:.0f}%")
+    # 7DL
+    sd = rl.get("seven_day") or {}
+    sd_pct = _num(sd.get("used_percentage"))
+    sd_resets = _num(sd.get("resets_at"), 0)
+    if sd_resets > 0 and sd_resets < time.time():
+        sd_pct = 0
+    if sd_pct > 80:
+        warnings.append(f"7DL {sd_pct:.0f}%")
+    # BRN
+    if cpm and cpm > WARN_BRN:
+        warnings.append(f"BRN {cpm:.4f}$/m")
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Cross-session cost aggregation
+# ---------------------------------------------------------------------------
+_cost_cache = {"t": 0.0, "today": 0.0, "week": 0.0}
+
+
+def calc_cross_session_costs():
+    """Aggregate cost across all sessions for today and this week."""
+    if not DATA_DIR.exists():
+        return 0.0, 0.0
+    today_start = datetime.combine(datetime.today().date(), datetime.min.time()).timestamp()
+    week_start = today_start - 6 * 86400
+    today_total = 0.0
+    week_total = 0.0
+    for jl in DATA_DIR.glob("*.jsonl"):
+        sid = jl.stem
+        if not _SID_RE.match(sid):
+            continue
+        try:
+            st = jl.stat()
+            if st.st_size > MAX_FILE_SIZE * 10:
+                continue
+            raw = jl.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        entries = []
+        for ln in raw.splitlines():
+            try:
+                entries.append(json.loads(ln))
+            except json.JSONDecodeError:
+                pass
+        if not entries:
+            continue
+        entries.sort(key=lambda e: _num(e.get("t"), 0))
+        # Today cost = last entry today - last entry before today (baseline)
+        baseline_today = 0.0
+        final_today = 0.0
+        for e in entries:
+            cost = _num(e.get("cost", {}).get("total_cost_usd"))
+            if _num(e.get("t"), 0) < today_start:
+                baseline_today = cost
+            else:
+                final_today = cost
+        today_total += max(0.0, final_today - baseline_today)
+        # Week cost
+        baseline_week = 0.0
+        final_week = 0.0
+        for e in entries:
+            cost = _num(e.get("cost", {}).get("total_cost_usd"))
+            if _num(e.get("t"), 0) < week_start:
+                baseline_week = cost
+            else:
+                final_week = cost
+        week_total += max(0.0, final_week - baseline_week)
+    return today_total, week_total
+
+
+def cached_cross_session_costs(ttl=30.0):
+    """Cached version — refreshes every ttl seconds."""
+    now = time.time()
+    if now - _cost_cache["t"] < ttl:
+        return _cost_cache["today"], _cost_cache["week"]
+    today, week = calc_cross_session_costs()
+    _cost_cache.update({"t": now, "today": today, "week": week})
+    return today, week
+
+
+# ---------------------------------------------------------------------------
 # Layout helpers — no borders, just lines
 # ---------------------------------------------------------------------------
 def sep(w):
-    return C_DIM + H * w + R
+    return C_DIM + "-" * w + R
 
 
 # ---------------------------------------------------------------------------
@@ -517,8 +692,13 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     else:
         buf.append(f"{C_GRN}{B}Session Active {spin_line()}{R}  {C_FG}{session_label}{R}")
 
+    # ── Smart warnings (suppressed when stale) ─────────────
+    _warns = [] if stale else collect_warnings(data, cpm, xpm)
+    if _warns:
+        warn_parts = [f"{C_RED}{B}{w}{R}" for w in _warns]
+        buf.append(f"  {'   '.join(warn_parts)}")
+
     buf.append(sep(SW))
-    buf.append("")
 
     inp = _num(usage.get("input_tokens", 0))
     out = _num(usage.get("output_tokens", 0))
@@ -529,44 +709,30 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     if dur > 0:
         apr_pct = round(api_dur / dur * 100, 1)
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
-        buf.append("")
-        buf.append(f"    {c(C_DIM)}DUR {f_dur(dur)}{R} {C_DIM}\u2502{R} {c(C_DIM)}API {f_dur(api_dur)}{R}")
+        buf.append(f"    {c(C_DIM)}DUR {f_dur(dur)}{R} {C_DIM}-{R} {c(C_DIM)}API {f_dur(api_dur)}{R}")
     else:
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
-        buf.append("")
-        buf.append(f"    {C_DIM}no active session{R}")
-    buf.append("")
     buf.append(sep(SW))
-    buf.append("")
 
     # ── CHR — Cache Hit Rate ────────────────────────────────
     if any([cr, cwt]):
         total_cache = cr + cwt
         chr_pct = round(cr / total_cache * 100, 1) if total_cache > 0 else 0
         buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(chr_pct, c(C_GRN))}")
-        buf.append("")
-        buf.append(f"    {c(C_GRN)}c.r:{R} {c(C_GRN)}{f_tok(cr)}{R} {C_DIM}\u2502{R} {c(C_GRN)}c.w:{R} {c(C_GRN)}{f_tok(cwt)}{R}")
+        buf.append(f"    {c(C_GRN)}c.r:{R} {c(C_GRN)}{f_tok(cr)}{R} {C_DIM}-{R} {c(C_GRN)}c.w:{R} {c(C_GRN)}{f_tok(cwt)}{R}")
     else:
         buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(0, C_DIM)}")
-        buf.append("")
-        buf.append(f"    {C_DIM}no cache data{R}")
-    buf.append("")
     buf.append(sep(SW))
-    buf.append("")
 
     # ── CTX ─────────────────────────────────────────────────
     ctx_used = int(ctx_total * ctx_pct / 100) if ctx_total else 0
     buf.append(f"{c(C_CYN)}{B}CTX{R} {mkbar(ctx_pct, c(C_CYN))}")
-    buf.append("")
     warn = f"  {c(C_RED)}{B}! CTX>80%{R}" if ctx_pct >= 80 else ""
     if any([inp, out]):
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}\u2502{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn} {C_DIM}\u2502{R} {c(C_WHT)}in:{R} {c(C_WHT)}{f_tok(inp)}{R} {C_DIM}\u2502{R} {c(C_WHT)}out:{R} {c(C_WHT)}{f_tok(out)}{R}")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}-{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn} {C_DIM}-{R} {c(C_WHT)}in:{R} {c(C_WHT)}{f_tok(inp)}{R} {C_DIM}-{R} {c(C_WHT)}out:{R} {c(C_WHT)}{f_tok(out)}{R}")
     else:
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}\u2502{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn}")
-        buf.append(f"    {C_DIM}awaiting first api call{R}")
-    buf.append("")
+        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R} {C_DIM}-{R} {c(C_CYN)}{f_tok(ctx_total)}{R}{warn}")
     buf.append(sep(SW))
-    buf.append("")
 
     # ── 5HL ─────────────────────────────────────────────────
     if rl is not None:
@@ -578,10 +744,8 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
                 pct = 0.0
             lc = c(_limit_color(pct))
             buf.append(f"{lc}{B}5HL{R} {mkbar(pct)}")
-            buf.append("")
             rc = c(_reset_color(resets, 18000))  # 5h window
             buf.append(f"    {C_WHT}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
-            buf.append("")
 
         # ── 7DL ─────────────────────────────────────────────
         sd = rl.get("seven_day")
@@ -592,7 +756,6 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
                 pct = 0.0
             lc = c(_limit_color(pct))
             buf.append(f"{lc}{B}7DL{R} {mkbar(pct)}")
-            buf.append("")
             rc = c(_reset_color(resets, 604800))  # 7d window
             buf.append(f"    {C_WHT}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
@@ -601,17 +764,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
 
-    buf.append("")
     buf.append(sep(SW))
 
-    # ── LNS ─────────────────────────────────────────────────
-    if added or removed:
-        buf.append(f"{C_DIM}LNS{R}  {c(C_GRN)}+{added:,}{R} {c(C_RED)}-{removed:,}{R}")
-
-    buf.append(sep(SW))
-    buf.append("")
-
-    # ── Stats (compact: CST/BRN/CTR/CTF + NOW/UPD) ───────────
+    # ── Stats (compact: BRN/CTR/CST/CTF/TDY/NOW) ────────────
     brn_val = f"{cpm:.4f} $/min" if cpm and cpm > 0.0001 else "collecting..."
     ctr_val = f"{xpm:.2f} %/min" if xpm and xpm > 0.001 else "--"
     ctf_val = "--"
@@ -632,19 +787,44 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             age_s = "?"
     else:
         age_s = "?"
-    buf.append(f"{c(C_ORN)}CST  {B}{f_cost(usd)}{R}")
-    buf.append(f"{c(C_ORN)}BRN  {B}{brn_val}{R}")
-    buf.append(f"{c(C_YEL)}CTR  {ctr_val}{R}")
-    buf.append(f"{c(C_RED)}CTF  {B}{ctf_val}{R}")
-    buf.append("")
-    buf.append(f"{c(C_DIM)}NOW  {now}{R}")
-    buf.append(f"{c(C_DIM)}UPD  {age_s}{R}")
-
-    buf.append("")
+    # ── BRN with sparkline bar ─────────────────────────────
+    brn_spark_vals = extract_spark_values(
+        hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
+    brn_bar = mksparkbar(brn_spark_vals, c(C_ORN))
+    if brn_bar:
+        buf.append(f"{c(C_ORN)}BRN {brn_bar} {B}{brn_val}{R}")
+    else:
+        buf.append(f"{c(C_ORN)}BRN  {B}{brn_val}{R}")
+    # ── CTR with sparkline bar ─────────────────────────────
+    ctr_spark_vals = extract_spark_values(
+        hist, lambda e: _num(e.get("context_window", {}).get("used_percentage")))
+    ctr_bar = mksparkbar(ctr_spark_vals, c(C_YEL))
+    if ctr_bar:
+        buf.append(f"{c(C_YEL)}CTR {ctr_bar} {ctr_val}{R}")
+    else:
+        buf.append(f"{c(C_YEL)}CTR  {ctr_val}{R}")
+    # ── CST with sparkline bar (cost trend) ──────────────
+    cst_spark_vals = extract_spark_values(
+        hist, lambda e: _num(e.get("cost", {}).get("total_cost_usd")))
+    cst_bar = mksparkbar(cst_spark_vals, c(C_ORN))
+    if cst_bar:
+        buf.append(f"{c(C_ORN)}CST {cst_bar} {B}{f_cost(usd)}{R}")
+    else:
+        buf.append(f"{c(C_ORN)}CST  {B}{f_cost(usd)}{R}")
+    buf.append(f"{c(C_RED)}CTF {B}{ctf_val}{R}")
+    # ── Cross-session cost (TDY / WEK) ─────────────────────
+    tdy, wek = cached_cross_session_costs()
+    tdy_s = f_cost(tdy) if tdy > 0 else "--"
+    wek_s = f_cost(wek) if wek > 0 else "--"
+    buf.append(f"{c(C_ORN)}TDY {tdy_s} {C_DIM}-{R} {c(C_ORN)}WEK {wek_s}{R}")
+    buf.append(f"{c(C_WHT)}NOW {now} {C_DIM}-{R} {c(C_WHT)}UPD {age_s}{R}")
+    if added or removed:
+        buf.append(f"{C_DIM}LNS{R} {c(C_GRN)}+{added:,}{R} {c(C_RED)}-{removed:,}{R}")
 
     # ── Footer ──────────────────────────────────────────────
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
+    buf.append("")
 
     _fit_buf_height(buf, rows, clip_tail=False)
     return buf
@@ -670,8 +850,10 @@ def render_legend(cols, rows):
     buf.append(f"{C_YEL}7DL  7-Day Rate Limit (color: usage %){R}")
     buf.append(f"{C_DIM}LNS  Lines Changed{R}")
     buf.append(f"{C_ORN}CST  Session Cost{R}")
-    buf.append(f"{C_ORN}BRN  Burn Rate ($ / min){R}")
-    buf.append(f"{C_YEL}CTR  Context Rate (% / min){R}")
+    buf.append(f"{C_ORN}TDY  Today's Cost (all sessions){R}")
+    buf.append(f"{C_ORN}WEK  This Week's Cost (all sessions){R}")
+    buf.append(f"{C_ORN}BRN  Burn Rate ($ / min) + sparkline trend{R}")
+    buf.append(f"{C_YEL}CTR  Context Rate (% / min) + sparkline trend{R}")
     buf.append(f"{C_RED}CTF  Context Full (ETA){R}")
     buf.append(f"{C_DIM}NOW  Current Time{R}")
     buf.append(f"{C_DIM}UPD  Last Data Update{R}")
