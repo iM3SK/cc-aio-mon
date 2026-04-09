@@ -5,9 +5,10 @@ Terminal dashboard (monitor.py + rates.py). Stdlib only.
 Reads shared state from statusline.py via temp files.
 
 Usage:
-    python monitor.py                  # auto-detect session
-    python monitor.py --session ID     # specific session
-    python monitor.py --list           # list active sessions
+    python monitor.py                     # auto-detect session
+    python monitor.py --session ID        # specific session
+    python monitor.py --list              # list active sessions
+    python monitor.py --refresh 1000      # custom refresh interval (ms)
 """
 
 import argparse

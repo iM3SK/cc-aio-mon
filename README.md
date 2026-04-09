@@ -135,7 +135,7 @@ Right-aligned (dropped from right when terminal is narrow):
 | CTR | yellow | Context rate — progress bar 0-5.0 %/min |
 | CST | orange | Session cost — progress bar 0-$50 |
 | TDY | orange | Today's cost aggregated across all sessions (sub-stat under CST) |
-| WEK | orange | This week's cost aggregated across all sessions (sub-stat under CST) |
+| WEK | orange | Rolling 7-day cost across all sessions (sub-stat under CST) |
 | NOW | white | Current local time |
 | UPD | white | Time since last data update |
 | LNS | white | Lines changed — added (green) / removed (red) values |
@@ -200,6 +200,8 @@ Claude Code ──stdin──> statusline.py ──> terminal (one-line status)
                             |
                             v
                       monitor.py ──> terminal (fullscreen TUI)
+
+Both statusline.py and monitor.py import rates.py for shared BRN/CTR calculation.
 ```
 
 1. **statusline.py** receives JSON from Claude Code via stdin on each status update.
