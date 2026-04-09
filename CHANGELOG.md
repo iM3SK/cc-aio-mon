@@ -20,6 +20,10 @@
 
 **Other:**
 - `tests.py` — 142 tests (IPC, mkbar, truncate, cross-session costs, fixed-range constants)
+- Legend: added sub-stat descriptions (DUR, API, c.r, c.w, in, out)
+- README: SEO/GEO overhaul — AI-readable Input/Output table, data flow, metrics at a glance
+- PR template: updated compile check to include rates.py
+- CI: actions updated to Node.js 24 (checkout v6.0.2, setup-python v6.2.0)
 - VERSION bumped to `1.6.0`
 
 ## v1.5.2 — 2026-04-08
