@@ -1,10 +1,10 @@
 # CC AIO MON — Claude Code Terminal Monitor
 
-![Python 3.8+](https://img.shields.io/badge/requires_python-3.8%2B-blue) ![License MIT](https://img.shields.io/badge/license-MIT-green) ![Dependencies](https://img.shields.io/badge/pip_packages-none-brightgreen) ![Tests](https://github.com/iM3SK/cc-aio-mon/workflows/Tests/badge.svg) ![CodeQL](https://github.com/iM3SK/cc-aio-mon/actions/workflows/github-code-scanning/codeql/badge.svg) ![Scorecard](https://github.com/iM3SK/cc-aio-mon/workflows/Scorecard%20supply-chain%20security/badge.svg) ![Bandit](https://github.com/iM3SK/cc-aio-mon/workflows/Bandit%20Security%20Scan/badge.svg)
+![Python 3.8+](https://img.shields.io/badge/requires_python-3.8%2B-blue) ![License MIT](https://img.shields.io/badge/license-MIT-green) ![Dependencies](https://img.shields.io/badge/dependencies-stdlib_only-brightgreen) ![Tests](https://github.com/iM3SK/cc-aio-mon/workflows/Tests/badge.svg) ![CodeQL](https://github.com/iM3SK/cc-aio-mon/actions/workflows/github-code-scanning/codeql/badge.svg) ![Scorecard](https://github.com/iM3SK/cc-aio-mon/workflows/Scorecard%20supply-chain%20security/badge.svg) ![Bandit](https://github.com/iM3SK/cc-aio-mon/workflows/Bandit%20Security%20Scan/badge.svg)
 
-**Real-time terminal monitor for Claude Code CLI.** Track context window usage, API rate limits, session costs, burn rate, and cache performance — all in one compact TUI dashboard. Zero Python package dependencies, stdlib-only Python, cross-platform.
+**Real-time terminal monitor for Claude Code CLI.** Track context window usage, API rate limits, session costs, burn rate, and cache performance — all in one compact TUI dashboard. Stdlib only (Python 3.8+), cross-platform.
 
-> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** on every status update (~300ms debounce). The script parses the JSON, renders a one-line ANSI status bar in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `rates.py` for burn rate ($/min) and context rate (%/min) calculation. **Three Python files, zero Python package dependencies, no build step.**
+> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** after each assistant message, permission mode change, or vim mode toggle (300ms debounce). The script parses the JSON, renders a one-line ANSI status bar in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `rates.py` for burn rate ($/min) and context rate (%/min) calculation. **Three Python files, stdlib only, no build step.**
 
 | | |
 |---|---|
@@ -14,7 +14,7 @@
 | **Files** | `statusline.py` (statusline renderer + IPC writer), `monitor.py` (TUI dashboard), `rates.py` (shared rate math) |
 | **IPC** | Atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/` — no sockets, no databases |
 
-<p align="center"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON v1.6.0 — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></p>
+<p align="center"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></p>
 
 ## Why CC AIO MON?
 
@@ -23,27 +23,27 @@
 | claude-monitor | Reads JSONL cost logs | Estimated data, not real-time |
 | ccusage | CLI usage aggregator | Historical only, no live view |
 | ccstatusline | Status line script | No TUI, no multi-session |
-| **CC AIO MON** | **Official stdin JSON protocol** | **Real-time, zero deps, most complete** |
+| **CC AIO MON** | **Official stdin JSON protocol** | **Real-time, stdlib only, most complete** |
 
 Other monitors scrape log files or estimate costs from token counts. CC AIO MON reads the **official Claude Code statusline JSON** — the same data Claude Code uses internally. No estimation, no guessing, no stale logs.
 
-<p align="center"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON v1.6.0 — one-line ANSI status bar showing model, APR, CTX, CHR, 5HL, 7DL, BRN, CTR, CTF, CST, DUR, NOW segments with Nord truecolor palette"></p>
+<p align="center"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — one-line ANSI status bar showing model, APR, CTX, CHR, 5HL, 7DL, BRN, CTR, CTF, CST, DUR, NOW segments with Nord truecolor palette"></p>
 
-<p align="center"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON v1.6.0 — legend overlay showing all metric codes, descriptions, and fixed ranges for BRN CTR CST"></p>
+<p align="center"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay showing all metric codes, descriptions, and fixed ranges for BRN CTR CST"></p>
 
-## Install
+## Setup
 
 | Platform | Guide |
 |----------|-------|
-| [Windows](docs/install-windows.md) | Python Launcher (`py`), Windows Terminal, PowerShell |
-| [macOS](docs/install-macos.md) | python3, Terminal.app or iTerm2 |
-| [Linux](docs/install-linux.md) | python3, any truecolor terminal |
+| [Windows](docs/setup-windows.md) | Python Launcher (`py`), Windows Terminal, PowerShell |
+| [macOS](docs/setup-macos.md) | python3, Terminal.app or iTerm2 |
+| [Linux](docs/setup-linux.md) | python3, any truecolor terminal |
 
 ## Features
 
 - **Compact** — all critical metrics in one screen. No scrolling, no tabs, no wasted space.
-- **Zero Python package dependencies** — stdlib-only Python 3.8+. No pip install, no venv, no node_modules.
-- **Easy setup** — see [platform install guide](#install), one config line + `python3 monitor.py`. Done.
+- **Stdlib only** — Python 3.8+. No pip install, no venv, no node_modules.
+- **Simple setup** — clone the repo, add one block to `~/.claude/settings.json`, launch the monitor. See [platform setup guide](#setup).
 - **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin. No log scraping, no file watching, no API polling. Real data, real-time.
 - **Two-tier architecture** — `statusline.py` (one-line status bar, triggered per Claude Code event) + `monitor.py` (fullscreen TUI, polls temp files independently).
 - **Temp file IPC** — atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/`. No sockets, no databases, no shared memory. Works across terminal sessions.
@@ -61,7 +61,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 
 The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes, `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
-<p align="center"><img src="screenshots/cc-aio-mon-idle.png" alt="CC AIO MON v1.6.0 — idle/inactive session state: header shows 'Session Inactive \ (617m)' with last known session ID, all progress bars and values dimmed but preserved (APR 11.5%, CHR 100%, CTX 34%, 5HL 0%, 7DL 42%, BRN 3.6% 0.0363 $/min, CTR 0.3% 0.01 %/min, CST 100% 59.76 $, TDY 0.22 $, WEK 101.11 $, LNS 732/694), NOW 08:48:51 with UPD 617m staleness counter"></p>
+<p align="center"><img src="screenshots/cc-aio-mon-idle.png" alt="CC AIO MON — idle/inactive session state: header shows 'Session Inactive \ (617m)' with last known session ID, all progress bars and values dimmed but preserved (APR 11.5%, CHR 100%, CTX 34%, 5HL 0%, 7DL 42%, BRN 3.6% 0.0363 $/min, CTR 0.3% 0.01 %/min, CST 100% 59.76 $, TDY 0.22 $, WEK 101.11 $, LNS 732/694), NOW 08:48:51 with UPD 617m staleness counter"></p>
 
 Press `r` to force a refresh (resets the stale timer if new data has arrived), or `s` to switch to a different session from the picker. If the session has truly ended and you want it out of the picker, delete its JSON/JSONL pair from `$TMPDIR/claude-aio-monitor/`.
 
@@ -81,6 +81,9 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **WEK** | Rolling 7-day cost (all sessions) | — | dashboard |
 | **CTF** | Context full ETA | HH:MM | statusline |
 | **LNS** | Lines added / removed | — | dashboard |
+| **DUR** | Session duration | — | statusline |
+| **NOW** | Current clock time | HH:MM:SS | statusline + dashboard |
+| **UPD** | Last data update age | — | dashboard |
 
 ## Usage
 
@@ -90,11 +93,13 @@ Runs automatically on each Claude Code status update via stdin JSON. Outputs a s
 
 ### Dashboard
 
+> On macOS/Linux use `python3`. On Windows use `py`.
+
 ```bash
-python monitor.py              # auto-detect session
-python monitor.py --session ID # specific session
-python monitor.py --list       # list active sessions
-python monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
+python3 monitor.py              # auto-detect session
+python3 monitor.py --session ID # specific session
+python3 monitor.py --list       # list active sessions
+python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 ```
 
 ### Keyboard Shortcuts
@@ -127,7 +132,7 @@ Claude Code ──stdin JSON──> statusline.py ──> terminal (one-line ANS
 Both scripts import rates.py for shared BRN/CTR calculation.
 ```
 
-1. **Claude Code** emits JSON telemetry to `statusline.py` via stdin on each status event (~300ms debounce).
+1. **Claude Code** emits JSON telemetry to `statusline.py` via stdin after each assistant message, permission mode change, or vim mode toggle (300ms debounce).
 2. **statusline.py** parses JSON, renders one-line ANSI status bar, writes atomic snapshot (`.json`) + appends to history (`.jsonl`).
 3. **monitor.py** polls temp directory (default 500ms), reads snapshots + history, renders fullscreen TUI with progress bars and computed metrics.
 4. **rates.py** provides `calc_rates()` — computes BRN ($/min) and CTR (%/min) from JSONL history timestamps.
@@ -183,18 +188,21 @@ export CLAUDE_STATUS_CRIT=90
 
 ## Requirements
 
-- **Python 3.8+** — must be installed separately; not included with Windows or macOS by default. No pip packages needed. See [platform install guide](#install).
+- **Python 3.8+**
+  - macOS / Linux: usually pre-installed (`python3 --version` to verify)
+  - Windows: must be installed separately (not bundled with Windows)
+  - No pip packages needed — stdlib only. See [platform setup guide](#setup).
 - **Claude Code CLI** with statusline support
 - **Truecolor terminal** — Windows Terminal, iTerm2, Alacritty, Kitty, or any terminal supporting ANSI 24-bit color
 - **80 columns** minimum recommended
 
 ## Troubleshooting
 
-Platform-specific troubleshooting is in the install guides:
+Platform-specific troubleshooting is in the setup guides:
 
-- [Windows — Troubleshooting](docs/install-windows.md#troubleshooting)
-- [macOS — Troubleshooting](docs/install-macos.md#troubleshooting)
-- [Linux — Troubleshooting](docs/install-linux.md#troubleshooting)
+- [Windows — Troubleshooting](docs/setup-windows.md#troubleshooting)
+- [macOS — Troubleshooting](docs/setup-macos.md#troubleshooting)
+- [Linux — Troubleshooting](docs/setup-linux.md#troubleshooting)
 
 ## Updating
 
@@ -208,11 +216,15 @@ git -C "$env:USERPROFILE\.cc-aio-mon" pull
 
 The path in `settings.json` does not change between versions — `git pull` updates all three `.py` files and Claude Code picks up the new code on the next session. No changes to `settings.json` needed.
 
-Re-run `install.ps1` / `install.sh` after updating to verify everything is still consistent.
+Re-run `check-requirements.ps1` / `check-requirements.sh` after updating to verify system requirements still pass.
 
 ## Contributing
 
-Contributions welcome. Keep zero-dependency (stdlib only), ship `rates.py` alongside entry scripts, test on Windows and Unix. Run `python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"` before submitting.
+Contributions welcome. Keep it stdlib only, ship `rates.py` alongside entry scripts, test on Windows and Unix. Before submitting, run the compile check (`python3` on macOS/Linux, `py` on Windows):
+
+```bash
+python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"
+```
 
 ## License
 

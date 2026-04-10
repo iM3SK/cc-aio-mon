@@ -6,4 +6,13 @@ dist/
 build/
 .env
 *.tmp
-CC AIO MON BCK/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo

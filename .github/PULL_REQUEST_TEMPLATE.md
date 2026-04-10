@@ -4,11 +4,11 @@
 
 ## Checklist
 
-- [ ] `python tests.py` passes (all tests green)
-- [ ] All files compile: `python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"`
+- [ ] `python3 tests.py` (or `py tests.py` on Windows) passes (all tests green)
+- [ ] All files compile: `python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"` (use `py` on Windows)
 - [ ] Tested manually with a live Claude Code session
 - [ ] Zero new dependencies introduced
-- [ ] `MAX_FILE_SIZE` and ANSI palette kept in sync across `statusline.py`, `monitor.py`, `rates.py` (if changed)
+- [ ] `MAX_FILE_SIZE` and ANSI palette kept in sync across `statusline.py` and `monitor.py` (if changed)
 - [ ] CHANGELOG.md updated
 
 ## Related issues

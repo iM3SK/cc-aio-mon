@@ -15,7 +15,7 @@ What you expected to happen.
 
 **Environment**
 - OS:
-- Python version (`python --version`):
+- Python version (`python3 --version` on macOS/Linux, `py --version` on Windows):
 - Terminal:
 - Claude Code version:
 

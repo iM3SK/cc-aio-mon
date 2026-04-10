@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.6.1 — 2026-04-10
+
+**Refactor:**
+- Replaced `install.ps1` / `install.sh` with `check-requirements.ps1` / `check-requirements.sh` — pure read-only dependency checks (Python, Git, Claude Code CLI); no path hunting, no JSON block generation, no settings.json helpers
+- `check-requirements.sh` prints detected Python command (`python3` or `python`) so users on fallback systems know which to substitute in setup docs
+- Renamed `docs/install-*.md` → `docs/setup-*.md` to reflect that setup is manual; scripts are optional diagnostics only
+
+**Documentation:**
+- README: `## Install` section renamed to `## Setup` for consistency with file names
+- README: `Metrics at a Glance` table now includes DUR, NOW, UPD (were missing)
+- README: "zero dependencies" claim replaced with accurate "stdlib only" throughout — Python itself is a dependency
+- README: Python dependency requirement clarified — pre-installed on macOS/Linux, separate install only on Windows
+- README: statusline trigger description corrected per official Claude Code docs (`after each assistant message, permission mode change, or vim mode toggle`, 300ms debounce)
+- README: platform-specific Python commands in Dashboard/Contributing examples (`python3` on macOS/Linux, `py` on Windows)
+- README: badge updated from `pip_packages none` to `dependencies stdlib only`
+- CONTRIBUTING: same stdlib only / python3-py consistency; "Three entry files" → "Three runtime files" (clarifies `tests.py` exclusion)
+- `docs/setup-macos.md` and `docs/setup-linux.md`: added Python fallback note for users who only have `python` (no `python3`)
+- All setup docs: added `cd` instruction before running `check-requirements` script
+- `.github/PULL_REQUEST_TEMPLATE.md`: removed incorrect mention of `rates.py` in ANSI palette sync check (only `statusline.py` and `monitor.py` carry the palette)
+- `.github/ISSUE_TEMPLATE/feature_request.md`: updated from "Single-file" to "Three runtime files"
+
+**CI:**
+- `tests.yml`: replaced inline Python-version ternary with proper `exclude:` block — removes redundant Windows 3.8 job that was collapsing to 3.12 at runtime
+- `scorecard.yml`: removed dead `pull_request` branch from job `if:` condition (pull_request is not in `on:` triggers)
+
+**Other:**
+- VERSION bumped to `1.6.1`
+
 ## v1.6.0 — 2026-04-09
 
 **Features:**

@@ -1,4 +1,4 @@
-# Install — Windows
+# Setup — Windows
 
 ## Requirements
 
@@ -31,27 +31,25 @@ git clone https://github.com/iM3SK/cc-aio-mon.git "$env:USERPROFILE\.cc-aio-mon"
 
 ## Step 3 — Configure statusLine
 
-Open `%USERPROFILE%\.claude\settings.json` (create if it doesn't exist). Add the `statusLine` block:
+Open `%USERPROFILE%\.claude\settings.json` (create the file if it doesn't exist). Add the following block — replace `<your-username>` with your actual Windows username:
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "py \"C:/Users/YourName/.cc-aio-mon/statusline.py\""
+    "command": "py \"C:/Users/<your-username>/.cc-aio-mon/statusline.py\""
   }
 }
 ```
 
-Generate the correct path for your machine:
+**If `settings.json` already has other settings**, add only the `statusLine` key — do not overwrite the file. The file must remain valid JSON.
+
+**Tip:** to print the exact command value for your machine, run:
 
 ```powershell
 $p = "$env:USERPROFILE\.cc-aio-mon\statusline.py" -replace '\\', '/'
 Write-Host "py `"$p`""
 ```
-
-Paste the output as the `command` value.
-
-**If `settings.json` already has other settings**, add only the `statusLine` key — do not overwrite the file. The file must remain valid JSON.
 
 ## Step 4 — Launch the dashboard
 
@@ -67,16 +65,19 @@ Optional alias — add to `$PROFILE` (PowerShell profile):
 function mon { py "$env:USERPROFILE\.cc-aio-mon\monitor.py" @args }
 ```
 
-## System check script
+## Requirements check (optional)
 
-[install.ps1](../install.ps1) checks your system and prints the exact steps and code blocks for your specific setup. **No changes are made automatically.**
+[check-requirements.ps1](../check-requirements.ps1) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
+
+Run from the repo directory:
 
 ```powershell
+cd "$env:USERPROFILE\.cc-aio-mon"
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\install.ps1
+.\check-requirements.ps1
 ```
 
-The script detects Python, Git, Claude Code, existing `settings.json`, and current `statusLine` config — then outputs only the steps you actually need, with the correct paths for your machine.
+If all checks pass, continue with the manual setup above. If something is missing, install it and re-run the script.
 
 ## Troubleshooting
 
@@ -87,7 +88,7 @@ The script detects Python, Git, Claude Code, existing `settings.json`, and curre
 **Monitor shows "Waiting for Claude Code session..."**
 - Verify `statusLine.command` path in `%USERPROFILE%\.claude\settings.json`.
 - Check that temp files appear after a Claude Code event: `%TEMP%\claude-aio-monitor\`
-- Test statusline directly: `echo '{"context_window": {"used_percentage": 42}}' | py statusline.py`
+- Test statusline directly (run from any directory): `'{"context_window": {"used_percentage": 42}}' | py "$env:USERPROFILE\.cc-aio-mon\statusline.py"`
 
 **Garbled output or missing colors**
 - Use Windows Terminal — cmd.exe and classic PowerShell console do not support truecolor.

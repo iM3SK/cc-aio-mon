@@ -11,8 +11,8 @@ Describe the gap or pain point.
 What should change and how it should work.
 
 **Constraints to keep in mind**
-- Zero dependencies (stdlib only)
-- Single-file (`statusline.py` and `monitor.py` self-contained)
+- Stdlib only (no pip packages)
+- Three runtime files (`statusline.py`, `monitor.py`, `rates.py`)
 - Cross-platform (Windows, macOS, Linux)
 
 **Alternatives considered**

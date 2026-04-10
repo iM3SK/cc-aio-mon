@@ -121,7 +121,7 @@ C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
@@ -488,31 +488,6 @@ def load_history(sid, n=120):
 # ---------------------------------------------------------------------------
 # Spinner
 # ---------------------------------------------------------------------------
-# dots12 spinner (cli-spinners) — 56 frames, 50ms interval
-_SPIN = [
-    "⢀⠀","⡀⠀","⠄⠀","⢂⠀","⡂⠀","⠅⠀","⢃⠀","⡃⠀",
-    "⠍⠀","⢋⠀","⡋⠀","⠍⠁","⢋⠁","⡋⠁","⠍⠉","⠋⠉",
-    "⠋⠉","⠉⠙","⠉⠙","⠉⠩","⠈⢙","⠈⡙","⢈⠩","⡀⢙",
-    "⠄⡙","⢂⠩","⡂⢘","⠅⡘","⢃⠨","⡃⢐","⠍⡐","⢋⠠",
-    "⡋⢀","⠍⡁","⢋⠁","⡋⠁","⠍⠉","⠋⠉","⠋⠉","⠉⠙",
-    "⠉⠙","⠉⠩","⠈⢙","⠈⡙","⠈⠩","⠀⢙","⠀⡙","⠀⠩",
-    "⠀⢘","⠀⡘","⠀⠨","⠀⢐","⠀⡐","⠀⠠","⠀⢀","⠀⡀",
-]
-_spin_idx = 0
-_spin_last = 0.0
-SPIN_INTERVAL = 0.05
-
-
-def spin():
-    """Return 2-char dots12 spinner frame, auto-advance on interval."""
-    global _spin_idx, _spin_last
-    now = time.monotonic()
-    if now - _spin_last >= SPIN_INTERVAL:
-        _spin_idx += 1
-        _spin_last = now
-    return _SPIN[_spin_idx % len(_SPIN)]
-
-
 # line spinner (cli-spinners) — 4 frames, 130ms interval
 _LINE = ["-", "\\", "|", "/"]
 _line_idx = 0
@@ -571,7 +546,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     if show_legend:
         return render_legend(cols, rows)
 
-    W = cols
+    SW = cols
     buf = []
 
     # -- Extract data (sanitize to prevent terminal escape injection) --
@@ -599,8 +574,6 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     def c(normal):
         """Return dim color when stale, normal color otherwise."""
         return _C if _C else normal
-
-    SW = W
 
     # ── Header ──────────────────────────────────────────────
     sid_str = str(data.get("session_id", "default"))

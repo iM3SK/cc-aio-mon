@@ -126,15 +126,6 @@ def _get_terminal_width(fallback: int = 80) -> int:
     return fallback
 
 
-def cpc(pct):
-    """Threshold color — base is always C_GRN (for APR, 7DL)."""
-    if pct >= CRIT:
-        return C_RED
-    if pct >= WARN:
-        return C_YEL
-    return C_GRN
-
-
 def cpc_base(pct, base):
     """Threshold color — uses metric's own base color below WARN (matches monitor mkbar behavior)."""
     if pct >= CRIT:

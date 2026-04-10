@@ -2,20 +2,22 @@
 
 ## Constraints
 
-- **Zero dependencies** — stdlib only. No pip installs, no node_modules.
-- **Three entry files** — `statusline.py`, `monitor.py`, and shared `rates.py`. No additional modules.
+- **Stdlib only** — no pip installs, no node_modules.
+- **Three runtime files** — `statusline.py`, `monitor.py`, and shared `rates.py`. No additional runtime modules (test files like `tests.py` are not runtime).
 - **Cross-platform** — changes must work on Windows, macOS, and Linux.
 
 ## Before submitting
 
+> On macOS/Linux use `python3`. On Windows use `py`.
+
 1. Run the test suite — all tests must pass:
    ```bash
-   python tests.py
+   python3 tests.py
    ```
 
 2. Verify all files compile cleanly:
    ```bash
-   python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py', 'statusline.py', 'monitor.py')]"
+   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py', 'statusline.py', 'monitor.py')]"
    ```
 
 3. Test manually on at least one platform with a live Claude Code session.

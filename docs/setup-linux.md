@@ -1,4 +1,6 @@
-# Install — Linux
+# Setup — Linux
+
+> **Python command:** This guide uses `python3`. If your system only has `python` (no `python3`), replace every `python3` in the commands below with `python`. Run `check-requirements.sh` to see which command is detected on your machine.
 
 ## Requirements
 
@@ -47,22 +49,7 @@ Add to `~/.claude/settings.json`:
 
 Replace `/home/yourname` with your actual home path (`echo $HOME`).
 
-**If `settings.json` already has other settings**, merge safely instead of overwriting:
-
-```bash
-python3 - << 'EOF'
-import json, pathlib
-p = pathlib.Path.home() / ".claude/settings.json"
-p.parent.mkdir(parents=True, exist_ok=True)
-cfg = json.loads(p.read_text()) if p.exists() else {}
-cfg["statusLine"] = {
-    "type": "command",
-    "command": f"python3 {pathlib.Path.home()}/.cc-aio-mon/statusline.py"
-}
-p.write_text(json.dumps(cfg, indent=2))
-print("Written:", p)
-EOF
-```
+**If `settings.json` already has other settings**, add only the `statusLine` key — do not overwrite the file. The file must remain valid JSON.
 
 ## Step 4 — Launch the dashboard
 
@@ -70,21 +57,24 @@ EOF
 python3 ~/.cc-aio-mon/monitor.py
 ```
 
-Optional alias — add to `~/.bashrc` or `~/.zshrc`:
+Optional alias — add to your shell config (`~/.zshrc` for zsh, `~/.bashrc` for bash):
 
 ```bash
 alias mon='python3 ~/.cc-aio-mon/monitor.py'
 ```
 
-## System check script
+## Requirements check (optional)
 
-[install.sh](../install.sh) checks your system and prints the exact steps and code blocks for your specific setup. **No changes are made automatically.**
+[check-requirements.sh](../check-requirements.sh) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
+
+Run from the repo directory:
 
 ```bash
-bash install.sh
+cd ~/.cc-aio-mon
+bash check-requirements.sh
 ```
 
-The script detects Python, Git, Claude Code, existing `settings.json`, and current `statusLine` config — then outputs only the steps you actually need, with the correct paths for your machine.
+If all checks pass, continue with the manual setup above. If something is missing, install it and re-run the script.
 
 ## Troubleshooting
 
