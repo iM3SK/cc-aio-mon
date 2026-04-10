@@ -14,7 +14,7 @@
 | **Files** | `statusline.py` (statusline renderer + IPC writer), `monitor.py` (TUI dashboard), `rates.py` (shared rate math) |
 | **IPC** | Atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/` — no sockets, no databases |
 
-<img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON v1.6.0 — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme">
+<p align="center"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON v1.6.0 — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></p>
 
 ## Why CC AIO MON?
 
@@ -27,9 +27,9 @@
 
 Other monitors scrape log files or estimate costs from token counts. CC AIO MON reads the **official Claude Code statusline JSON** — the same data Claude Code uses internally. No estimation, no guessing, no stale logs.
 
-<img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON v1.6.0 — one-line ANSI status bar showing model, APR, CTX, CHR, 5HL, 7DL, BRN, CTR, CTF, CST, DUR, NOW segments with Nord truecolor palette">
+<p align="center"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON v1.6.0 — one-line ANSI status bar showing model, APR, CTX, CHR, 5HL, 7DL, BRN, CTR, CTF, CST, DUR, NOW segments with Nord truecolor palette"></p>
 
-<img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON v1.6.0 — legend overlay showing all metric codes, descriptions, and fixed ranges for BRN CTR CST">
+<p align="center"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON v1.6.0 — legend overlay showing all metric codes, descriptions, and fixed ranges for BRN CTR CST"></p>
 
 ## Install
 
@@ -61,7 +61,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 
 The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes, `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
-<img src="screenshots/cc-aio-mon-idle.png" alt="CC AIO MON v1.6.0 — idle/inactive session state: header shows 'Session Inactive \ (617m)' with last known session ID, all progress bars and values dimmed but preserved (APR 11.5%, CHR 100%, CTX 34%, 5HL 0%, 7DL 42%, BRN 3.6% 0.0363 $/min, CTR 0.3% 0.01 %/min, CST 100% 59.76 $, TDY 0.22 $, WEK 101.11 $, LNS 732/694), NOW 08:48:51 with UPD 617m staleness counter">
+<p align="center"><img src="screenshots/cc-aio-mon-idle.png" alt="CC AIO MON v1.6.0 — idle/inactive session state: header shows 'Session Inactive \ (617m)' with last known session ID, all progress bars and values dimmed but preserved (APR 11.5%, CHR 100%, CTX 34%, 5HL 0%, 7DL 42%, BRN 3.6% 0.0363 $/min, CTR 0.3% 0.01 %/min, CST 100% 59.76 $, TDY 0.22 $, WEK 101.11 $, LNS 732/694), NOW 08:48:51 with UPD 617m staleness counter"></p>
 
 Press `r` to force a refresh (resets the stale timer if new data has arrived), or `s` to switch to a different session from the picker. If the session has truly ended and you want it out of the picker, delete its JSON/JSONL pair from `$TMPDIR/claude-aio-monitor/`.
 
