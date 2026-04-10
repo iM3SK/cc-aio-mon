@@ -75,6 +75,18 @@ bash check-requirements.sh
 
 If all checks pass, continue with the manual setup above. If something is missing, install it and re-run the script.
 
+## Updating
+
+To update to the latest version:
+
+```bash
+cd ~/.cc-aio-mon
+python3 update.py             # check only
+python3 update.py --apply     # check + apply
+```
+
+Restart Claude Code after updating. See [README — Updating](../README.md#updating) for full details.
+
 ## Troubleshooting
 
 **Monitor shows "Waiting for Claude Code session..."**

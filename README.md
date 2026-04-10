@@ -206,6 +206,26 @@ Platform-specific troubleshooting is in the setup guides:
 
 ## Updating
 
+**Recommended:** use the bundled `update.py` script — it safely checks for updates, previews changes, and applies them:
+
+```bash
+# macOS / Linux
+cd ~/.cc-aio-mon
+python3 update.py             # check only (no changes)
+python3 update.py --apply     # check + git pull
+```
+
+```powershell
+# Windows (PowerShell)
+cd "$env:USERPROFILE\.cc-aio-mon"
+py update.py                  # check only (no changes)
+py update.py --apply          # check + git pull
+```
+
+The script is **read-only by default** — it shows you what would change (version, new commits, CHANGELOG preview) and only pulls when you add `--apply`. It aborts safely if your working tree is dirty, you're on a different branch, or history has diverged.
+
+**Manual fallback** — if you prefer plain git:
+
 ```bash
 # macOS / Linux
 git -C ~/.cc-aio-mon pull
@@ -214,16 +234,16 @@ git -C ~/.cc-aio-mon pull
 git -C "$env:USERPROFILE\.cc-aio-mon" pull
 ```
 
-The path in `settings.json` does not change between versions — `git pull` updates all three `.py` files and Claude Code picks up the new code on the next session. No changes to `settings.json` needed.
+The path in `settings.json` does not change between versions — `git pull` updates the project source, and Claude Code picks up the new code on the next session. No changes to `settings.json` needed.
 
-Re-run `check-requirements.ps1` / `check-requirements.sh` after updating to verify system requirements still pass.
+After updating, restart Claude Code to pick up the new statusline. Optionally re-run `check-requirements.ps1` / `check-requirements.sh` from the repo directory to verify system requirements still pass.
 
 ## Contributing
 
 Contributions welcome. Keep it stdlib only, ship `rates.py` alongside entry scripts, test on Windows and Unix. Before submitting, run the compile check (`python3` on macOS/Linux, `py` on Windows):
 
 ```bash
-python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"
+python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py','update.py')]"
 ```
 
 ## License

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.6.2 — 2026-04-10
+
+**Features:**
+- `update.py` — self-update script. Read-only by default (status + CHANGELOG preview); `--apply` flag runs `git pull --ff-only`. Safety guards: dirty tree, wrong branch, detached HEAD, divergence, downgrade, Python version. Cross-platform (Windows/macOS/Linux), stdlib only.
+
+**Other:**
+- VERSION bumped to `1.6.2`
+
 ## v1.6.1 — 2026-04-10
 
 **Refactor:**

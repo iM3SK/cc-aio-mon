@@ -21,7 +21,7 @@ jobs:
       - name: Install Bandit
         run: pip install "bandit[sarif]==1.9.4"
       - name: Run Bandit
-        run: bandit -r rates.py statusline.py monitor.py -f sarif -o bandit.sarif --severity-level medium || true
+        run: bandit -r rates.py statusline.py monitor.py update.py -f sarif -o bandit.sarif --severity-level medium || true
       - name: Upload to code-scanning
         uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
         with:

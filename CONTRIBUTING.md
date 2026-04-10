@@ -17,7 +17,7 @@
 
 2. Verify all files compile cleanly:
    ```bash
-   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py', 'statusline.py', 'monitor.py')]"
+   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py', 'statusline.py', 'monitor.py', 'update.py')]"
    ```
 
 3. Test manually on at least one platform with a live Claude Code session.

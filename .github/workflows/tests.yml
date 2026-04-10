@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile check
-        run: python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py')]"
+        run: python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py','update.py')]"
       - name: Run tests
         run: python tests.py
     # Windows tests only Python 3.12 (excluded 3.8 combo)

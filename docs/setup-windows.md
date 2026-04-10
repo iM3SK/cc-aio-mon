@@ -79,6 +79,18 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 If all checks pass, continue with the manual setup above. If something is missing, install it and re-run the script.
 
+## Updating
+
+To update to the latest version:
+
+```powershell
+cd "$env:USERPROFILE\.cc-aio-mon"
+py update.py                  # check only
+py update.py --apply          # check + apply
+```
+
+Restart Claude Code after updating. See [README — Updating](../README.md#updating) for full details.
+
 ## Troubleshooting
 
 **`py` not found**
