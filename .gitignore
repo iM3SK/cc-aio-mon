@@ -7,4 +7,3 @@ build/
 .env
 *.tmp
 CC AIO MON BCK/
-docs/
