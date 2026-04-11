@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Bandit
-        run: pip install "bandit[sarif]==1.9.4"
+        run: pip install --require-hashes -r .github/workflows/requirements-bandit.txt
       - name: Run Bandit
         run: bandit -r rates.py statusline.py monitor.py update.py -f sarif -o bandit.sarif --severity-level medium || true
       - name: Upload to code-scanning
