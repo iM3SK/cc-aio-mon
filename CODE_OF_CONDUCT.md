@@ -10,4 +10,4 @@ This project follows the [Contributor Covenant](https://www.contributor-covenant
 
 ## Enforcement
 
-Violations can be reported by opening a GitHub issue or contacting the maintainer directly. Reports will be reviewed and addressed promptly.
+Violations can be reported by opening a [private security advisory](../../security/advisories/new) (which supports confidential communication with the maintainer) or by opening a standard GitHub issue for non-sensitive matters. Reports will be reviewed and addressed promptly.

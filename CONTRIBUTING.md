@@ -30,6 +30,8 @@
 
 ## Pull requests
 
+For anything non-trivial — new features, behavior changes, refactors beyond local cleanup — **open an issue first** so the approach can be discussed before work begins. Typo fixes, small doc edits, and obvious bug fixes can go directly to a PR.
+
 - One logical change per PR.
 - Include a description of what changed and why.
 - Reference any related issues.

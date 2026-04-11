@@ -240,11 +240,14 @@ After updating, restart Claude Code to pick up the new statusline. Optionally re
 
 ## Contributing
 
-Contributions welcome. Keep it stdlib only, ship `rates.py` alongside entry scripts, test on Windows and Unix. Before submitting, run the compile check (`python3` on macOS/Linux, `py` on Windows):
+Contributions welcome. Keep it stdlib only, ship `rates.py` alongside entry scripts, test on Windows and Unix. Before submitting, run the test suite and the compile check (`python3` on macOS/Linux, `py` on Windows):
 
 ```bash
+python3 tests.py
 python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py','statusline.py','monitor.py','update.py')]"
 ```
+
+Open an issue first for anything non-trivial so the approach can be discussed before work begins. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
 
 ## License
 
