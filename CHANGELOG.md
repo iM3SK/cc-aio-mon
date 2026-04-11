@@ -5,6 +5,9 @@
 **Features:**
 - `update.py` — self-update script. Read-only by default (status + CHANGELOG preview); `--apply` flag runs `git pull --ff-only`. Safety guards: dirty tree, wrong branch, detached HEAD, divergence, downgrade, Python version. Cross-platform (Windows/macOS/Linux), stdlib only.
 
+**Security:**
+- `bandit.yml` now installs Bandit via `pip install --require-hashes` against a generated `requirements-bandit.txt` covering all 14 transitive deps with SHA256 hashes from PyPI. Fixes OSSF Scorecard `Pinned-Dependencies` finding on the `pipCommand` check.
+
 **Other:**
 - VERSION bumped to `1.6.2`
 
