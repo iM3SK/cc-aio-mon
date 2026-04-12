@@ -50,6 +50,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Progress bars with fixed ranges** — BRN (0-1.0 $/min), CTR (0-5.0 %/min), CST (0-$50) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL.
 - **Smart warnings** — header alerts when context fills in < 30 min, rate limits > 80%, or burn rate exceeds threshold.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
+- **Usage stats modal** — press `u` for a per-model token breakdown (In/Out/Calls), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days.
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8 + 3.12), Windows (Python 3.12). macOS: not CI-tested.
 - **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
@@ -84,6 +85,11 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **DUR** | Session duration | — | statusline |
 | **NOW** | Current clock time | HH:MM:SS | statusline + dashboard |
 | **UPD** | Last data update age | — | dashboard |
+| **SES** | Total sessions | — | usage stats modal |
+| **DAY** | Active days | — | usage stats modal |
+| **STK** | Streak (current/best) | — | usage stats modal |
+| **LSS** | Longest session | — | usage stats modal |
+| **TOP** | Most active day | — | usage stats modal |
 
 ## Usage
 
@@ -108,9 +114,11 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 |-----|--------|
 | `q` | Quit |
 | `r` | Force refresh (resets stale timer) |
-| `l` | Toggle legend overlay |
 | `s` | Switch session (picker) |
+| `u` | Usage stats modal (per-model breakdown) |
+| `l` | Toggle legend overlay |
 | `1-9` | Select session (picker) |
+| `1/2/3` | Switch period in usage stats modal (all/7d/30d) |
 
 ### Session Picker
 

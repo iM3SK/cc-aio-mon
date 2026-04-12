@@ -1,0 +1,51 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+CC AIO MON — real-time terminal monitoring dashboard for Claude Code CLI. Pure Python, stdlib only, zero dependencies.
+
+## Architecture
+
+```
+Claude Code → stdin JSON → statusline.py → $TMPDIR/claude-aio-monitor/ → monitor.py → TUI
+```
+
+- **statusline.py** — reads Claude Code statusLine JSON from stdin, renders ANSI bar, writes atomic snapshots + JSONL history to temp dir
+- **monitor.py** — fullscreen TUI dashboard, polls temp files every 500ms, renders live metrics, keyboard shortcuts, usage stats modal (reads `~/.claude/projects/` transcripts)
+- **shared.py** — shared BRN ($/min) and CTR (%/min) calculation from JSONL history
+- **update.py** — self-update checker with git pull --ff-only safety guards
+- **tests.py** — unit tests, stdlib unittest
+
+## Commands
+
+- Test: `py tests.py` (Windows) / `python3 tests.py` (Unix)
+- Test single: `py -m unittest tests.TestClassName.test_method`
+- Lint: `py -m py_compile monitor.py statusline.py shared.py update.py`
+- Run monitor: `py monitor.py`
+- Run statusline: configured via Claude Code settings.json, reads stdin
+
+## statusLine config
+
+Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé binárky (py, python, python3) nefungujú priamo, len bash builtiny. Toto platí pre všetky platformy.
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash -c 'py C:/path/to/statusline.py'"
+  }
+}
+```
+
+## Rules
+
+- Zero external dependencies — stdlib only, no pip packages
+- All file I/O confined to temp directory ($TMPDIR/claude-aio-monitor/) and ~/.claude/projects/ (read-only, for usage stats)
+- Session IDs validated with regex: `^[a-zA-Z0-9_\-]{1,128}$`
+- Atomic writes via NamedTemporaryFile + os.replace()
+- File size limits: JSON 1MB, JSONL 10MB read / 1MB trim
+- Cross-platform: Windows (py, ctypes, msvcrt) + Unix (python3, termios, select)
+- ANSI 24-bit color — Windows Terminal required on Windows
+- Python 3.8+ compatibility
