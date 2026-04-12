@@ -37,7 +37,7 @@ Open `%USERPROFILE%\.claude\settings.json` (create the file if it doesn't exist)
 {
   "statusLine": {
     "type": "command",
-    "command": "py \"C:/Users/<your-username>/.cc-aio-mon/statusline.py\""
+    "command": "bash -c 'py C:/Users/<your-username>/.cc-aio-mon/statusline.py'"
   }
 }
 ```
@@ -48,7 +48,7 @@ Open `%USERPROFILE%\.claude\settings.json` (create the file if it doesn't exist)
 
 ```powershell
 $p = "$env:USERPROFILE\.cc-aio-mon\statusline.py" -replace '\\', '/'
-Write-Host "py `"$p`""
+Write-Host "bash -c 'py $p'"
 ```
 
 ## Step 4 — Launch the dashboard
@@ -92,6 +92,12 @@ py update.py --apply          # check + apply
 Restart Claude Code after updating. See [README — Updating](../README.md#updating) for full details.
 
 ## Troubleshooting
+
+**Statusline not appearing**
+- Claude Code's statusLine runs commands in a context where external binaries (`py`, `python`, `python3`) do not produce captured output. The command **must** be wrapped in `bash -c '...'`.
+- Correct: `"command": "bash -c 'py C:/Users/you/.cc-aio-mon/statusline.py'"`
+- Wrong: `"command": "py \"C:/Users/you/.cc-aio-mon/statusline.py\""`
+- If the statusline was working before and stopped, verify the `bash -c` wrapper is still present in `%USERPROFILE%\.claude\settings.json`.
 
 **`py` not found**
 - Reinstall Python from [python.org](https://www.python.org/downloads/). Check "Install Python Launcher" during setup.

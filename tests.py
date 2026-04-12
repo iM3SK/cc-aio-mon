@@ -954,7 +954,7 @@ class TestTrimHistory(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # calc_cross_session_costs
 # ---------------------------------------------------------------------------
-class TestCalcCrossSesionCosts(unittest.TestCase):
+class TestCalcCrossSessionCosts(unittest.TestCase):
 
     def setUp(self):
         import tempfile, pathlib
