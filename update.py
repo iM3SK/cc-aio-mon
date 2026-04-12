@@ -6,17 +6,11 @@
 # Stdlib only.
 
 import argparse
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-
-
-# Force UTF-8 on Windows (cp1250/cp1252 can't handle em-dash, box chars)
-if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
-    sys.stdout.flush()
-    sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8",
-                      errors="replace", closefd=False)
 
 
 # ---------- ANSI colors (Windows VT enable) ----------
@@ -29,13 +23,19 @@ def _enable_vt_on_windows():
         except Exception:
             pass
 
-_enable_vt_on_windows()
 
-if sys.stdout.isatty():
-    GRN = "\033[32m"; YEL = "\033[33m"; RED = "\033[31m"
-    CYN = "\033[36m"; DIM = "\033[2m"; R = "\033[0m"
-else:
-    GRN = YEL = RED = CYN = DIM = R = ""
+def _init_terminal():
+    """Set up UTF-8 stdout and VT processing. Called from main() only."""
+    # Force UTF-8 on Windows (cp1250/cp1252 can't handle em-dash, box chars)
+    if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
+        sys.stdout.flush()
+        sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8",
+                          errors="replace", closefd=False)
+    _enable_vt_on_windows()
+
+
+# Colors are set lazily after _init_terminal() — defaults for import safety
+GRN = YEL = RED = CYN = DIM = R = ""
 
 
 def ok(msg):   print(f"{GRN}[OK]{R}  {msg}")
@@ -49,8 +49,10 @@ REPO_ROOT = Path(__file__).parent.resolve()
 MIN_PYTHON = (3, 8)
 
 
-def run_git(args, capture=True):
+def run_git(args, capture=True, timeout=30):
     """Run git command in repo root. Returns CompletedProcess."""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(
         ["git"] + args,
         cwd=REPO_ROOT,
@@ -58,6 +60,8 @@ def run_git(args, capture=True):
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=timeout,
+        env=env,
     )
 
 
@@ -89,14 +93,15 @@ def check_branch():
 
 
 def check_clean():
-    r = run_git(["status", "--porcelain"])
+    # -uno: ignore untracked files — they don't affect git pull
+    r = run_git(["status", "--porcelain", "-uno"])
     if r.stdout.strip():
-        err("Working tree is not clean:")
+        err("Working tree has uncommitted changes:")
         print(r.stdout)
         note("Commit or stash your changes before updating:")
         note("  git stash   # (or 'git status' to inspect)")
         sys.exit(1)
-    ok("Working tree: clean")
+    ok("Working tree: clean (tracked files)")
 
 
 def fetch_remote():
@@ -137,7 +142,8 @@ def get_ahead_behind():
     parts = r.stdout.strip().split()
     if len(parts) != 2:
         raise RuntimeError(f"Unexpected rev-list output: {r.stdout}")
-    ahead, behind = int(parts[0]), int(parts[1])
+    # rev-list --left-right: parts[0]=left(HEAD)=ahead, parts[1]=right(origin)=behind
+    behind, ahead = int(parts[1]), int(parts[0])
     return behind, ahead
 
 
@@ -171,6 +177,23 @@ def apply_update():
     except Exception as e:
         warn(f"Could not verify new VERSION: {e}")
 
+    # Syntax check — catch broken updates before user runs monitor
+    py_files = ["monitor.py", "statusline.py", "shared.py", "update.py"]
+    bad = []
+    for f in py_files:
+        fp = REPO_ROOT / f
+        if fp.exists():
+            rc = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(fp)],
+                capture_output=True, text=True,
+            )
+            if rc.returncode != 0:
+                bad.append(f)
+    if bad:
+        warn(f"Syntax errors in: {', '.join(bad)} — update may be broken")
+    else:
+        ok(f"Syntax check passed ({len(py_files)} files)")
+
     print()
     print(f"{GRN}Update complete.{R}")
     note("Restart Claude Code to pick up the new statusline.py")
@@ -180,6 +203,12 @@ def apply_update():
 
 
 def main():
+    global GRN, YEL, RED, CYN, DIM, R
+    _init_terminal()
+    if sys.stdout.isatty():
+        GRN = "\033[32m"; YEL = "\033[33m"; RED = "\033[31m"
+        CYN = "\033[36m"; DIM = "\033[2m"; R = "\033[0m"
+
     parser = argparse.ArgumentParser(
         description="CC AIO MON self-update. Read-only by default.",
     )

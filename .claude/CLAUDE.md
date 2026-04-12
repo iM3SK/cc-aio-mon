@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-CC AIO MON — real-time terminal monitoring dashboard for Claude Code CLI. Pure Python, stdlib only, zero dependencies.
+CC AIO MON — real-time terminal monitoring dashboard for Claude Code CLI. Pure Python, stdlib only.
 
 ## Architecture
 
@@ -12,9 +12,9 @@ CC AIO MON — real-time terminal monitoring dashboard for Claude Code CLI. Pure
 Claude Code → stdin JSON → statusline.py → $TMPDIR/claude-aio-monitor/ → monitor.py → TUI
 ```
 
-- **statusline.py** — reads Claude Code statusLine JSON from stdin, renders ANSI bar, writes atomic snapshots + JSONL history to temp dir
-- **monitor.py** — fullscreen TUI dashboard, polls temp files every 500ms, renders live metrics, keyboard shortcuts, usage stats modal (reads `~/.claude/projects/` transcripts)
-- **shared.py** — shared BRN ($/min) and CTR (%/min) calculation from JSONL history
+- **statusline.py** — reads Claude Code statusLine JSON from stdin, renders 4-line ANSI status bar (model, rate limits, costs, model usage %, RLS), writes atomic snapshots + JSONL history to temp dir. Reads rls.json + stats.json from temp dir (written by monitor.py)
+- **monitor.py** — fullscreen TUI dashboard, polls temp files every 500ms, renders live metrics, keyboard shortcuts, usage stats modal (reads `~/.claude/projects/` transcripts), background RLS release check (daemon thread, git fetch, 1h TTL)
+- **shared.py** — shared helpers (`_num`, `_sanitize`, `f_dur`, `f_tok`, `f_cost`, `calc_rates`) used by both statusline.py and monitor.py
 - **update.py** — self-update checker with git pull --ff-only safety guards
 - **tests.py** — unit tests, stdlib unittest
 
@@ -41,7 +41,7 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
 
 ## Rules
 
-- Zero external dependencies — stdlib only, no pip packages
+- Stdlib only — no pip packages, no external dependencies
 - All file I/O confined to temp directory ($TMPDIR/claude-aio-monitor/) and ~/.claude/projects/ (read-only, for usage stats)
 - Session IDs validated with regex: `^[a-zA-Z0-9_\-]{1,128}$`
 - Atomic writes via NamedTemporaryFile + os.replace()

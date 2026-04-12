@@ -164,7 +164,7 @@ def seg_ctx(data):
     return text, len(_ANSI_RE.sub("", text))
 
 
-def seg_5hl(data):
+def seg_5hl(data, with_reset=False):
     rl = data.get("rate_limits")
     if not rl:
         return None
@@ -176,11 +176,16 @@ def seg_5hl(data):
     if resets > 0 and resets < time.time():
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}5HL{RB} {c}{pct}%{RB}"
+    reset_s = ""
+    if with_reset and resets > 0:
+        remaining = resets - time.time()
+        if remaining > 0:
+            reset_s = f" {C_WHT}RST {f_dur(remaining * 1000)}{RB}"
+    text = f"{c}{B}5HL{RB} {c}{pct}%{RB}{reset_s}"
     return text, len(_ANSI_RE.sub("", text))
 
 
-def seg_7dl(data):
+def seg_7dl(data, with_reset=False):
     rl = data.get("rate_limits")
     if not rl:
         return None
@@ -192,7 +197,12 @@ def seg_7dl(data):
     if resets > 0 and resets < time.time():
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}7DL{RB} {c}{pct}%{RB}"
+    reset_s = ""
+    if with_reset and resets > 0:
+        remaining = resets - time.time()
+        if remaining > 0:
+            reset_s = f" {C_WHT}RST {f_dur(remaining * 1000)}{RB}"
+    text = f"{c}{B}7DL{RB} {c}{pct}%{RB}{reset_s}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -204,12 +214,11 @@ def seg_cost(data):
     return text, len(_ANSI_RE.sub("", text))
 
 
-
 def seg_dur(data):
     ms = _num(data.get("cost", {}).get("total_duration_ms"))
     if ms <= 0:
         return None
-    text = f"{C_DIM}DUR{RB} {C_DIM}{f_dur(ms)}{RB}"
+    text = f"{C_WHT}DUR{RB} {C_WHT}{f_dur(ms)}{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -221,13 +230,13 @@ def seg_chr(data):
     if total <= 0:
         return None
     pct = round(cr / total * 100, 1)
-    # CHR: high = good (cache saves tokens) — inverted thresholds
+    # CHR: high = good (cache saves tokens) — inverted: green≥WARN, red<(100-CRIT)
     if pct >= WARN:
         c = C_GRN
-    elif pct >= (100 - CRIT):
-        c = C_YEL
-    else:
+    elif pct < (100 - CRIT):
         c = C_RED
+    else:
+        c = C_YEL
     text = f"{C_GRN}{B}CHR{RB} {c}{pct}%{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
@@ -257,7 +266,6 @@ def seg_apr(data):
     return text, len(_ANSI_RE.sub("", text))
 
 
-
 def seg_ctf(ctr, data):
     if ctr is None or ctr <= 0:
         return None
@@ -273,16 +281,86 @@ def seg_ctf(ctr, data):
     return text, len(_ANSI_RE.sub("", text))
 
 
-def seg_now():
-    now_str = datetime.now().strftime("%H:%M:%S")
-    text = f"{C_DIM}NOW{RB} {C_DIM}{now_str}{RB}"
+def seg_tdy(tdy):
+    if tdy is None or tdy <= 0:
+        return None
+    text = f"{C_ORN}{B}TDY{RB} {C_ORN}{f_cost(tdy)}{RB}"
     return text, len(_ANSI_RE.sub("", text))
 
 
+def seg_wek(wek):
+    if wek is None or wek <= 0:
+        return None
+    text = f"{C_ORN}WEK{RB} {C_ORN}{f_cost(wek)}{RB}"
+    return text, len(_ANSI_RE.sub("", text))
+
+
+def seg_lns(data):
+    added = int(_num(data.get("cost", {}).get("total_lines_added")))
+    removed = int(_num(data.get("cost", {}).get("total_lines_removed")))
+    if not added and not removed:
+        return None
+    text = f"{C_WHT}LNS{RB} {C_GRN}+{added}{RB} {C_RED}-{removed}{RB}"
+    return text, len(_ANSI_RE.sub("", text))
+
+
+_RLS_PULSE = ["∙", "○", "●", "○"]
+
+
+def seg_rls():
+    """Read RLS status from shared temp file (written by monitor.py)."""
+    try:
+        rls_file = _DATA_DIR / "rls.json"
+        if not rls_file.exists():
+            return None
+        raw = rls_file.read_text(encoding="utf-8")
+        rls = json.loads(raw)
+        status = rls.get("status")
+        remote_ver = rls.get("remote_ver")
+        pulse = _RLS_PULSE[int(time.time() * 2) % len(_RLS_PULSE)]
+        if status == "update" and remote_ver:
+            text = f"{C_RED}{B}{pulse} v{remote_ver}!{RB}"
+            return text, len(_ANSI_RE.sub("", text))
+        elif status == "ok":
+            text = f"{C_GRN}{pulse} Up to date{RB}"
+            return text, len(_ANSI_RE.sub("", text))
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def seg_model_usage():
+    """Read model usage percentages from shared temp file (written by monitor.py)."""
+    try:
+        stats_file = _DATA_DIR / "stats.json"
+        if not stats_file.exists():
+            return None
+        raw = stats_file.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        models = data.get("models", {})
+        if not models:
+            return None
+        # Fixed order: OP SN HK
+        _ORDER = [("Opus 4.6", "OP"), ("Sonnet 4.6", "SN"), ("Haiku 4.5", "HK")]
+        parts = []
+        for name, short in _ORDER:
+            pct = models.get(name)
+            if pct is not None and pct > 0:
+                parts.append(f"{C_WHT}{short} {pct:.0f}%{RB}")
+        if not parts:
+            return None
+        text = " ".join(parts)
+        return text, len(_ANSI_RE.sub("", text))
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
-# Layout assembly
+# Layout assembly — 4-line status bar
 # ---------------------------------------------------------------------------
-def build_line(data, cols, brn=None, ctr=None):
+def _build_row(left_segs, right_segs, cols):
+    """Build one row: left segments │ spacer │ right segments."""
     sv = SEP_VLEN
 
     def vlen(segs):
@@ -290,40 +368,123 @@ def build_line(data, cols, brn=None, ctr=None):
             return 0
         return sum(s[1] for s in segs) + sv * (len(segs) - 1)
 
-    left_segs = [s for s in [
-        seg_model(data),
-        seg_apr(data),
-        seg_ctx(data),
-        seg_chr(data),
-        seg_5hl(data),
-        seg_7dl(data),
-    ] if s is not None]
-
-    right_segs = [s for s in [
-        seg_brn(brn),
-        seg_ctr(ctr),
-        seg_ctf(ctr, data),
-        seg_cost(data),
-        seg_dur(data),
-        seg_now(),
-    ] if s is not None]
-
-    # Drop right segments from right until spacer >= 1
+    # Drop right segments if too wide
     while right_segs:
-        if cols - vlen(left_segs) - vlen(right_segs) >= 1:
+        if cols - vlen(left_segs) - vlen(right_segs) - 1 >= 0:
             break
         right_segs.pop()
 
-    spacer = cols - vlen(left_segs) - vlen(right_segs)
-    if spacer < 1:
-        spacer = 1
+    # Drop left segments if still too wide
+    while left_segs and vlen(left_segs) + vlen(right_segs) + (1 if right_segs else 0) > cols:
+        left_segs.pop()
 
     left_text = SEP.join(s[0] for s in left_segs)
     right_text = SEP.join(s[0] for s in right_segs)
 
     if right_segs:
+        spacer = max(1, cols - vlen(left_segs) - vlen(right_segs))
         return left_text + " " * spacer + right_text
     return left_text
+
+
+def build_lines(data, cols, brn=None, ctr=None, tdy=None, wek=None):
+    """Build 4-line status bar. Returns list of formatted strings."""
+    def f(segs):
+        return [s for s in segs if s is not None]
+
+    # R1: left=Model │ CTX │ APR │ CHR    right=model usage %
+    r1 = _build_row(
+        f([seg_model(data), seg_ctx(data), seg_apr(data), seg_chr(data)]),
+        f([seg_model_usage()]),
+        cols)
+
+    # R2: left=5HL+RST │ 7DL+RST         right=CTF
+    r2 = _build_row(
+        f([seg_5hl(data, with_reset=True), seg_7dl(data, with_reset=True)]),
+        f([seg_ctf(ctr, data)]),
+        cols)
+
+    # R3: left=BRN │ CTR │ CST            right=DUR
+    r3 = _build_row(
+        f([seg_brn(brn), seg_ctr(ctr), seg_cost(data)]),
+        f([seg_dur(data)]),
+        cols)
+
+    # R4: left=TDY │ WEK │ LNS           right=RLS
+    r4 = _build_row(
+        f([seg_tdy(tdy), seg_wek(wek), seg_lns(data)]),
+        f([seg_rls()]),
+        cols)
+
+    return [r for r in [r1, r2, r3, r4] if r]
+
+
+# Keep build_line for backward compatibility (tests)
+def build_line(data, cols, brn=None, ctr=None):
+    """Legacy single-line builder."""
+    lines = build_lines(data, cols, brn=brn, ctr=ctr)
+    return lines[0] if lines else ""
+
+
+def _calc_cross_session_costs():
+    """Lightweight cross-session cost aggregation for TDY/WEK."""
+    if not _DATA_DIR.exists():
+        return 0.0, 0.0
+    today_start = datetime.combine(datetime.today().date(), datetime.min.time()).timestamp()
+    week_start = today_start - 6 * 86400
+    today_total = 0.0
+    week_total = 0.0
+    for jl in _DATA_DIR.glob("*.jsonl"):
+        sid = jl.stem
+        if not _SID_RE.match(sid):
+            continue
+        try:
+            st = jl.stat()
+            if st.st_size > MAX_FILE_SIZE * 10:
+                continue
+            raw = jl.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        entries = []
+        for ln in raw.splitlines()[-200:]:
+            try:
+                entries.append(json.loads(ln))
+            except json.JSONDecodeError:
+                pass
+        if not entries:
+            continue
+        entries.sort(key=lambda e: _num(e.get("t"), 0))
+        # Today
+        baseline_today = None
+        final_today = 0.0
+        first_today = None
+        for e in entries:
+            cost = _num(e.get("cost", {}).get("total_cost_usd"))
+            if _num(e.get("t"), 0) < today_start:
+                baseline_today = cost
+            else:
+                if first_today is None:
+                    first_today = cost
+                final_today = cost
+        if baseline_today is None:
+            baseline_today = first_today or 0.0
+        today_total += max(0.0, final_today - baseline_today)
+        # Week
+        baseline_week = None
+        final_week = 0.0
+        first_week = None
+        for e in entries:
+            cost = _num(e.get("cost", {}).get("total_cost_usd"))
+            if _num(e.get("t"), 0) < week_start:
+                baseline_week = cost
+            else:
+                if first_week is None:
+                    first_week = cost
+                final_week = cost
+        if baseline_week is None:
+            baseline_week = first_week or 0.0
+        week_total += max(0.0, final_week - baseline_week)
+    return today_total, week_total
 
 
 # ---------------------------------------------------------------------------
@@ -351,10 +512,17 @@ def main():
     hist = _load_history_for_rates(sid)
     brn, ctr = _calc_rates(hist)
 
+    # Cross-session costs (TDY/WEK) — lightweight scan of JSONL files
+    tdy, wek = _calc_cross_session_costs()
+
     cols = _get_terminal_width(fallback=200)
-    line = build_line(data, cols, brn=brn, ctr=ctr)
-    if line:
-        print(f"{BG_BAR}{line}{EL}{R}")
+    lines = build_lines(data, cols, brn=brn, ctr=ctr, tdy=tdy, wek=wek)
+    for ln in lines:
+        if ln:
+            # Pad to full width so background fills entire line
+            plain_len = len(_ANSI_RE.sub("", ln))
+            pad = max(0, cols - plain_len)
+            print(f"{BG_BAR}{ln}{' ' * pad}{R}")
 
     # Feed data to TUI monitor
     write_shared_state(data)
@@ -388,14 +556,23 @@ def _load_history_for_rates(sid, n=120):
 
 
 def write_shared_state(data: dict):
-    sid = data.get("session_id", "default")
-    if not _SID_RE.match(str(sid)):
+    sid = str(data.get("session_id", "default"))
+    if not _SID_RE.match(sid):
         sid = "default"
-    base = pathlib.Path(tempfile.gettempdir()) / "claude-aio-monitor"
     try:
-        base.mkdir(mode=0o700, exist_ok=True)
+        _DATA_DIR.mkdir(mode=0o700, exist_ok=True)
     except OSError:
-        base.mkdir(exist_ok=True)
+        _DATA_DIR.mkdir(exist_ok=True)
+    # Verify permissions on Unix (mkdir mode ignored on Windows)
+    if sys.platform != "win32":
+        try:
+            import stat
+            st = _DATA_DIR.stat()
+            if stat.S_IMODE(st.st_mode) & 0o077:
+                os.chmod(_DATA_DIR, 0o700)
+        except OSError:
+            pass
+    base = _DATA_DIR
 
     # Serialize once — same rules for snapshot and history (avoid TypeError mid-write)
     try:

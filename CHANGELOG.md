@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.8.0 — 2026-04-13
+
+**Features:**
+- RLS (release check) — background version check against GitHub once per hour. Shows green "Up to date" or blinking red "update available" in the dashboard. Uses daemon thread with 15s timeout, `GIT_TERMINAL_PROMPT=0`, spawn guard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
+- Update manager modal (`u` key) — shows current vs remote version, new commits, changelog preview, safety warnings (dirty tree, wrong branch, diverged). Press `a` to apply `git pull --ff-only` with post-pull syntax verification.
+- New spinners — braille dots for session status (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏), pulse dot for RLS (∙○●○)
+- Keybinding changes: `t` = token usage stats (was `u`), `u` = update manager (new)
+- Smart warnings (CTF/BRN) now blink and are visually separated from header
+- **Statusline 4-line redesign** — multi-line output (Claude Code supports it). New layout:
+  - R1: Model │ CTX │ APR │ CHR — right: model usage % (OP SN HK)
+  - R2: 5HL % RST time │ 7DL % RST time — right: CTF
+  - R3: BRN │ CTR │ CST — right: DUR
+  - R4: TDY │ WEK │ LNS — right: RLS status with pulse spinner
+- Statusline now shows TDY/WEK cross-session costs, LNS (lines changed), model usage percentages, and RLS release status
+- monitor.py writes `rls.json` and `stats.json` to temp dir for statusline.py to read
+- Left/right layout with automatic spacer padding
+
+**Bug fixes:**
+- Fixed inverted color logic in `_reset_color()` — reset countdown now shows green when close to reset (good) and red when far from reset (bad)
+- Fixed `scan_transcript_stats` period filters (7d/30d) — cutoff used `time.monotonic()` instead of `time.time()`, causing filters to never exclude old data
+- Fixed `calc_cross_session_costs` baseline bug — when all JSONL entries fall after day/week start (trimmed history), cost was overstated. Now uses first entry as baseline when no pre-cutoff entry exists.
+- Fixed crash bug: `_update_result` lacked `global` declaration in `main()`, causing `UnboundLocalError` on first `u` → `a` keypress
+- Fixed keybinding priority: modal-specific handlers (update/stats/legend) now checked before global handlers — prevents 't', 'l', 's' from bypassing modal close logic
+- Removed 5HL/7DL header warnings — redundant with colored bars (red at >=80%), caused unexpected layout shifts. CTF and BRN warnings kept.
+- `update.py`: `check_clean()` now ignores untracked files (`-uno`) — previously blocked updates due to untracked screenshots etc.
+- `update.py`: added post-pull syntax verification (`py_compile`) to catch broken updates early
+- `update.py`: guarded module-level side effects (stdout replacement, VT enable) behind `main()` — safe to import without clobbering terminal state
+- Legend: WEK description corrected from "This Week's Cost" to "Rolling 7-Day Cost"
+- Git error output now sanitized via `_sanitize()` before display
+- Unix: temp directory permissions verified and enforced to `0o700` after creation
+- `statusline.py`: `write_shared_state` now uses `_DATA_DIR` instead of recomputing path (test isolation fix)
+- `statusline.py`: `seg_chr` threshold logic fixed — no overlapping color ranges with non-default WARN/CRIT values
+- `statusline.py`: background now manually padded to full width (EL unreliable in some renderers)
+
+**Tests:**
+- Added 63 net new tests (181 → 244): `TestParseVersion`, `TestRlsBlink`, `TestRlsCache`, `TestRlsInDashboard`, `TestRlsCheckWorker`, `TestRlsMaybeCheck`, `TestUpdate`, `TestSpinSession`, `TestSpinRls`, `TestGitCmd`, `TestUpdateChecks`, `TestGetNewCommits`, `TestGetRemoteChangelogPreview`, `TestApplyUpdateAction`, `TestRenderUpdateModal`; 4 renamed, 1 removed
+
+**Other:**
+- VERSION bumped to `1.8.0`
+
 ## v1.7.0 — 2026-04-12
 
 **Features:**
