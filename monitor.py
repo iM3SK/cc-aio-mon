@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude AIO Monitor — fullscreen TUI dashboard for Claude Code.
 
-Terminal dashboard (monitor.py + rates.py). Stdlib only.
+Terminal dashboard (monitor.py + shared.py). Stdlib only.
 Reads shared state from statusline.py via temp files.
 
 Usage:
@@ -25,7 +25,7 @@ import tempfile
 import time
 from datetime import datetime
 
-from rates import calc_rates
+from shared import calc_rates, _num, _sanitize, f_tok, f_cost, f_dur
 
 # ---------------------------------------------------------------------------
 # Platform — keyboard input abstraction
@@ -121,7 +121,7 @@ C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
@@ -131,14 +131,6 @@ try:
     WARN_BRN = float(os.environ.get("CLAUDE_WARN_BRN", "0.50"))
 except (ValueError, TypeError):
     WARN_BRN = 0.50
-
-
-def _num(v, default=0):
-    """Safely coerce value to float (handles None, strings, etc.)."""
-    try:
-        return float(v) if v is not None else default
-    except (TypeError, ValueError):
-        return default
 
 
 def vlen(s):
@@ -174,11 +166,6 @@ def truncate(s, maxw):
     return result
 
 
-def _sanitize(s):
-    """Strip control characters to prevent terminal escape injection."""
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(s))
-
-
 # ---------------------------------------------------------------------------
 # Characters
 # ---------------------------------------------------------------------------
@@ -192,28 +179,6 @@ BAR_W = 25     # fixed bar width for ALL metrics
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
-def f_tok(n):
-    n = _num(n, 0)
-    if n == 0:
-        return "--"
-    if n < 1000:
-        return f"{int(n):,}"
-    if n < 100_000:
-        return f"{n / 1000:.1f}k"
-    if n < 1_000_000:
-        return f"{n / 1000:.0f}k"
-    return f"{n / 1_000_000:.0f}M"
-
-
-def f_cost(usd):
-    usd = _num(usd, 0)
-    if usd <= 0:
-        return "--"
-    if usd < 0.01:
-        return f"{usd:.4f} $"
-    return f"{usd:.2f} $"
-
-
 def f_cd(epoch):
     if epoch is None:
         return "--"
@@ -229,20 +194,6 @@ def f_cd(epoch):
     if h > 0:
         return f"{h}h {m:02d}m"
     return f"{m}m"
-
-
-def f_dur(ms):
-    ms = _num(ms, 0)
-    if ms <= 0:
-        return "--"
-    s = int(ms / 1000)
-    if s < 60:
-        return f"{s}s"
-    m, s = divmod(s, 60)
-    if m < 60:
-        return f"{m}m {s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m:02d}m"
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.6.4 — 2026-04-12
+
+**Refactor:**
+- Renamed `rates.py` → `shared.py` — now contains all shared helpers (`_num`, `_sanitize`, `f_dur`, `f_tok`, `f_cost`, `calc_rates`) used by both `statusline.py` and `monitor.py`
+- Removed duplicate function definitions from `statusline.py` and `monitor.py` — single source of truth in `shared.py`
+- Updated all documentation, CI workflows, and templates to reference `shared.py`
+
+**Other:**
+- VERSION bumped to `1.6.4`
+
 ## v1.6.3 — 2026-04-12
 
 **Bug fixes:**
