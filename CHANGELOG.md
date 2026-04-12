@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.7.0 — 2026-04-12
+
+**Features:**
+- Usage stats modal (`u` key) — per-model token breakdown (In/Out/Calls) with progress bars, overview metrics (SES, DAY, STK, LSS, TOP), period filter (All Time / 7 Days / 30 Days). Reads session transcripts from `~/.claude/projects/`
+- New dashboard footer shortcut: `[u]us`
+- Legend updated with USAGE STATS section documenting new metrics
+
+**Bug fixes:**
+- `_parse_ts` now handles negative UTC offsets (`-HH:MM`) on Python 3.8+
+- Removed duplicate `sid_str` assignment in `render_frame`
+- Removed duplicate `day` calculation in transcript scanner
+- Cache TTL switched from `time.time()` to `time.monotonic()` for clock-jump robustness
+
+**Tests:**
+- Added 39 new tests (142 → 181): `TestParseTs`, `TestCalcStreaks`, `TestModelLabel`, `TestScanTranscriptStats`, `TestRenderStats`, `TestRenderLegend`, `TestRenderFrame`
+
+**Other:**
+- VERSION bumped to `1.7.0`
+
 ## v1.6.4 — 2026-04-12
 
 **Refactor:**
