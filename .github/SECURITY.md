@@ -19,7 +19,7 @@ You will receive a response within 7 days. If confirmed, a fix will be released 
 ## Scope
 
 **In scope:**
-- `monitor.py`, `statusline.py`, `rates.py`, `update.py`
+- `monitor.py`, `statusline.py`, `shared.py`, `update.py`
 - `check-requirements.ps1`, `check-requirements.sh`
 - Setup documentation under `docs/`
 - CI workflows under `.github/workflows/`
