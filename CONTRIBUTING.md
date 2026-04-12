@@ -3,7 +3,7 @@
 ## Constraints
 
 - **Stdlib only** — no pip installs, no node_modules.
-- **Three runtime files** — `statusline.py`, `monitor.py`, and shared `rates.py`. No additional runtime modules (test files like `tests.py` are not runtime).
+- **Three runtime files** — `statusline.py`, `monitor.py`, and shared `shared.py`. No additional runtime modules (test files like `tests.py` are not runtime).
 - **Cross-platform** — changes must work on Windows, macOS, and Linux.
 
 ## Before submitting
@@ -17,7 +17,7 @@
 
 2. Verify all files compile cleanly:
    ```bash
-   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('rates.py', 'statusline.py', 'monitor.py', 'update.py')]"
+   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py', 'statusline.py', 'monitor.py', 'update.py')]"
    ```
 
 3. Test manually on at least one platform with a live Claude Code session.
@@ -25,7 +25,7 @@
 ## What to keep in sync
 
 - `MAX_FILE_SIZE` is defined in both `statusline.py` and `monitor.py` — update both if you change it.
-- `calc_rates` lives in `rates.py` — imported by both `statusline.py` and `monitor.py`.
+- `calc_rates` lives in `shared.py` — imported by both `statusline.py` and `monitor.py`.
 - ANSI color palette (`C_RED`, `C_GRN`, etc.) is duplicated — keep both files consistent.
 
 ## Pull requests

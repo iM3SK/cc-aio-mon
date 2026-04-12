@@ -10,7 +10,7 @@ import sys
 import time
 import unittest
 
-import rates
+import shared
 
 # Import target functions directly
 from monitor import (
@@ -227,8 +227,8 @@ class TestCalcRates(unittest.TestCase):
 
     def test_shared_module_identity(self):
         from monitor import calc_rates as m_cr
-        self.assertIs(m_cr, rates.calc_rates)
-        self.assertIs(sl_calc_rates, rates.calc_rates)
+        self.assertIs(m_cr, shared.calc_rates)
+        self.assertIs(sl_calc_rates, shared.calc_rates)
 
 
 # ---------------------------------------------------------------------------

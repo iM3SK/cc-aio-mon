@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude AIO Monitor — statusline for Claude Code.
 
-Stdlib-only status line script (uses rates.py for BRN/CTR).
+Stdlib-only status line script (uses shared.py for helpers and BRN/CTR).
 Reads JSON from stdin (Claude Code status line protocol), outputs ANSI-colored text.
 Responsive layout adapts to terminal width.
 
@@ -21,7 +21,7 @@ import tempfile
 import time
 from datetime import datetime
 
-from rates import calc_rates as _calc_rates
+from shared import calc_rates as _calc_rates, _num, _sanitize, f_dur, f_tok, f_cost
 
 # ---------------------------------------------------------------------------
 # Config
@@ -142,58 +142,9 @@ SEP = f" {C_DIM}\u2502{RB} "  # │
 SEP_VLEN = 3  # " │ "
 
 
-def _num(v, default=0):
-    """Safely coerce value to float (handles None, strings, etc.)."""
-    try:
-        return float(v) if v is not None else default
-    except (TypeError, ValueError):
-        return default
-
-
-def f_dur(ms):
-    ms = _num(ms, 0)
-    if ms <= 0:
-        return "--"
-    s = int(ms / 1000)
-    if s < 60:
-        return f"{s}s"
-    m, s = divmod(s, 60)
-    if m < 60:
-        return f"{m}m {s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m:02d}m"
-
-
-def f_tok(n):
-    n = _num(n, 0)
-    if n == 0:
-        return "--"
-    if n < 1000:
-        return f"{int(n):,}"
-    if n < 100_000:
-        return f"{n / 1000:.1f}k"
-    if n < 1_000_000:
-        return f"{n / 1000:.0f}k"
-    return f"{n / 1_000_000:.0f}M"
-
-
-def f_cost(usd):
-    usd = _num(usd, 0)
-    if usd <= 0:
-        return "--"
-    if usd < 0.01:
-        return f"{usd:.4f} $"
-    return f"{usd:.2f} $"
-
-
 # ---------------------------------------------------------------------------
 # Segment builders — each returns (text, visible_length) or None
 # ---------------------------------------------------------------------------
-def _sanitize(s):
-    """Strip control characters to prevent terminal escape injection."""
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(s))
-
-
 def seg_model(data):
     name = _sanitize(data.get("model", {}).get("display_name", ""))
     # Shorten known model names

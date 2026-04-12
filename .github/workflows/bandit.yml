@@ -21,7 +21,7 @@ jobs:
       - name: Install Bandit
         run: pip install --require-hashes -r .github/workflows/requirements-bandit.txt
       - name: Run Bandit
-        run: bandit -r rates.py statusline.py monitor.py update.py -f sarif -o bandit.sarif --severity-level medium || true
+        run: bandit -r shared.py statusline.py monitor.py update.py -f sarif -o bandit.sarif --severity-level medium || true
       - name: Upload to code-scanning
         uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
         with:
