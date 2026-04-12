@@ -41,7 +41,7 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "python3 /Users/yourname/.cc-aio-mon/statusline.py"
+    "command": "bash -c 'python3 /Users/yourname/.cc-aio-mon/statusline.py'"
   }
 }
 ```
@@ -89,14 +89,17 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 
 ## Troubleshooting
 
+**Statusline not appearing**
+- Claude Code's statusLine runs commands in a context where external binaries (`python3`, `python`) do not produce captured output. The command **must** be wrapped in `bash -c '...'`.
+- Correct: `"command": "bash -c 'python3 /Users/you/.cc-aio-mon/statusline.py'"`
+- Wrong: `"command": "python3 /Users/you/.cc-aio-mon/statusline.py"`
+- If the statusline was working before and stopped, verify the `bash -c` wrapper is still present in `~/.claude/settings.json`.
+- After changing the command, restart Claude Code to pick up the new settings.
+
 **Monitor shows "Waiting for Claude Code session..."**
 - Check `statusLine.command` in `~/.claude/settings.json`.
 - Verify temp files appear after a Claude Code event: `/tmp/claude-aio-monitor/`
 - Test: `echo '{"context_window": {"used_percentage": 42}}' | python3 ~/.cc-aio-mon/statusline.py`
-
-**Statusline not appearing**
-- Verify the path in `statusLine.command`.
-- Ensure Claude Code reloaded the settings (restart Claude Code).
 
 **Raw escape codes visible**
 - Terminal.app supports truecolor since macOS 10.12.

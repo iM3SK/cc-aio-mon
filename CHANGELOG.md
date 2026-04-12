@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.6.3 — 2026-04-12
+
+**Bug fixes:**
+- Fixed statusLine command in all setup guides — must be wrapped in `bash -c '...'` for external binaries to work (Claude Code does not capture stdout from direct `py`/`python3` invocations)
+- Added "Statusline not appearing" troubleshooting entry to all platform setup guides with correct/wrong examples
+- Fixed PowerShell helper snippet in `docs/setup-windows.md` to generate the `bash -c` wrapped command
+- Fixed typo in `tests.py` — `TestCalcCrossSesionCosts` → `TestCalcCrossSessionCosts`
+
+**Other:**
+- VERSION bumped to `1.6.3`
+
 ## v1.6.2 — 2026-04-10
 
 **Features:**
