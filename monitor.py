@@ -28,6 +28,178 @@ from datetime import datetime
 from shared import calc_rates, _num, _sanitize, f_tok, f_cost, f_dur
 
 # ---------------------------------------------------------------------------
+# Transcript usage scanner — reads ~/.claude/projects/**/*.jsonl
+# ---------------------------------------------------------------------------
+_CLAUDE_DIR = pathlib.Path.home() / ".claude" / "projects"
+_usage_cache = {}
+
+
+def _parse_ts(ts_str):
+    """Parse ISO timestamp to epoch, 3.8 compatible. Returns 0 on failure."""
+    if not ts_str:
+        return 0
+    try:
+        # Strip timezone suffix for 3.8 compat: Z, +HH:MM, -HH:MM
+        clean = ts_str.replace("Z", "")
+        # Remove +/-offset after the time portion (T required)
+        t_pos = clean.find("T")
+        if t_pos >= 0:
+            tail = clean[t_pos + 1:]
+            for sep in ("+", "-"):
+                idx = tail.rfind(sep)
+                # Offset separator is after HH:MM:SS (idx >= 8)
+                if idx >= 8:
+                    clean = clean[:t_pos + 1 + idx]
+                    break
+        return datetime.fromisoformat(clean).timestamp()
+    except (ValueError, TypeError):
+        return 0
+
+
+def scan_transcript_stats(period="all", ttl=30.0):
+    """Scan CC session transcripts, return (models, overview) tuple.
+
+    models: {model_id: {"input": int, "output": int, "calls": int}}
+    overview: {"sessions": int, "active_days": set, "longest_dur_ms": float,
+               "first_date": str, "daily_tokens": {date_str: int}}
+    """
+    now = time.monotonic()
+    cached = _usage_cache.get(period)
+    if cached and now - cached["t"] < ttl:
+        return cached["models"], cached["overview"]
+
+    cutoff = 0
+    if period == "7d":
+        cutoff = now - 7 * 86400
+    elif period == "30d":
+        cutoff = now - 30 * 86400
+
+    models = {}
+    active_days = set()
+    daily_tokens = {}
+    session_times = {}  # sid -> (first_ts, last_ts)
+    session_count = 0
+
+    if not _CLAUDE_DIR.is_dir():
+        empty_ov = {"sessions": 0, "active_days": set(), "longest_dur_ms": 0,
+                     "first_date": None, "daily_tokens": {}}
+        return models, empty_ov
+
+    for jl in _CLAUDE_DIR.glob("**/*.jsonl"):
+        # Skip subagent transcripts for session counting
+        is_subagent = "subagents" in str(jl)
+        try:
+            st = jl.stat()
+            if st.st_size > 50_000_000:
+                continue
+            if cutoff and st.st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+
+        sid = jl.stem
+        if not is_subagent:
+            session_count += 1
+
+        try:
+            with open(jl, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    ts_str = obj.get("timestamp", "")
+                    ts = _parse_ts(ts_str)
+
+                    if cutoff and ts > 0 and ts < cutoff:
+                        continue
+
+                    # Track session timestamps for duration calc
+                    if ts > 0 and not is_subagent:
+                        if sid not in session_times:
+                            session_times[sid] = [ts, ts]
+                        else:
+                            if ts < session_times[sid][0]:
+                                session_times[sid][0] = ts
+                            if ts > session_times[sid][1]:
+                                session_times[sid][1] = ts
+
+                    if obj.get("type") != "assistant":
+                        continue
+                    msg = obj.get("message")
+                    if not msg or "usage" not in msg:
+                        continue
+
+                    model = msg.get("model", "unknown")
+                    u = msg["usage"]
+                    inp = int(_num(u.get("input_tokens", 0)))
+                    out = int(_num(u.get("output_tokens", 0)))
+                    if model not in models:
+                        models[model] = {"input": 0, "output": 0, "calls": 0}
+                    models[model]["input"] += inp
+                    models[model]["output"] += out
+                    models[model]["calls"] += 1
+
+                    # Track active days and daily tokens
+                    if ts > 0:
+                        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                        active_days.add(day)
+                        daily_tokens[day] = daily_tokens.get(day, 0) + inp + out
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    # Compute longest session duration
+    longest_dur_ms = 0
+    for s_ts in session_times.values():
+        dur = (s_ts[1] - s_ts[0]) * 1000
+        if dur > longest_dur_ms:
+            longest_dur_ms = dur
+
+    # First date
+    first_date = min(active_days) if active_days else None
+
+    overview = {
+        "sessions": session_count,
+        "active_days": active_days,
+        "longest_dur_ms": longest_dur_ms,
+        "first_date": first_date,
+        "daily_tokens": daily_tokens,
+    }
+
+    _usage_cache[period] = {"t": now, "models": models, "overview": overview}
+    return models, overview
+
+
+def _calc_streaks(active_days):
+    """Calculate current and longest streak from a set of date strings."""
+    if not active_days:
+        return 0, 0
+    from datetime import timedelta
+    days = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in active_days)
+    today = datetime.now().date()
+
+    longest = 1
+    current_run = 1
+    for i in range(1, len(days)):
+        if (days[i] - days[i - 1]).days == 1:
+            current_run += 1
+            longest = max(longest, current_run)
+        else:
+            current_run = 1
+
+    # Current streak: count backwards from today
+    current = 0
+    check = today
+    for d in reversed(days):
+        if d == check:
+            current += 1
+            check -= timedelta(days=1)
+        elif d < check:
+            break
+    return current, longest
+
+# ---------------------------------------------------------------------------
 # Platform — keyboard input abstraction
 # ---------------------------------------------------------------------------
 IS_WIN = platform.system() == "Windows"
@@ -121,7 +293,7 @@ C_DIM = E + "38;2;76;86;106m"
 C_FG = E + "38;2;180;186;200m"
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.6.4"
+VERSION = "1.7.0"
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
@@ -345,7 +517,7 @@ def calc_cross_session_costs():
 
 def cached_cross_session_costs(ttl=30.0):
     """Cached version — refreshes every ttl seconds."""
-    now = time.time()
+    now = time.monotonic()
     if now - _cost_cache["t"] < ttl:
         return _cost_cache["today"], _cost_cache["week"]
     today, week = calc_cross_session_costs()
@@ -629,7 +801,6 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     brn_val = f"{cpm:.4f} $/min" if cpm and cpm > 0.0001 else "collecting..."
     ctr_val = f"{xpm:.2f} %/min" if xpm and xpm > 0.001 else "--"
     now = datetime.now().strftime("%H:%M:%S")
-    sid_str = str(data.get("session_id", "default"))
     if _SID_RE.match(sid_str):
         try:
             mt = (DATA_DIR / f"{sid_str}.json").stat().st_mtime
@@ -663,7 +834,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     # ── Footer ──────────────────────────────────────────────
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}u{R}{C_DIM}]us{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
 
     _fit_buf_height(buf, rows, clip_tail=False)
     return buf
@@ -701,10 +872,120 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}q{R}    {C_DIM}Quit{R}")
     buf.append(f"{C_WHT}r{R}    {C_DIM}Refresh (reset stale){R}")
     buf.append(f"{C_WHT}s{R}    {C_DIM}Session picker{R}")
-    buf.append(f"{C_WHT}l{R}    {C_DIM}Legend toggle{R}")
+    buf.append(f"{C_WHT}u{R}    {C_DIM}Usage stats{R}")
     buf.append(f"{C_WHT}1-9{R}  {C_DIM}Select session{R}")
+    buf.append(f"{C_WHT}l{R}    {C_DIM}Legend toggle{R}")
+    buf.append("")
+    buf.append(f"{C_WHT}{B}USAGE STATS{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_WHT}SES{R}  {C_DIM}Total Sessions{R}")
+    buf.append(f"{C_WHT}DAY{R}  {C_DIM}Active Days{R}")
+    buf.append(f"{C_WHT}STK{R}  {C_DIM}Streak (current/best){R}")
+    buf.append(f"{C_WHT}LSS{R}  {C_DIM}Longest Session{R}")
+    buf.append(f"{C_WHT}TOP{R}  {C_DIM}Most Active Day{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
+
+    _fit_buf_height(buf, rows, clip_tail=True)
+    return buf
+
+
+# ---------------------------------------------------------------------------
+# Usage stats modal
+# ---------------------------------------------------------------------------
+_PERIOD_LABELS = {"all": "All Time", "7d": "Last 7 Days", "30d": "Last 30 Days"}
+_PERIOD_CYCLE = ["all", "7d", "30d"]
+
+# Short display names for known model IDs
+_MODEL_NAMES = {
+    "claude-opus-4-6": "Opus 4.6",
+    "claude-sonnet-4-6": "Sonnet 4.6",
+    "claude-haiku-4-5-20251001": "Haiku 4.5",
+}
+
+
+def _model_label(model_id):
+    return _MODEL_NAMES.get(model_id, model_id)
+
+
+# Bar colors per model (consistent mapping)
+_MODEL_COLORS = [C_CYN, C_GRN, C_YEL, C_ORN, C_RED]
+
+
+def render_stats(cols, rows, period="all"):
+    SW = cols
+    buf = []
+    buf.append(sep(SW))
+    title = f"USAGE STATS  {_PERIOD_LABELS.get(period, period)}"
+    tp = max(0, SW - len(title))
+    buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
+    buf.append(sep(SW))
+
+    models, overview = scan_transcript_stats(period)
+    if not models:
+        buf.append(f"  {C_DIM}No transcript data found in ~/.claude/projects/{R}")
+        buf.append(f"  {C_DIM}(stats appear after at least one CC session){R}")
+        buf.append(sep(SW))
+        buf.append(f"{C_DIM}[1]all  [2]7d  [3]30d{R}")
+        buf.append("")
+        buf.append(f"{C_DIM}press any other key to close{R}")
+        _fit_buf_height(buf, rows, clip_tail=True)
+        return buf
+
+    # -- Overview section --
+    n_sessions = overview["sessions"]
+    n_days = len(overview["active_days"])
+    longest_ms = overview["longest_dur_ms"]
+    daily = overview["daily_tokens"]
+    current_streak, longest_streak = _calc_streaks(overview["active_days"])
+
+    # Most active day
+    most_active = "--"
+    if daily:
+        top_day = max(daily, key=daily.get)
+        most_active = f"{top_day} ({f_tok(daily[top_day])})"
+
+    buf.append(f"  {C_WHT}SES{R} {C_CYN}{n_sessions}{R}  {C_WHT}DAY{R} {C_CYN}{n_days}{R}  {C_WHT}STK{R} {C_CYN}{current_streak}d{R}{C_DIM}/{longest_streak}d{R}")
+    buf.append(f"  {C_WHT}LSS{R} {C_CYN}{f_dur(longest_ms)}{R}  {C_WHT}TOP{R} {C_CYN}{most_active}{R}")
+    buf.append(sep(SW))
+
+    # -- Models section --
+    # Sort by total tokens descending
+    total_all = sum(m["input"] + m["output"] for m in models.values())
+    sorted_models = sorted(
+        models.items(), key=lambda kv: kv[1]["input"] + kv[1]["output"], reverse=True
+    )
+
+    for i, (mid, st) in enumerate(sorted_models):
+        color = _MODEL_COLORS[i % len(_MODEL_COLORS)]
+        label = _model_label(mid)
+        total_m = st["input"] + st["output"]
+        pct = total_m / total_all * 100 if total_all else 0
+        buf.append(f"  {color}{B}{label}{R}  {C_DIM}({pct:.1f}%){R}")
+        buf.append(f"  {mkbar(pct, color)}")
+        buf.append(
+            f"    {C_DIM}In:{R} {color}{f_tok(st['input'])}{R}"
+            f"  {C_DIM}Out:{R} {color}{f_tok(st['output'])}{R}"
+            f"  {C_DIM}Calls:{R} {color}{st['calls']:,}{R}"
+        )
+        buf.append("")
+
+    # Totals
+    total_in = sum(m["input"] for m in models.values())
+    total_out = sum(m["output"] for m in models.values())
+    total_calls = sum(m["calls"] for m in models.values())
+    buf.append(sep(SW))
+    buf.append(
+        f"  {C_WHT}{B}Total{R}"
+        f"  {C_DIM}In:{R} {C_WHT}{f_tok(total_in)}{R}"
+        f"  {C_DIM}Out:{R} {C_WHT}{f_tok(total_out)}{R}"
+        f"  {C_DIM}Calls:{R} {C_WHT}{total_calls:,}{R}"
+    )
+
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all  [{R}{C_WHT}2{R}{C_DIM}]7d  [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
+    buf.append("")
+    buf.append(f"{C_DIM}press any other key to close{R}")
 
     _fit_buf_height(buf, rows, clip_tail=True)
     return buf
@@ -815,6 +1096,7 @@ def main():
         print(f"Invalid session ID: {sid}")
         return
     show_legend = False
+    show_stats = None  # None=off, "all"/"7d"/"30d"=active period
     _render_errors = 0
     last_mt = 0
     last_seen = 0  # monotonic timestamp of last successful data load
@@ -849,12 +1131,32 @@ def main():
                 last_hist = []
             elif k == "l":
                 show_legend = not show_legend
+                show_stats = None
+            elif k == "u":
+                if show_stats is not None:
+                    show_stats = None
+                else:
+                    show_stats = "all"
+                    show_legend = False
+            elif show_stats is not None and k in ("1", "2", "3"):
+                show_stats = _PERIOD_CYCLE[int(k) - 1]
+            elif show_stats is not None and k is not None:
+                show_stats = None
             elif show_legend and k is not None:
                 show_legend = False
 
             # Render every tick when we have data (for spinner), reload data on interval
             need_render = size_changed or last_data is not None or since_data >= data_interval
             if not need_render:
+                time.sleep(tick)
+                continue
+
+            # Stats modal can render without a session (global data)
+            if show_stats is not None:
+                try:
+                    flush(render_stats(cols, rows, show_stats), cols)
+                except (TypeError, ValueError, KeyError, OSError):
+                    pass
                 time.sleep(tick)
                 continue
 

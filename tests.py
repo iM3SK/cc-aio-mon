@@ -18,6 +18,9 @@ from monitor import (
     _limit_color, _reset_color, collect_warnings,
     truncate, vlen, mkbar,
     calc_cross_session_costs,
+    _parse_ts, _calc_streaks, _model_label,
+    scan_transcript_stats, render_stats, render_legend, render_frame,
+    _CLAUDE_DIR, _usage_cache,
     WARN_BRN, BRN_MAX, CTR_MAX, CST_MAX,
     BAR_W, MAX_FILE_SIZE, _SID_RE, _ANSI_RE as M_ANSI_RE,
     C_RED as M_RED, C_YEL as M_YEL, C_GRN as M_GRN, C_DIM as M_DIM,
@@ -995,6 +998,413 @@ class TestCalcCrossSessionCosts(unittest.TestCase):
         jl.write_text('{"t": 1, "cost": {"total_cost_usd": 999}}\n', encoding="utf-8")
         today, week = calc_cross_session_costs()
         self.assertEqual(today, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# _parse_ts
+# ---------------------------------------------------------------------------
+class TestParseTs(unittest.TestCase):
+
+    def test_iso_basic(self):
+        ts = _parse_ts("2026-04-12T17:23:27.144")
+        self.assertGreater(ts, 0)
+
+    def test_iso_z_suffix(self):
+        ts = _parse_ts("2026-04-12T17:23:27.144Z")
+        self.assertGreater(ts, 0)
+
+    def test_iso_positive_offset(self):
+        ts = _parse_ts("2026-04-12T17:23:27.144+05:30")
+        self.assertGreater(ts, 0)
+
+    def test_iso_negative_offset(self):
+        ts = _parse_ts("2026-04-12T17:23:27.144-05:00")
+        self.assertGreater(ts, 0)
+
+    def test_empty_string(self):
+        self.assertEqual(_parse_ts(""), 0)
+
+    def test_none(self):
+        self.assertEqual(_parse_ts(None), 0)
+
+    def test_malformed(self):
+        self.assertEqual(_parse_ts("not-a-date"), 0)
+
+    def test_consistent_across_formats(self):
+        """Z and no-tz should produce the same result (both naive local)."""
+        a = _parse_ts("2026-04-12T17:23:27")
+        b = _parse_ts("2026-04-12T17:23:27Z")
+        self.assertEqual(a, b)
+
+
+# ---------------------------------------------------------------------------
+# _calc_streaks
+# ---------------------------------------------------------------------------
+class TestCalcStreaks(unittest.TestCase):
+
+    def test_empty_returns_0_0(self):
+        self.assertEqual(_calc_streaks(set()), (0, 0))
+
+    def test_single_day_today(self):
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        current, longest = _calc_streaks({today})
+        self.assertEqual(current, 1)
+        self.assertEqual(longest, 1)
+
+    def test_single_day_past(self):
+        current, longest = _calc_streaks({"2020-01-01"})
+        self.assertEqual(current, 0)
+        self.assertEqual(longest, 1)
+
+    def test_consecutive_3_days_ending_today(self):
+        from datetime import datetime, timedelta
+        today = datetime.now().date()
+        days = {(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)}
+        current, longest = _calc_streaks(days)
+        self.assertEqual(current, 3)
+        self.assertEqual(longest, 3)
+
+    def test_gap_breaks_streak(self):
+        from datetime import datetime, timedelta
+        today = datetime.now().date()
+        # today + 3 days ago (gap at yesterday)
+        days = {
+            today.strftime("%Y-%m-%d"),
+            (today - timedelta(days=3)).strftime("%Y-%m-%d"),
+        }
+        current, longest = _calc_streaks(days)
+        self.assertEqual(current, 1)
+        self.assertEqual(longest, 1)
+
+    def test_longest_in_past_not_current(self):
+        from datetime import datetime, timedelta
+        today = datetime.now().date()
+        # 5-day streak in past, 1-day current
+        past = {(today - timedelta(days=20 + i)).strftime("%Y-%m-%d") for i in range(5)}
+        current_day = {today.strftime("%Y-%m-%d")}
+        current, longest = _calc_streaks(past | current_day)
+        self.assertEqual(current, 1)
+        self.assertEqual(longest, 5)
+
+
+# ---------------------------------------------------------------------------
+# _model_label
+# ---------------------------------------------------------------------------
+class TestModelLabel(unittest.TestCase):
+
+    def test_known_opus(self):
+        self.assertEqual(_model_label("claude-opus-4-6"), "Opus 4.6")
+
+    def test_known_sonnet(self):
+        self.assertEqual(_model_label("claude-sonnet-4-6"), "Sonnet 4.6")
+
+    def test_known_haiku(self):
+        self.assertEqual(_model_label("claude-haiku-4-5-20251001"), "Haiku 4.5")
+
+    def test_unknown_passthrough(self):
+        self.assertEqual(_model_label("claude-future-99"), "claude-future-99")
+
+
+# ---------------------------------------------------------------------------
+# scan_transcript_stats
+# ---------------------------------------------------------------------------
+class TestScanTranscriptStats(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib, monitor
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = monitor._CLAUDE_DIR
+        self._orig_cache = monitor._usage_cache.copy()
+        monitor._CLAUDE_DIR = pathlib.Path(self.tmpdir)
+        monitor._usage_cache.clear()
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor._CLAUDE_DIR = self._orig
+        monitor._usage_cache.clear()
+        monitor._usage_cache.update(self._orig_cache)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_session(self, project, sid, lines, subagent=False):
+        import pathlib
+        if subagent:
+            d = pathlib.Path(self.tmpdir) / project / sid / "subagents"
+        else:
+            d = pathlib.Path(self.tmpdir) / project
+        d.mkdir(parents=True, exist_ok=True)
+        fn = f"agent-{sid}.jsonl" if subagent else f"{sid}.jsonl"
+        (d / fn).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_empty_dir(self):
+        models, ov = scan_transcript_stats("all", ttl=0)
+        self.assertEqual(models, {})
+        self.assertEqual(ov["sessions"], 0)
+
+    def test_single_session(self):
+        import json
+        lines = [
+            json.dumps({"type": "user", "timestamp": "2026-04-12T10:00:00Z"}),
+            json.dumps({
+                "type": "assistant",
+                "timestamp": "2026-04-12T10:05:00Z",
+                "message": {
+                    "model": "claude-opus-4-6",
+                    "usage": {"input_tokens": 100, "output_tokens": 200},
+                },
+            }),
+            json.dumps({
+                "type": "assistant",
+                "timestamp": "2026-04-12T10:10:00Z",
+                "message": {
+                    "model": "claude-opus-4-6",
+                    "usage": {"input_tokens": 50, "output_tokens": 80},
+                },
+            }),
+        ]
+        self._write_session("proj1", "sess1", lines)
+        models, ov = scan_transcript_stats("all", ttl=0)
+        self.assertEqual(models["claude-opus-4-6"]["input"], 150)
+        self.assertEqual(models["claude-opus-4-6"]["output"], 280)
+        self.assertEqual(models["claude-opus-4-6"]["calls"], 2)
+        self.assertEqual(ov["sessions"], 1)
+        self.assertIn("2026-04-12", ov["active_days"])
+
+    def test_subagent_excluded_from_session_count(self):
+        import json
+        main_lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 10, "output_tokens": 20}},
+        })]
+        sub_lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:01:00Z",
+            "message": {"model": "claude-haiku-4-5-20251001",
+                        "usage": {"input_tokens": 5, "output_tokens": 10}},
+        })]
+        self._write_session("proj1", "sess1", main_lines)
+        self._write_session("proj1", "sess1", sub_lines, subagent=True)
+        models, ov = scan_transcript_stats("all", ttl=0)
+        # Session count: only main session, not subagent
+        self.assertEqual(ov["sessions"], 1)
+        # But tokens from subagent are included
+        self.assertIn("claude-haiku-4-5-20251001", models)
+
+    def test_malformed_lines_skipped(self):
+        import json
+        lines = [
+            "not json at all",
+            json.dumps({
+                "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 10, "output_tokens": 20}},
+            }),
+        ]
+        self._write_session("proj1", "sess1", lines)
+        models, ov = scan_transcript_stats("all", ttl=0)
+        self.assertEqual(models["claude-opus-4-6"]["calls"], 1)
+
+    def test_ttl_cache(self):
+        import json, monitor
+        lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 10, "output_tokens": 20}},
+        })]
+        self._write_session("proj1", "sess1", lines)
+        # First call populates cache
+        m1, _ = scan_transcript_stats("all", ttl=60)
+        self.assertEqual(m1["claude-opus-4-6"]["calls"], 1)
+        # Write more data
+        lines.append(json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:01:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 10, "output_tokens": 20}},
+        }))
+        self._write_session("proj1", "sess1", lines)
+        # Cached — should still show 1 call
+        m2, _ = scan_transcript_stats("all", ttl=60)
+        self.assertEqual(m2["claude-opus-4-6"]["calls"], 1)
+        # Force refresh
+        m3, _ = scan_transcript_stats("all", ttl=0)
+        self.assertEqual(m3["claude-opus-4-6"]["calls"], 2)
+
+    def test_daily_tokens(self):
+        import json
+        lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 100, "output_tokens": 200}},
+        })]
+        self._write_session("proj1", "sess1", lines)
+        _, ov = scan_transcript_stats("all", ttl=0)
+        self.assertEqual(ov["daily_tokens"].get("2026-04-12"), 300)
+
+    def test_longest_session_duration(self):
+        import json
+        lines = [
+            json.dumps({"type": "user", "timestamp": "2026-04-12T10:00:00Z"}),
+            json.dumps({
+                "type": "assistant", "timestamp": "2026-04-12T11:00:00Z",
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 10, "output_tokens": 20}},
+            }),
+        ]
+        self._write_session("proj1", "sess1", lines)
+        _, ov = scan_transcript_stats("all", ttl=0)
+        # 1 hour = 3600000 ms
+        self.assertAlmostEqual(ov["longest_dur_ms"], 3600000, delta=1000)
+
+    def test_multiple_models(self):
+        import json
+        lines = [
+            json.dumps({
+                "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 100, "output_tokens": 200}},
+            }),
+            json.dumps({
+                "type": "assistant", "timestamp": "2026-04-12T10:01:00Z",
+                "message": {"model": "claude-haiku-4-5-20251001",
+                            "usage": {"input_tokens": 50, "output_tokens": 80}},
+            }),
+        ]
+        self._write_session("proj1", "sess1", lines)
+        models, _ = scan_transcript_stats("all", ttl=0)
+        self.assertEqual(len(models), 2)
+        self.assertIn("claude-opus-4-6", models)
+        self.assertIn("claude-haiku-4-5-20251001", models)
+
+
+# ---------------------------------------------------------------------------
+# render_stats
+# ---------------------------------------------------------------------------
+class TestRenderStats(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib, monitor
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = monitor._CLAUDE_DIR
+        self._orig_cache = monitor._usage_cache.copy()
+        monitor._CLAUDE_DIR = pathlib.Path(self.tmpdir)
+        monitor._usage_cache.clear()
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor._CLAUDE_DIR = self._orig
+        monitor._usage_cache.clear()
+        monitor._usage_cache.update(self._orig_cache)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_no_data_shows_placeholder(self):
+        buf = render_stats(80, 24, "all")
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("No transcript data", plain)
+
+    def test_with_data_shows_model(self):
+        import json, pathlib
+        d = pathlib.Path(self.tmpdir) / "proj1"
+        d.mkdir(parents=True)
+        lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 100, "output_tokens": 200}},
+        })]
+        (d / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        buf = render_stats(80, 40, "all")
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Opus 4.6", plain)
+        self.assertIn("100.0", plain)  # 100% single model
+        self.assertIn("Total", plain)
+
+    def test_shows_overview_metrics(self):
+        import json, pathlib
+        d = pathlib.Path(self.tmpdir) / "proj1"
+        d.mkdir(parents=True)
+        lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 100, "output_tokens": 200}},
+        })]
+        (d / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        buf = render_stats(80, 40, "all")
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("SES", plain)
+        self.assertIn("DAY", plain)
+        self.assertIn("STK", plain)
+        self.assertIn("LSS", plain)
+
+    def test_period_labels(self):
+        buf_all = render_stats(80, 24, "all")
+        buf_7d = render_stats(80, 24, "7d")
+        buf_30d = render_stats(80, 24, "30d")
+        self.assertIn("All Time", M_ANSI_RE.sub("", "\n".join(buf_all)))
+        self.assertIn("Last 7 Days", M_ANSI_RE.sub("", "\n".join(buf_7d)))
+        self.assertIn("Last 30 Days", M_ANSI_RE.sub("", "\n".join(buf_30d)))
+
+    def test_footer_has_keys(self):
+        buf = render_stats(80, 24, "all")
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("1", plain)
+        self.assertIn("2", plain)
+        self.assertIn("3", plain)
+        self.assertIn("close", plain)
+
+
+# ---------------------------------------------------------------------------
+# render_legend
+# ---------------------------------------------------------------------------
+class TestRenderLegend(unittest.TestCase):
+
+    def test_returns_buffer(self):
+        buf = render_legend(80, 24)
+        self.assertIsInstance(buf, list)
+        self.assertEqual(len(buf), 24)
+
+    def test_contains_all_metrics(self):
+        buf = render_legend(80, 40)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        for label in ["APR", "CHR", "CTX", "5HL", "7DL", "BRN", "CTR", "CST",
+                       "TDY", "WEK", "LNS", "NOW", "UPD"]:
+            self.assertIn(label, plain)
+
+    def test_contains_usage_stats_section(self):
+        buf = render_legend(80, 40)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        for label in ["SES", "DAY", "STK", "LSS", "TOP"]:
+            self.assertIn(label, plain)
+
+    def test_contains_keys(self):
+        buf = render_legend(80, 40)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        for key in ["q", "r", "s", "u", "l", "1-9"]:
+            self.assertIn(key, plain)
+
+
+# ---------------------------------------------------------------------------
+# render_frame
+# ---------------------------------------------------------------------------
+class TestRenderFrame(unittest.TestCase):
+
+    def test_basic_render(self):
+        buf = render_frame(_full_data(), [], 80, 30)
+        self.assertIsInstance(buf, list)
+        self.assertEqual(len(buf), 30)
+
+    def test_stale_shows_inactive(self):
+        buf = render_frame(_full_data(), [], 80, 30, stale=True)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Inactive", plain)
+
+    def test_legend_mode(self):
+        buf = render_frame(_full_data(), [], 80, 50, show_legend=True)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("LEGEND", plain)
+
+    def test_footer_has_usage_key(self):
+        buf = render_frame(_full_data(), [], 80, 30)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("[u]us", plain)
 
 
 if __name__ == "__main__":
