@@ -16,3 +16,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Claude Code local config
+.claude/
+TASKS.md

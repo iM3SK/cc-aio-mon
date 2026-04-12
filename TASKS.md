@@ -1,3 +1,0 @@
-# Tasks
-
-No pending tasks.
