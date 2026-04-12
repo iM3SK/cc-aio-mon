@@ -3,7 +3,7 @@
 ## Constraints
 
 - **Stdlib only** — no pip installs, no node_modules.
-- **Three runtime files** — `statusline.py`, `monitor.py`, and shared `shared.py`. No additional runtime modules (test files like `tests.py` are not runtime).
+- **Four runtime files** — `statusline.py`, `monitor.py`, `shared.py`, and `update.py`. No additional runtime modules (test files like `tests.py` are not runtime).
 - **Cross-platform** — changes must work on Windows, macOS, and Linux.
 
 ## Before submitting
