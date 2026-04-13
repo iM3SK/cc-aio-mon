@@ -1593,6 +1593,9 @@ class TestRlsMaybeCheck(unittest.TestCase):
     # d. TTL expired, not fetching → thread spawned and started
     # ------------------------------------------------------------------
     def test_ttl_expired_spawns_thread(self):
+        # Ensure preconditions are met
+        _monitor_mod._rls_fetching = False
+        _rls_cache.update({"t": 0.0, "status": None, "remote_ver": None})
         mock_thread_instance = MagicMock()
         with patch("monitor.threading.Thread", return_value=mock_thread_instance) as mock_thread_cls:
             _rls_maybe_check()
