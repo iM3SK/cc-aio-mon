@@ -52,7 +52,12 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
 - **Token usage stats** — press `t` for a per-model token breakdown (In/Out/Calls), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
-- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8 + 3.12), Windows (Python 3.12). macOS: not CI-tested.
+<p align="center">
+<a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token usage stats modal with per-model breakdown, session count, streaks"></a>
+<a href="screenshots/cc-aio-mon-update.png"><img src="screenshots/cc-aio-mon-update.png" alt="CC AIO MON — update manager modal showing current vs remote version"></a>
+</p>
+
+- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8 + 3.12), Windows (Python 3.12), macOS (Python 3.12).
 - **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
 - **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime.
@@ -183,7 +188,7 @@ export CLAUDE_STATUS_CRIT=90
 - Auto-trimmed when file exceeds 1 MB (keeps last 1000 entries)
 - Stale `.tmp` files older than 60 seconds cleaned up automatically
 - Dead sessions older than 48 hours auto-purged (`.json` + `.jsonl` pair deleted)
-- Session detection: files older than 30 minutes marked as stale — metrics dimmed, `Session Inactive \ (Nm)` header shown with minutes-since-last-update, last known values preserved (see [Session States](#session-states))
+- Session detection: files older than 30 minutes marked as stale — metrics dimmed, `Session Inactive (Nm)` header shown with minutes-since-last-update, last known values preserved (see [Session States](#session-states))
 
 ### Security
 

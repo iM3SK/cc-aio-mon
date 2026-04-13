@@ -10,6 +10,7 @@ _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
 DATA_DIR_NAME = "claude-aio-monitor"
+VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # ANSI — Nord truecolor (shared palette for statusline.py + monitor.py)
 E = "\033["
@@ -53,7 +54,7 @@ def f_dur(ms):
 
 def f_tok(n):
     n = _num(n, 0)
-    if n == 0:
+    if n <= 0:
         return "--"
     if n < 1000:
         return f"{int(n):,}"
