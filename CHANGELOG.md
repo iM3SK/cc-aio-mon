@@ -8,14 +8,8 @@
 - New spinners — braille dots for session status (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏), pulse dot for RLS (∙○●○)
 - Keybinding changes: `t` = token usage stats (was `u`), `u` = update manager (new)
 - Smart warnings (CTF/BRN) now blink and are visually separated from header
-- **Statusline 4-line redesign** — multi-line output (Claude Code supports it). New layout:
-  - R1: Model │ CTX │ APR │ CHR — right: model usage % (OP SN HK)
-  - R2: 5HL % RST time │ 7DL % RST time — right: CTF
-  - R3: BRN │ CTR │ CST — right: DUR
-  - R4: TDY │ WEK │ LNS — right: RLS status with pulse spinner
-- Statusline now shows TDY/WEK cross-session costs, LNS (lines changed), model usage percentages, and RLS release status
-- monitor.py writes `rls.json` and `stats.json` to temp dir for statusline.py to read
-- Left/right layout with automatic spacer padding
+- monitor.py writes `rls.json` and `stats.json` to temp dir for cross-process state sharing
+- Statusline segments streamlined: Model │ CTX │ 5HL │ 7DL │ CST │ BRN │ APR │ CHR — trailing segments drop on narrow terminals. No background padding (CC notifications share the row).
 
 **Bug fixes:**
 - Fixed inverted color logic in `_reset_color()` — reset countdown now shows green when close to reset (good) and red when far from reset (bad)
@@ -24,18 +18,38 @@
 - Fixed crash bug: `_update_result` lacked `global` declaration in `main()`, causing `UnboundLocalError` on first `u` → `a` keypress
 - Fixed keybinding priority: modal-specific handlers (update/stats/legend) now checked before global handlers — prevents 't', 'l', 's' from bypassing modal close logic
 - Removed 5HL/7DL header warnings — redundant with colored bars (red at >=80%), caused unexpected layout shifts. CTF and BRN warnings kept.
+- Fixed phantom sessions — `rls.json` and `stats.json` no longer appear in session picker (`_RESERVED_FILES` filter)
+- Fixed CTF warning showing `<0m` — now clamps to `<1m` minimum
+- Fixed `seg_apr` in statusline exceeding 100% when `api_ms > dur_ms` — now clamped
+- Fixed session picker auto-connect — now triggers with 1 active session regardless of stale session count (was requiring total sessions == 1)
+- Fixed `_limit_color(pct)` called twice with same arg in 5HL/7DL render blocks
+- Removed dead `k == "q"` checks in session picker (already handled by global quit handler)
 - `update.py`: `check_clean()` now ignores untracked files (`-uno`) — previously blocked updates due to untracked screenshots etc.
 - `update.py`: added post-pull syntax verification (`py_compile`) to catch broken updates early
 - `update.py`: guarded module-level side effects (stdout replacement, VT enable) behind `main()` — safe to import without clobbering terminal state
-- Legend: WEK description corrected from "This Week's Cost" to "Rolling 7-Day Cost"
+- Legend: WEK description corrected
 - Git error output now sanitized via `_sanitize()` before display
 - Unix: temp directory permissions verified and enforced to `0o700` after creation
 - `statusline.py`: `write_shared_state` now uses `_DATA_DIR` instead of recomputing path (test isolation fix)
 - `statusline.py`: `seg_chr` threshold logic fixed — no overlapping color ranges with non-default WARN/CRIT values
-- `statusline.py`: background now manually padded to full width (EL unreliable in some renderers)
+- `statusline.py`: removed full-width background padding — CC notifications share the status line row
+
+**Refactor:**
+- Deduplicated `_SID_RE`, `_ANSI_RE`, `MAX_FILE_SIZE`, `DATA_DIR_NAME`, and all ANSI color constants into `shared.py` — single source of truth, imported by both `statusline.py` and `monitor.py`
+- Removed unused statusline exports: `RB`, `EL`, `BG_BAR`, `_R` alias
+
+**Security:**
+- `_sanitize()` now strips Unicode bidirectional overrides (U+200E/F, U+202A-E, U+2066-69) in addition to C0/C1 controls
+- Unix: symlink check on temp data directory — refuses to write if `_DATA_DIR` is a symlink
+- `scan_transcript_stats` capped at 1000 files to prevent DoS via large transcript directories
 
 **Tests:**
-- Added 63 net new tests (181 → 244): `TestParseVersion`, `TestRlsBlink`, `TestRlsCache`, `TestRlsInDashboard`, `TestRlsCheckWorker`, `TestRlsMaybeCheck`, `TestUpdate`, `TestSpinSession`, `TestSpinRls`, `TestGitCmd`, `TestUpdateChecks`, `TestGetNewCommits`, `TestGetRemoteChangelogPreview`, `TestApplyUpdateAction`, `TestRenderUpdateModal`; 4 renamed, 1 removed
+- Added 108 net new tests (181 → 278): `TestParseVersion`, `TestRlsBlink`, `TestRlsCache`, `TestRlsInDashboard`, `TestRlsCheckWorker`, `TestRlsMaybeCheck`, `TestUpdate`, `TestSpinSession`, `TestSpinRls`, `TestGitCmd`, `TestUpdateChecks`, `TestGetNewCommits`, `TestGetRemoteChangelogPreview`, `TestApplyUpdateAction`, `TestRenderUpdateModal`, `TestCpcBase`, `TestListSessions`, `TestLoadState`, `TestLoadHistory`, `TestRenderPicker`, `TestSegAprClamp`, `TestCollectWarningsCTFMin`, `TestSanitizeBidi`, `TestFormatterEdgeCases`, `TestReservedFiles`; 4 renamed, 1 removed
+
+**Docs:**
+- README: fixed 4 broken screenshot references, added DUR to Metrics at a Glance table, fixed smart warnings text, fixed session picker auto-connect description
+- CHANGELOG: fixed test count
+- CLAUDE.md: updated `shared.py` description to reflect new shared constants and regexes
 
 **Other:**
 - VERSION bumped to `1.8.0`

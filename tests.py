@@ -32,43 +32,37 @@ from monitor import (
     scan_transcript_stats, render_stats, render_legend, render_frame,
     _CLAUDE_DIR, _usage_cache,
     WARN_BRN, BRN_MAX, CTR_MAX, CST_MAX,
-    BAR_W, MAX_FILE_SIZE, _SID_RE, _ANSI_RE as M_ANSI_RE,
-    C_RED as M_RED, C_YEL as M_YEL, C_GRN as M_GRN, C_DIM as M_DIM,
-    C_ORN as M_ORN,
+    BAR_W,
     _parse_version, _rls_cache, _rls_blink, VERSION,
     _rls_check_worker, _rls_maybe_check, _RLS_TTL,
     spin_session, spin_rls, _SPIN_SESSION, _SPIN_RLS,
     _git_cmd, _update_checks, _get_new_commits,
     _get_remote_changelog_preview, _apply_update_action,
     render_update_modal,
+    _RESERVED_FILES, list_sessions, load_state, load_history, DATA_DIR,
+    render_picker,
 )
+from shared import (
+    MAX_FILE_SIZE, _SID_RE, _ANSI_RE, _ANSI_RE as M_ANSI_RE,
+    _sanitize, E, R, B,
+    C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM,
+)
+# M_* aliases for backward compat with existing test assertions
+M_RED = C_RED; M_YEL = C_YEL; M_GRN = C_GRN; M_DIM = C_DIM; M_ORN = C_ORN
 
 from statusline import (
-    _ANSI_RE,
-    BG_BAR,
-    R,
-    RB,
-    EL,
-    C_GRN,
-    C_YEL,
-    C_RED,
-    C_ORN,
-    C_DIM,
     _get_terminal_width,
-    _sanitize,
     _calc_rates as sl_calc_rates,
     seg_model,
     seg_ctx,
     seg_5hl,
     seg_7dl,
     seg_cost,
-    seg_dur,
     seg_chr,
     seg_brn,
-    seg_ctr,
     seg_apr,
-    seg_ctf,
     build_line,
+    cpc_base,
 )
 
 
@@ -537,25 +531,6 @@ class TestSegCost(unittest.TestCase):
         self.assertIsNone(seg_cost(d))
 
 
-class TestSegDur(unittest.TestCase):
-
-    def test_basic(self):
-        text, vl = seg_dur(_full_data())
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("DUR", _ANSI_RE.sub("", text))
-        self.assertIn("2m", _ANSI_RE.sub("", text))
-
-    def test_uses_white(self):
-        from statusline import C_WHT
-        text, _ = seg_dur(_full_data())
-        self.assertIn(C_WHT, text)
-
-    def test_zero_duration(self):
-        d = _full_data()
-        d["cost"]["total_duration_ms"] = 0
-        self.assertIsNone(seg_dur(d))
-
-
 class TestSegChr(unittest.TestCase):
 
     def test_basic(self):
@@ -613,35 +588,6 @@ class TestSegBrn(unittest.TestCase):
         self.assertIsNone(seg_brn(0))
 
 
-class TestSegCtr(unittest.TestCase):
-
-    def test_basic(self):
-        text, vl = seg_ctr(1.5)
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("CTR", _ANSI_RE.sub("", text))
-
-    def test_none(self):
-        self.assertIsNone(seg_ctr(None))
-
-
-class TestSegCtf(unittest.TestCase):
-
-    def test_basic(self):
-        d = _full_data()
-        text, vl = seg_ctf(2.0, d)
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("CTF", _ANSI_RE.sub("", text))
-
-    def test_none_ctr(self):
-        self.assertIsNone(seg_ctf(None, _full_data()))
-
-    def test_full_context(self):
-        d = _full_data()
-        d["context_window"]["used_percentage"] = 100
-        self.assertIsNone(seg_ctf(2.0, d))
-
-
-
 # ---------------------------------------------------------------------------
 # build_line
 # ---------------------------------------------------------------------------
@@ -680,51 +626,6 @@ class TestBuildLine(unittest.TestCase):
         line = build_line({}, 80)
         # Should still produce something (empty model at minimum)
         self.assertIsNotNone(line)
-
-
-# ---------------------------------------------------------------------------
-# RB — bar background persistence
-# ---------------------------------------------------------------------------
-class TestBarBackgroundPersistence(unittest.TestCase):
-    """Verify that BG_BAR is never killed inside the bar line.
-
-    The fix: segments and SEP use RB (reset + re-apply bg) instead of R
-    (full reset). Every bare R inside the bar would create a gap in the
-    background color. Only the final R after EL is allowed.
-    """
-
-    def test_no_bare_reset_inside_line(self):
-        line = build_line(_full_data(), 200)
-        full = f"{BG_BAR}{line}{EL}{R}"
-        # Pattern: \033[0m NOT followed by \033[48;2;46;52;64m
-        bare_reset = re.compile(r"\033\[0m(?!\033\[48;2;46;52;64m)")
-        matches = bare_reset.findall(full)
-        # Exactly 1 bare reset: the final R after EL
-        self.assertEqual(len(matches), 1,
-                         f"Expected 1 bare reset (final), found {len(matches)}")
-
-    def test_rb_count_matches_segments(self):
-        line = build_line(_full_data(), 200)
-        rb_pattern = re.compile(r"\033\[0m\033\[48;2;46;52;64m")
-        rb_count = len(rb_pattern.findall(line))
-        # At least a few RB resets (segments + separators)
-        self.assertGreater(rb_count, 5)
-
-    def test_el_fires_with_bg_active(self):
-        """After all segments, the last escape before EL should be BG_BAR (via RB)."""
-        line = build_line(_full_data(), 200)
-        full = f"{BG_BAR}{line}{EL}"
-        # Find the last \033[...m before EL (\033[K)
-        # The line ends with RB (from last segment), then spacer (spaces), then EL
-        # BG_BAR should be active (last color set contains 48;2;46;52;64)
-        idx_el = full.rfind("\033[K")
-        before_el = full[:idx_el]
-        # Find last SGR sequence before EL
-        last_sgr = list(re.finditer(r"\033\[[0-9;]*m", before_el))
-        self.assertTrue(len(last_sgr) > 0)
-        last_escape = last_sgr[-1].group()
-        self.assertIn("48;2;46;52;64", last_escape,
-                       "BG_BAR must be active when EL fires")
 
 
 # ---------------------------------------------------------------------------
@@ -2179,6 +2080,359 @@ class TestRenderUpdateModal(unittest.TestCase):
                     buf = render_update_modal(80, 40)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         self.assertIn(remote_ver, plain)
+
+
+import monitor as _monitor_mod2  # noqa: F811 — second alias for new test classes
+import pathlib
+import json
+
+
+# ---------------------------------------------------------------------------
+# TestCpcBase — statusline.cpc_base
+# ---------------------------------------------------------------------------
+class TestCpcBase(unittest.TestCase):
+
+    def test_below_warn_returns_base(self):
+        self.assertEqual(cpc_base(30, C_CYN), C_CYN)
+
+    def test_at_warn_returns_yellow(self):
+        self.assertEqual(cpc_base(50, C_CYN), C_YEL)
+
+    def test_above_warn_returns_yellow(self):
+        self.assertEqual(cpc_base(70, C_GRN), C_YEL)
+
+    def test_at_crit_returns_red(self):
+        self.assertEqual(cpc_base(80, C_CYN), C_RED)
+
+    def test_above_crit_returns_red(self):
+        self.assertEqual(cpc_base(95, C_GRN), C_RED)
+
+
+# ---------------------------------------------------------------------------
+# TestListSessions — monitor.list_sessions
+# ---------------------------------------------------------------------------
+class TestListSessions(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig = monitor.DATA_DIR
+        self._tmp = tempfile.mkdtemp()
+        monitor.DATA_DIR = pathlib.Path(self._tmp)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_empty_dir_returns_empty_list(self):
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_valid_session_found(self):
+        sid = "validSession123"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_text(json.dumps({"model": {"display_name": "Opus"}, "session_name": "", "cwd": ""}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["id"], sid)
+
+    def test_rls_json_skipped(self):
+        p = pathlib.Path(self._tmp) / "rls.json"
+        p.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_stats_json_skipped(self):
+        p = pathlib.Path(self._tmp) / "stats.json"
+        p.write_text(json.dumps({"data": 1}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_invalid_sid_skipped(self):
+        # Dots in stem make SID invalid per _SID_RE
+        p = pathlib.Path(self._tmp) / "..evil.json"
+        p.write_text(json.dumps({"model": {}}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_oversized_file_skipped(self):
+        import monitor
+        sid = "bigSession"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        # Write content slightly over MAX_FILE_SIZE
+        p.write_bytes(b"x" * (MAX_FILE_SIZE + 1))
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_stale_tmp_files_cleaned_up(self):
+        tmp_file = pathlib.Path(self._tmp) / "orphan.tmp"
+        tmp_file.write_text("garbage", encoding="utf-8")
+        # Force mtime to be old (> 60s ago)
+        old_time = time.time() - 120
+        os.utime(str(tmp_file), (old_time, old_time))
+        list_sessions()
+        self.assertFalse(tmp_file.exists())
+
+    def test_recent_tmp_files_not_cleaned_up(self):
+        tmp_file = pathlib.Path(self._tmp) / "recent.tmp"
+        tmp_file.write_text("garbage", encoding="utf-8")
+        # mtime is now — should NOT be cleaned
+        list_sessions()
+        self.assertTrue(tmp_file.exists())
+
+
+# ---------------------------------------------------------------------------
+# TestLoadState — monitor.load_state
+# ---------------------------------------------------------------------------
+class TestLoadState(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig = monitor.DATA_DIR
+        self._tmp = tempfile.mkdtemp()
+        monitor.DATA_DIR = pathlib.Path(self._tmp)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_valid_json_returns_dict(self):
+        sid = "sess001"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        payload = {"session_id": sid, "cost": {"total_cost_usd": 1.5}}
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        result = load_state(sid)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["session_id"], sid)
+
+    def test_invalid_sid_returns_none(self):
+        result = load_state("../evil")
+        self.assertIsNone(result)
+
+    def test_missing_file_returns_none(self):
+        result = load_state("nonExistentSid")
+        self.assertIsNone(result)
+
+    def test_oversized_file_returns_none(self):
+        sid = "bigSess"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_bytes(b"{}" + b" " * MAX_FILE_SIZE)
+        result = load_state(sid)
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# TestLoadHistory — monitor.load_history
+# ---------------------------------------------------------------------------
+class TestLoadHistory(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig = monitor.DATA_DIR
+        self._tmp = tempfile.mkdtemp()
+        monitor.DATA_DIR = pathlib.Path(self._tmp)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_valid_jsonl_returns_list(self):
+        sid = "histSess"
+        p = pathlib.Path(self._tmp) / f"{sid}.jsonl"
+        lines = [json.dumps({"t": 1_600_000_000 + i, "v": i}) for i in range(5)]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = load_history(sid)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result[0]["v"], 0)
+
+    def test_invalid_sid_returns_empty(self):
+        result = load_history("../../etc/passwd")
+        self.assertEqual(result, [])
+
+    def test_missing_file_returns_empty(self):
+        result = load_history("noSuchSession")
+        self.assertEqual(result, [])
+
+    def test_corrupt_json_lines_skipped(self):
+        sid = "partialSess"
+        p = pathlib.Path(self._tmp) / f"{sid}.jsonl"
+        lines = [
+            "not valid json",
+            json.dumps({"t": 1_600_000_000, "ok": True}),
+            "{broken",
+            json.dumps({"t": 1_600_000_060, "ok": True}),
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = load_history(sid)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(r.get("ok") for r in result))
+
+
+# ---------------------------------------------------------------------------
+# TestRenderPicker — monitor.render_picker
+# ---------------------------------------------------------------------------
+class TestRenderPicker(unittest.TestCase):
+
+    def test_empty_sessions_shows_waiting_message(self):
+        buf = render_picker([], 80, 24)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Waiting", plain)
+
+    def test_non_empty_sessions_shows_session_list(self):
+        sessions = [
+            {
+                "id": "sess001",
+                "session_name": "MyProject",
+                "model": "Opus 4",
+                "cwd": "/home/user",
+                "stale": False,
+            }
+        ]
+        buf = render_picker(sessions, 80, 24)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("MyProject", plain)
+
+    def test_returns_buffer_of_correct_length(self):
+        buf = render_picker([], 80, 24)
+        self.assertEqual(len(buf), 24)
+
+    def test_stale_session_shows_stale_label(self):
+        sessions = [
+            {
+                "id": "staleSess",
+                "session_name": "",
+                "model": "Haiku",
+                "cwd": "/tmp",
+                "stale": True,
+            }
+        ]
+        buf = render_picker(sessions, 80, 30)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("stale", plain)
+
+    def test_live_session_shows_live_label(self):
+        sessions = [
+            {
+                "id": "liveSess",
+                "session_name": "Active",
+                "model": "Sonnet",
+                "cwd": "/workspace",
+                "stale": False,
+            }
+        ]
+        buf = render_picker(sessions, 80, 30)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("live", plain)
+
+
+# ---------------------------------------------------------------------------
+# TestSegAprClamp — seg_apr clamps >100%
+# ---------------------------------------------------------------------------
+class TestSegAprClamp(unittest.TestCase):
+
+    def test_clamp_over_100(self):
+        data = {"cost": {"total_duration_ms": 100, "total_api_duration_ms": 200}}
+        result = seg_apr(data)
+        self.assertIsNotNone(result)
+        text, vl = result
+        self.assertIn("100.0%", _ANSI_RE.sub("", text))
+
+    def test_visible_length_consistent(self):
+        data = {"cost": {"total_duration_ms": 100, "total_api_duration_ms": 200}}
+        text, vl = seg_apr(data)
+        self.assertEqual(vl, len(_ANSI_RE.sub("", text)))
+
+
+# ---------------------------------------------------------------------------
+# TestCollectWarningsCTFMin — CTF <1m fix (never shows <0m)
+# ---------------------------------------------------------------------------
+class TestCollectWarningsCTFMin(unittest.TestCase):
+
+    def test_ctf_shows_1m_minimum(self):
+        # xpm so large that eta_mins rounds to 0 — must clamp to 1
+        data = {"context_window": {"used_percentage": 99.99}}
+        warns = collect_warnings(data, None, 50.0)
+        self.assertTrue(any("CTF" in w for w in warns))
+        ctf = [w for w in warns if "CTF" in w][0]
+        self.assertIn("<1m", ctf)
+        self.assertNotIn("<0m", ctf)
+
+    def test_ctf_shows_actual_minutes_when_above_1(self):
+        # 100 - 70 = 30% remaining; xpm = 5 → eta = 6 min
+        data = {"context_window": {"used_percentage": 70}}
+        warns = collect_warnings(data, None, 5.0)
+        ctf = [w for w in warns if "CTF" in w]
+        self.assertTrue(ctf)
+        self.assertIn("<6m", ctf[0])
+
+
+# ---------------------------------------------------------------------------
+# TestSanitizeBidi — bidi control character stripping
+# ---------------------------------------------------------------------------
+class TestSanitizeBidi(unittest.TestCase):
+
+    def test_strips_bidi_override(self):
+        self.assertEqual(_sanitize("hello\u202eworld"), "helloworld")
+
+    def test_strips_bidi_isolate(self):
+        self.assertEqual(_sanitize("a\u2066b\u2069c"), "abc")
+
+    def test_strips_lrm_rlm(self):
+        self.assertEqual(_sanitize("a\u200eb\u200fc"), "abc")
+
+    def test_strips_lre_rle(self):
+        self.assertEqual(_sanitize("a\u202ab\u202bc"), "abc")
+
+    def test_preserves_regular_unicode(self):
+        self.assertEqual(_sanitize("café résumé"), "café résumé")
+
+
+# ---------------------------------------------------------------------------
+# TestFormatterEdgeCases — f_cost negative, f_tok boundary, f_dur negative
+# ---------------------------------------------------------------------------
+class TestFormatterEdgeCases(unittest.TestCase):
+
+    def test_f_cost_negative(self):
+        self.assertEqual(f_cost(-1.0), "--")
+
+    def test_f_tok_99999_is_one_decimal_k(self):
+        # 99999 < 100_000, so uses 1-decimal format: "100.0k"
+        self.assertEqual(f_tok(99999), "100.0k")
+
+    def test_f_tok_100k_boundary(self):
+        # 100000 >= 100_000, so uses 0-decimal format: "100k"
+        self.assertEqual(f_tok(100000), "100k")
+
+    def test_f_tok_very_large(self):
+        self.assertEqual(f_tok(1_000_000_000), "1000M")
+
+    def test_f_dur_negative(self):
+        self.assertEqual(f_dur(-1000), "--")
+
+    def test_f_dur_zero(self):
+        self.assertEqual(f_dur(0), "--")
+
+    def test_f_cost_very_small_positive(self):
+        result = f_cost(0.0001)
+        self.assertIn("$", result)
+        self.assertIn("0.0001", result)
+
+
+# ---------------------------------------------------------------------------
+# TestReservedFiles — _RESERVED_FILES contains expected sentinel names
+# ---------------------------------------------------------------------------
+class TestReservedFiles(unittest.TestCase):
+
+    def test_rls_in_reserved(self):
+        self.assertIn("rls", _RESERVED_FILES)
+
+    def test_stats_in_reserved(self):
+        self.assertIn("stats", _RESERVED_FILES)
+
+    def test_reserved_is_a_set(self):
+        self.assertIsInstance(_RESERVED_FILES, (set, frozenset))
 
 
 if __name__ == "__main__":

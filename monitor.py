@@ -27,7 +27,9 @@ import threading
 import time
 from datetime import datetime
 
-from shared import calc_rates, _num, _sanitize, f_tok, f_cost, f_dur
+from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME,
+                    E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 # ---------------------------------------------------------------------------
 # Transcript usage scanner — reads ~/.claude/projects/**/*.jsonl
@@ -88,7 +90,11 @@ def scan_transcript_stats(period="all", ttl=30.0):
                      "first_date": None, "daily_tokens": {}}
         return models, empty_ov
 
+    _file_count = 0
     for jl in _CLAUDE_DIR.glob("**/*.jsonl"):
+        _file_count += 1
+        if _file_count > 1000:
+            break
         # Skip subagent transcripts for session counting
         is_subagent = "subagents" in str(jl)
         try:
@@ -269,9 +275,8 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# ANSI
+# ANSI — E, R, B, C_RED..C_DIM imported from shared.py
 # ---------------------------------------------------------------------------
-E = "\033["
 HIDE_CUR = E + "?25l"
 SHOW_CUR = E + "?25h"
 ALT_ON = E + "?1049h"
@@ -282,24 +287,11 @@ EL = E + "K"
 SYNC_ON = E + "?2026h"
 SYNC_OFF = E + "?2026l"
 
-R = E + "0m"
-B = E + "1m"
-
-# Nord-inspired truecolor
-C_RED = E + "38;2;191;97;106m"
-C_GRN = E + "38;2;163;190;140m"
-C_YEL = E + "38;2;235;203;139m"
-C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
-C_CYN = E + "38;2;136;192;208m"
-C_WHT = E + "38;2;216;222;233m"
-C_DIM = E + "38;2;76;86;106m"
-C_FG = E + "38;2;180;186;200m"
+C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
 VERSION = "1.8.0"
-_SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-_ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
-MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
+# _SID_RE, _ANSI_RE, MAX_FILE_SIZE imported from shared.py
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 
 try:
@@ -437,7 +429,7 @@ def collect_warnings(data, cpm, xpm):
         if ctx_pct < 100:
             eta_mins = (100 - ctx_pct) / xpm
             if eta_mins < 30:
-                warnings.append(f"CTF <{int(eta_mins)}m")
+                warnings.append(f"CTF <{max(1, int(eta_mins))}m")
     # BRN
     if cpm and cpm > WARN_BRN:
         warnings.append(f"BRN {cpm:.4f}$/m")
@@ -656,7 +648,10 @@ def sep(w):
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-DATA_DIR = pathlib.Path(tempfile.gettempdir()) / "claude-aio-monitor"
+DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
+
+
+_RESERVED_FILES = {"rls", "stats"}  # non-session JSON files written by monitor
 
 
 def list_sessions():
@@ -673,6 +668,8 @@ def list_sessions():
     for f in DATA_DIR.glob("*.json"):
         sid = f.stem
         if not _SID_RE.match(sid):
+            continue
+        if sid in _RESERVED_FILES:
             continue
         try:
             st = f.stat()
@@ -913,7 +910,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             if resets > 0 and resets < time.time():
                 pct = 0.0
             lc = c(_limit_color(pct))
-            buf.append(f"{lc}{B}5HL{R} {mkbar(pct, c(_limit_color(pct)))}")
+            buf.append(f"{lc}{B}5HL{R} {mkbar(pct, lc)}")
             rc = c(_reset_color(resets, 18000))  # 5h window
             buf.append(f"    {c(C_WHT)}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
@@ -925,7 +922,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             if resets > 0 and resets < time.time():
                 pct = 0.0
             lc = c(_limit_color(pct))
-            buf.append(f"{lc}{B}7DL{R} {mkbar(pct, c(_limit_color(pct)))}")
+            buf.append(f"{lc}{B}7DL{R} {mkbar(pct, lc)}")
             rc = c(_reset_color(resets, 604800))  # 7d window
             buf.append(f"    {c(C_WHT)}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
@@ -1526,18 +1523,14 @@ def main():
             if sid is None:
                 sessions = list_sessions()
                 active = [s for s in sessions if not s["stale"]]
-                if len(active) == 1 and len(sessions) == 1:
+                if len(active) == 1:
                     sid = active[0]["id"]
                 elif not sessions:
                     flush(render_picker([], cols, rows), cols)
-                    if k == "q":
-                        break
                     time.sleep(tick)
                     continue
                 else:
                     flush(render_picker(sessions, cols, rows), cols)
-                    if k == "q":
-                        break
                     if k and k.isdigit():
                         idx = int(k) - 1
                         if 0 <= idx < len(sessions):

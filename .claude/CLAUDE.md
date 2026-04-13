@@ -12,9 +12,9 @@ CC AIO MON — real-time terminal monitoring dashboard for Claude Code CLI. Pure
 Claude Code → stdin JSON → statusline.py → $TMPDIR/claude-aio-monitor/ → monitor.py → TUI
 ```
 
-- **statusline.py** — reads Claude Code statusLine JSON from stdin, renders 4-line ANSI status bar (model, rate limits, costs, model usage %, RLS), writes atomic snapshots + JSONL history to temp dir. Reads rls.json + stats.json from temp dir (written by monitor.py)
+- **statusline.py** — reads Claude Code statusLine JSON from stdin, renders single-line ANSI status bar (Model │ CTX │ 5HL │ 7DL │ CST │ BRN │ APR │ CHR), writes atomic snapshots + JSONL history to temp dir
 - **monitor.py** — fullscreen TUI dashboard, polls temp files every 500ms, renders live metrics, keyboard shortcuts, usage stats modal (reads `~/.claude/projects/` transcripts), background RLS release check (daemon thread, git fetch, 1h TTL)
-- **shared.py** — shared helpers (`_num`, `_sanitize`, `f_dur`, `f_tok`, `f_cost`, `calc_rates`) used by both statusline.py and monitor.py
+- **shared.py** — shared helpers (`_num`, `_sanitize`, `f_dur`, `f_tok`, `f_cost`, `calc_rates`), ANSI color constants, and regexes (`_SID_RE`, `_ANSI_RE`) used by statusline.py and monitor.py (`f_dur` only in monitor.py)
 - **update.py** — self-update checker with git pull --ff-only safety guards
 - **tests.py** — unit tests, stdlib unittest
 
