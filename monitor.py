@@ -1041,6 +1041,13 @@ def render_legend(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}Shows current vs remote version, new commits,{R}")
     buf.append(f"{C_DIM}changelog preview, safety warnings. Press a to apply.{R}")
+    buf.append("")
+    buf.append(f"{C_WHT}{B}WHY CC AIO MON?{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}claude-monitor   JSONL cost logs     Estimated, not real-time{R}")
+    buf.append(f"{C_DIM}ccusage          CLI aggregator      Historical only, no live view{R}")
+    buf.append(f"{C_DIM}ccstatusline     Status line script   No TUI, no multi-session{R}")
+    buf.append(f"{C_CYN}{B}CC AIO MON       Official stdin JSON  Real-time, stdlib only{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 

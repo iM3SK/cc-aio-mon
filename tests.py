@@ -1257,20 +1257,20 @@ class TestRenderLegend(unittest.TestCase):
         self.assertEqual(len(buf), 24)
 
     def test_contains_all_metrics(self):
-        buf = render_legend(80, 40)
+        buf = render_legend(80, 60)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         for label in ["APR", "CHR", "CTX", "5HL", "7DL", "BRN", "CTR", "CST",
                        "TDY", "WEK", "LNS", "NOW", "UPD", "RLS"]:
             self.assertIn(label, plain)
 
     def test_contains_usage_stats_section(self):
-        buf = render_legend(80, 40)
+        buf = render_legend(80, 60)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         for label in ["SES", "DAY", "STK", "LSS", "TOP"]:
             self.assertIn(label, plain)
 
     def test_contains_keys(self):
-        buf = render_legend(80, 40)
+        buf = render_legend(80, 60)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         for key in ["q", "r", "s", "u", "l", "1-9"]:
             self.assertIn(key, plain)
@@ -1414,7 +1414,7 @@ class TestRlsInDashboard(unittest.TestCase):
         self.assertIn("Checking", plain)
 
     def test_legend_contains_rls(self):
-        buf = render_legend(80, 40)
+        buf = render_legend(80, 60)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("RLS", plain)
 
