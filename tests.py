@@ -1546,7 +1546,8 @@ class TestRlsMaybeCheck(unittest.TestCase):
         self._orig_fetching = _monitor_mod._rls_fetching
         _monitor_mod._rls_fetching = False
         # Expire the cache so TTL check would normally pass
-        _rls_cache.update({"t": 0.0, "status": None, "remote_ver": None})
+        # Note: t=0.0 may NOT be expired on fresh CI runners where monotonic() < _RLS_TTL
+        _rls_cache.update({"t": time.monotonic() - _RLS_TTL - 1, "status": None, "remote_ver": None})
         # Remove the env var if set
         self._env_var_was_set = "CC_AIO_MON_NO_UPDATE_CHECK" in os.environ
         os.environ.pop("CC_AIO_MON_NO_UPDATE_CHECK", None)
@@ -1593,9 +1594,9 @@ class TestRlsMaybeCheck(unittest.TestCase):
     # d. TTL expired, not fetching → thread spawned and started
     # ------------------------------------------------------------------
     def test_ttl_expired_spawns_thread(self):
-        # Ensure preconditions are met
+        # Force cache TTL to be expired (monotonic=0 may be within TTL on fresh CI runners)
         _monitor_mod._rls_fetching = False
-        _rls_cache.update({"t": 0.0, "status": None, "remote_ver": None})
+        _rls_cache.update({"t": time.monotonic() - _RLS_TTL - 1, "status": None, "remote_ver": None})
         mock_thread_instance = MagicMock()
         with patch("monitor.threading.Thread", return_value=mock_thread_instance) as mock_thread_cls:
             _rls_maybe_check()
