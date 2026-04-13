@@ -10,6 +10,7 @@
 - Smart warnings (CTF/BRN) now blink and are visually separated from header
 - monitor.py writes `rls.json` and `stats.json` to temp dir for cross-process state sharing
 - Statusline segments streamlined: Model │ CTX │ 5HL │ 7DL │ CST │ BRN │ APR │ CHR — trailing segments drop on narrow terminals. No background padding (CC notifications share the row).
+- Legend: "WHY CC AIO MON?" competitor comparison section (claude-monitor, ccusage, ccstatusline vs CC AIO MON)
 
 **Bug fixes:**
 - Fixed inverted color logic in `_reset_color()` — reset countdown now shows green when close to reset (good) and red when far from reset (bad)
@@ -45,9 +46,11 @@
 
 **Tests:**
 - Added 108 net new tests (181 → 278): `TestParseVersion`, `TestRlsBlink`, `TestRlsCache`, `TestRlsInDashboard`, `TestRlsCheckWorker`, `TestRlsMaybeCheck`, `TestUpdate`, `TestSpinSession`, `TestSpinRls`, `TestGitCmd`, `TestUpdateChecks`, `TestGetNewCommits`, `TestGetRemoteChangelogPreview`, `TestApplyUpdateAction`, `TestRenderUpdateModal`, `TestCpcBase`, `TestListSessions`, `TestLoadState`, `TestLoadHistory`, `TestRenderPicker`, `TestSegAprClamp`, `TestCollectWarningsCTFMin`, `TestSanitizeBidi`, `TestFormatterEdgeCases`, `TestReservedFiles`; 4 renamed, 1 removed
+- Fixed `TestRlsMaybeCheck` CI flaky failure — `time.monotonic()` on fresh CI runners can be < `_RLS_TTL` (3600s), making `t=0.0` appear unexpired. Now uses relative monotonic time.
 
 **Docs:**
 - README: fixed 4 broken screenshot references, added DUR to Metrics at a Glance table, fixed smart warnings text, fixed session picker auto-connect description
+- README: screenshots renamed to descriptive English names, clickable for fullsize view, added statusline screenshot
 - CHANGELOG: fixed test count
 - CLAUDE.md: updated `shared.py` description to reflect new shared constants and regexes
 
