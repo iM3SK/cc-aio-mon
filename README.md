@@ -57,6 +57,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
 - **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime.
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
+- **Auto-purge** — dead session files older than 48 hours are automatically cleaned up from the temp directory.
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, file size limits (1MB JSON, 10MB JSONL).
 
@@ -181,6 +182,7 @@ export CLAUDE_STATUS_CRIT=90
 - History: append-only JSONL, written only after snapshot succeeds — keeps `.json` and `.jsonl` in sync
 - Auto-trimmed when file exceeds 1 MB (keeps last 1000 entries)
 - Stale `.tmp` files older than 60 seconds cleaned up automatically
+- Dead sessions older than 48 hours auto-purged (`.json` + `.jsonl` pair deleted)
 - Session detection: files older than 30 minutes marked as stale — metrics dimmed, `Session Inactive \ (Nm)` header shown with minutes-since-last-update, last known values preserved (see [Session States](#session-states))
 
 ### Security

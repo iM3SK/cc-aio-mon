@@ -290,9 +290,10 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 # _SID_RE, _ANSI_RE, MAX_FILE_SIZE imported from shared.py
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
+DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
 try:
     WARN_BRN = float(os.environ.get("CLAUDE_WARN_BRN", "0.50"))
@@ -432,7 +433,7 @@ def collect_warnings(data, cpm, xpm):
                 warnings.append(f"CTF <{max(1, int(eta_mins))}m")
     # BRN
     if cpm and cpm > WARN_BRN:
-        warnings.append(f"BRN {cpm:.4f}$/m")
+        warnings.append(f"BRN {cpm:.4f}$/min")
     return warnings
 
 
@@ -657,11 +658,24 @@ _RESERVED_FILES = {"rls", "stats"}  # non-session JSON files written by monitor
 def list_sessions():
     if not DATA_DIR.exists():
         return []
+    now = time.time()
     # Clean up stale .tmp files (orphans from crashed writes)
     for tmp in DATA_DIR.glob("*.tmp"):
         try:
-            if time.time() - tmp.stat().st_mtime > 60:
+            if now - tmp.stat().st_mtime > 60:
                 tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # Auto-purge dead sessions older than 48h (.json + .jsonl pair)
+    for f in DATA_DIR.glob("*.json"):
+        sid = f.stem
+        if sid in _RESERVED_FILES or not _SID_RE.match(sid):
+            continue
+        try:
+            if now - f.stat().st_mtime > DEAD_SESSION_TTL:
+                f.unlink(missing_ok=True)
+                hist = DATA_DIR / f"{sid}.jsonl"
+                hist.unlink(missing_ok=True)
         except OSError:
             pass
     sessions = []
@@ -676,7 +690,7 @@ def list_sessions():
             if st.st_size > MAX_FILE_SIZE:
                 continue
             mt = st.st_mtime
-            age = time.time() - mt
+            age = now - mt
             d = json.loads(f.read_text(encoding="utf-8"))
             sessions.append({
                 "id": sid, "mtime": mt, "age": age,
@@ -763,7 +777,7 @@ def spin_rls():
 
 
 def _fit_buf_height(buf, rows, *, clip_tail=False):
-    """Fit buffer to terminal height. Dashboard (clip_tail=False): protects last 2 lines (footer separator + keys). Legend/picker (clip_tail=True): clips from top."""
+    """Fit buffer to terminal height. Dashboard (clip_tail=False): protects last 2 lines (footer separator + keys). Legend/picker/stats (clip_tail=True): preserves header, clips from bottom."""
     try:
         rows = int(rows)
     except (TypeError, ValueError):
@@ -787,10 +801,7 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
         if not shrunk:
             break
     if len(buf) > sub_target:
-        if clip_tail:
-            buf[:] = buf[-sub_target:]
-        else:
-            buf[:] = buf[:sub_target]
+        buf[:] = buf[:sub_target]
     while len(buf) < sub_target:
         buf.append("")
     buf.extend(tail)
@@ -1041,13 +1052,6 @@ def render_legend(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}Shows current vs remote version, new commits,{R}")
     buf.append(f"{C_DIM}changelog preview, safety warnings. Press a to apply.{R}")
-    buf.append("")
-    buf.append(f"{C_WHT}{B}WHY CC AIO MON?{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_DIM}claude-monitor   JSONL cost logs     Estimated, not real-time{R}")
-    buf.append(f"{C_DIM}ccusage          CLI aggregator      Historical only, no live view{R}")
-    buf.append(f"{C_DIM}ccstatusline     Status line script   No TUI, no multi-session{R}")
-    buf.append(f"{C_CYN}{B}CC AIO MON       Official stdin JSON  Real-time, stdlib only{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 

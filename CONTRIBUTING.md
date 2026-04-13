@@ -24,9 +24,7 @@
 
 ## What to keep in sync
 
-- `MAX_FILE_SIZE` is defined in both `statusline.py` and `monitor.py` — update both if you change it.
-- `calc_rates` lives in `shared.py` — imported by both `statusline.py` and `monitor.py`.
-- ANSI color palette (`C_RED`, `C_GRN`, etc.) is duplicated — keep both files consistent.
+- `shared.py` is the single source of truth for shared constants (`_SID_RE`, `_ANSI_RE`, `MAX_FILE_SIZE`, `DATA_DIR_NAME`), ANSI colors (`C_RED`, `C_GRN`, etc.), helpers (`_num`, `_sanitize`, `f_tok`, `f_cost`, `f_dur`), and `calc_rates`. Both `statusline.py` and `monitor.py` import from it.
 
 ## Pull requests
 

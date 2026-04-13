@@ -15,7 +15,6 @@ import json
 import os
 import pathlib
 import platform
-import re
 import struct
 import sys
 import tempfile
@@ -207,7 +206,7 @@ def seg_chr(data):
 def seg_brn(brn):
     if brn is None or brn <= 0.0001:
         return None
-    text = f"{C_ORN}BRN{R} {C_ORN}{B}{brn:.4f} $/m{R}"
+    text = f"{C_ORN}BRN{R} {C_ORN}{B}{brn:.4f} $/min{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -225,7 +224,7 @@ def seg_apr(data):
 # ---------------------------------------------------------------------------
 # Layout assembly — single line (CC notifications share the row on the right)
 # ---------------------------------------------------------------------------
-def build_line(data, cols, brn=None, ctr=None):
+def build_line(data, cols, brn=None):
     """Build single status line. Drops trailing segments when too wide."""
     sv = _SEP_VLEN
 

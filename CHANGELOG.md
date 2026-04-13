@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.8.1 — 2026-04-13
+
+**Features:**
+- Auto-purge dead sessions — `.json` + `.jsonl` pairs older than 48h are automatically deleted from temp dir on session list refresh (`DEAD_SESSION_TTL` constant). Reserved files (`rls.json`, `stats.json`) are skipped.
+
+**Bug fixes:**
+- Fixed `_fit_buf_height` clip direction — legend/picker/stats modals now clip content from bottom (preserving header) instead of from top (losing header on small terminals)
+- Removed competitor comparison table from legend overlay (belongs in README docs, not in the TUI)
+- Fixed BRN unit inconsistency — statusline now shows `$/min` (was `$/m`), consistent with dashboard
+
+**Tests:**
+- 278 → 280: added `test_dead_session_purged_after_48h`, `test_recent_session_not_purged`
+
+**Other:**
+- VERSION bumped to `1.8.1`
+
 ## v1.8.0 — 2026-04-13
 
 **Features:**
@@ -10,7 +26,7 @@
 - Smart warnings (CTF/BRN) now blink and are visually separated from header
 - monitor.py writes `rls.json` and `stats.json` to temp dir for cross-process state sharing
 - Statusline segments streamlined: Model │ CTX │ 5HL │ 7DL │ CST │ BRN │ APR │ CHR — trailing segments drop on narrow terminals. No background padding (CC notifications share the row).
-- Legend: "WHY CC AIO MON?" competitor comparison section (claude-monitor, ccusage, ccstatusline vs CC AIO MON)
+
 
 **Bug fixes:**
 - Fixed inverted color logic in `_reset_color()` — reset countdown now shows green when close to reset (good) and red when far from reset (bad)
