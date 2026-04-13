@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Claude AIO Monitor — statusline for Claude Code.
 
-Stdlib-only status line script (uses shared.py for helpers and BRN/CTR).
-Reads JSON from stdin (Claude Code status line protocol), outputs ANSI-colored text.
-Responsive layout adapts to terminal width.
+Stdlib-only status line script (uses shared.py for helpers).
+Reads JSON from stdin (Claude Code status line protocol), outputs single ANSI-colored line.
+Segments drop from the right when terminal is narrow.
+CC notifications share the status line row — no full-width padding.
 
 Config env vars:
     CLAUDE_STATUS_WARN  — yellow threshold % (default 50)
@@ -19,9 +20,10 @@ import struct
 import sys
 import tempfile
 import time
-from datetime import datetime
 
-from shared import calc_rates as _calc_rates, _num, _sanitize, f_dur, f_tok, f_cost
+from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME,
+                    E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -35,26 +37,7 @@ try:
 except (ValueError, TypeError):
     CRIT = 80
 
-# Session ID validation — prevent path traversal
-_SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-_ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
-
-# ---------------------------------------------------------------------------
-# ANSI — Nord truecolor (same palette as monitor.py)
-# ---------------------------------------------------------------------------
-E = "\033["
-R = E + "0m"
-B = E + "1m"
-C_RED = E + "38;2;191;97;106m"
-C_GRN = E + "38;2;163;190;140m"
-C_YEL = E + "38;2;235;203;139m"
-C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
-C_CYN = E + "38;2;136;192;208m"
-C_WHT = E + "38;2;216;222;233m"
-C_DIM = E + "38;2;76;86;106m"
-BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — full-width bar background
-RB = R + BG_BAR                # Reset formatting but keep bar background
-EL = E + "K"  # Erase to end of line (fills with current bg)
+# _SID_RE, _ANSI_RE, MAX_FILE_SIZE, ANSI colors — imported from shared.py
 
 
 _IS_WIN = platform.system() == "Windows"
@@ -136,10 +119,10 @@ def cpc_base(pct, base):
 
 
 # ---------------------------------------------------------------------------
-# Formatting
+# Formatting — single-line, no background (CC notifications share the row)
 # ---------------------------------------------------------------------------
-SEP = f" {C_DIM}\u2502{RB} "  # │
-SEP_VLEN = 3  # " │ "
+_SEP = f" {C_DIM}\u2502{R} "  # │
+_SEP_VLEN = 3  # " │ "
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +130,8 @@ SEP_VLEN = 3  # " │ "
 # ---------------------------------------------------------------------------
 def seg_model(data):
     name = _sanitize(data.get("model", {}).get("display_name", ""))
-    # Shorten known model names
     name = name.replace(" (1M context)", "").replace(" (200k)", "")
-    text = f"{B}{C_WHT}{name}{RB}"
+    text = f"{B}{C_WHT}{name}{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -159,8 +141,8 @@ def seg_ctx(data):
     total = _num(cw.get("context_window_size"), 0)
     used = int(total * pct / 100) if total else 0
     c = cpc_base(pct, C_CYN)
-    tok = f" {C_CYN}{f_tok(used)}/{f_tok(int(total))}{RB}" if total else ""
-    text = f"{C_CYN}{B}CTX{RB} {c}{pct}%{RB}{tok}"
+    tok = f" {C_CYN}{f_tok(used)}/{f_tok(int(total))}{R}" if total else ""
+    text = f"{C_CYN}{B}CTX{R} {c}{pct}%{R}{tok}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -176,7 +158,7 @@ def seg_5hl(data):
     if resets > 0 and resets < time.time():
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}5HL{RB} {c}{pct}%{RB}"
+    text = f"{c}{B}5HL{R} {c}{pct}%{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -192,7 +174,7 @@ def seg_7dl(data):
     if resets > 0 and resets < time.time():
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}7DL{RB} {c}{pct}%{RB}"
+    text = f"{c}{B}7DL{R} {c}{pct}%{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -200,16 +182,7 @@ def seg_cost(data):
     usd = _num(data.get("cost", {}).get("total_cost_usd"))
     if usd <= 0:
         return None
-    text = f"{C_ORN}CST{RB} {C_ORN}{B}{f_cost(usd)}{RB}"
-    return text, len(_ANSI_RE.sub("", text))
-
-
-
-def seg_dur(data):
-    ms = _num(data.get("cost", {}).get("total_duration_ms"))
-    if ms <= 0:
-        return None
-    text = f"{C_DIM}DUR{RB} {C_DIM}{f_dur(ms)}{RB}"
+    text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost(usd)}{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -221,28 +194,20 @@ def seg_chr(data):
     if total <= 0:
         return None
     pct = round(cr / total * 100, 1)
-    # CHR: high = good (cache saves tokens) — inverted thresholds
     if pct >= WARN:
         c = C_GRN
-    elif pct >= (100 - CRIT):
-        c = C_YEL
-    else:
+    elif pct < (100 - CRIT):
         c = C_RED
-    text = f"{C_GRN}{B}CHR{RB} {c}{pct}%{RB}"
+    else:
+        c = C_YEL
+    text = f"{C_GRN}{B}CHR{R} {c}{pct}%{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
 def seg_brn(brn):
     if brn is None or brn <= 0.0001:
         return None
-    text = f"{C_ORN}BRN{RB} {C_ORN}{B}{brn:.4f} $/m{RB}"
-    return text, len(_ANSI_RE.sub("", text))
-
-
-def seg_ctr(ctr):
-    if ctr is None or ctr <= 0.001:
-        return None
-    text = f"{C_YEL}CTR{RB} {C_YEL}{ctr:.2f} %/m{RB}"
+    text = f"{C_ORN}BRN{R} {C_ORN}{B}{brn:.4f} $/m{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -251,79 +216,41 @@ def seg_apr(data):
     api_ms = _num(data.get("cost", {}).get("total_api_duration_ms"))
     if dur_ms <= 0:
         return None
-    pct = round(api_ms / dur_ms * 100, 1)
+    pct = min(100.0, round(api_ms / dur_ms * 100, 1))
     c = cpc_base(pct, C_GRN)
-    text = f"{C_GRN}{B}APR{RB} {c}{pct}%{RB}"
-    return text, len(_ANSI_RE.sub("", text))
-
-
-
-def seg_ctf(ctr, data):
-    if ctr is None or ctr <= 0:
-        return None
-    ctx_pct = _num(data.get("context_window", {}).get("used_percentage"))
-    if ctx_pct >= 100:
-        return None
-    rem_pct = 100 - ctx_pct
-    try:
-        eta = datetime.fromtimestamp(time.time() + (rem_pct / ctr) * 60).strftime("%H:%M")
-    except (OverflowError, OSError, ValueError):
-        return None
-    text = f"{C_RED}CTF{RB} {C_RED}{B}{eta}{RB}"
-    return text, len(_ANSI_RE.sub("", text))
-
-
-def seg_now():
-    now_str = datetime.now().strftime("%H:%M:%S")
-    text = f"{C_DIM}NOW{RB} {C_DIM}{now_str}{RB}"
+    text = f"{C_GRN}{B}APR{R} {c}{pct}%{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
 # ---------------------------------------------------------------------------
-# Layout assembly
+# Layout assembly — single line (CC notifications share the row on the right)
 # ---------------------------------------------------------------------------
 def build_line(data, cols, brn=None, ctr=None):
-    sv = SEP_VLEN
+    """Build single status line. Drops trailing segments when too wide."""
+    sv = _SEP_VLEN
 
-    def vlen(segs):
-        if not segs:
-            return 0
-        return sum(s[1] for s in segs) + sv * (len(segs) - 1)
-
-    left_segs = [s for s in [
+    # All segments in priority order — dropped from the end when too wide
+    all_segs = [s for s in [
         seg_model(data),
-        seg_apr(data),
         seg_ctx(data),
-        seg_chr(data),
         seg_5hl(data),
         seg_7dl(data),
-    ] if s is not None]
-
-    right_segs = [s for s in [
-        seg_brn(brn),
-        seg_ctr(ctr),
-        seg_ctf(ctr, data),
         seg_cost(data),
-        seg_dur(data),
-        seg_now(),
+        seg_brn(brn),
+        seg_apr(data),
+        seg_chr(data),
     ] if s is not None]
 
-    # Drop right segments from right until spacer >= 1
-    while right_segs:
-        if cols - vlen(left_segs) - vlen(right_segs) >= 1:
+    # Drop trailing segments until it fits
+    while all_segs:
+        vlen = sum(s[1] for s in all_segs) + sv * (len(all_segs) - 1)
+        if vlen <= cols:
             break
-        right_segs.pop()
+        all_segs.pop()
 
-    spacer = cols - vlen(left_segs) - vlen(right_segs)
-    if spacer < 1:
-        spacer = 1
-
-    left_text = SEP.join(s[0] for s in left_segs)
-    right_text = SEP.join(s[0] for s in right_segs)
-
-    if right_segs:
-        return left_text + " " * spacer + right_text
-    return left_text
+    if not all_segs:
+        return ""
+    return _SEP.join(s[0] for s in all_segs)
 
 
 # ---------------------------------------------------------------------------
@@ -347,14 +274,14 @@ def main():
     if not _SID_RE.match(str(sid)):
         sid = "default"
 
-    # Read history BEFORE writing — needed for BRN/CTR rate computation
+    # Read history BEFORE writing — needed for BRN rate computation
     hist = _load_history_for_rates(sid)
-    brn, ctr = _calc_rates(hist)
+    brn, _ctr = _calc_rates(hist)
 
-    cols = _get_terminal_width(fallback=200)
-    line = build_line(data, cols, brn=brn, ctr=ctr)
+    cols = _get_terminal_width(fallback=120)
+    line = build_line(data, cols, brn=brn)
     if line:
-        print(f"{BG_BAR}{line}{EL}{R}")
+        print(line)
 
     # Feed data to TUI monitor
     write_shared_state(data)
@@ -364,8 +291,8 @@ def main():
 # IPC — shared state for monitor.py
 # ---------------------------------------------------------------------------
 HISTORY_TRIM_TO = 1000
-MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with monitor.py
-_DATA_DIR = pathlib.Path(tempfile.gettempdir()) / "claude-aio-monitor"
+# MAX_FILE_SIZE imported from shared.py
+_DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 
 
 def _load_history_for_rates(sid, n=120):
@@ -388,14 +315,25 @@ def _load_history_for_rates(sid, n=120):
 
 
 def write_shared_state(data: dict):
-    sid = data.get("session_id", "default")
-    if not _SID_RE.match(str(sid)):
+    sid = str(data.get("session_id", "default"))
+    if not _SID_RE.match(sid):
         sid = "default"
-    base = pathlib.Path(tempfile.gettempdir()) / "claude-aio-monitor"
     try:
-        base.mkdir(mode=0o700, exist_ok=True)
+        _DATA_DIR.mkdir(mode=0o700, exist_ok=True)
     except OSError:
-        base.mkdir(exist_ok=True)
+        _DATA_DIR.mkdir(exist_ok=True)
+    # Verify permissions on Unix (mkdir mode ignored on Windows)
+    if sys.platform != "win32":
+        try:
+            import stat
+            if _DATA_DIR.is_symlink():
+                return  # reject symlinked data directory
+            st = _DATA_DIR.stat()
+            if stat.S_IMODE(st.st_mode) & 0o077:
+                os.chmod(_DATA_DIR, 0o700)
+        except OSError:
+            pass
+    base = _DATA_DIR
 
     # Serialize once — same rules for snapshot and history (avoid TypeError mid-write)
     try:

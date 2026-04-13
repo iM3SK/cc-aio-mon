@@ -5,6 +5,24 @@ import re
 
 MIN_EPOCH = 1_577_836_800  # 2020-01-01 — reject implausible timestamps
 
+# Shared constants — single source of truth for statusline.py + monitor.py
+_SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+_ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
+MAX_FILE_SIZE = 1_048_576  # 1 MB
+DATA_DIR_NAME = "claude-aio-monitor"
+
+# ANSI — Nord truecolor (shared palette for statusline.py + monitor.py)
+E = "\033["
+R = E + "0m"
+B = E + "1m"
+C_RED = E + "38;2;191;97;106m"
+C_GRN = E + "38;2;163;190;140m"
+C_YEL = E + "38;2;235;203;139m"
+C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
+C_CYN = E + "38;2;136;192;208m"
+C_WHT = E + "38;2;216;222;233m"
+C_DIM = E + "38;2;76;86;106m"
+
 
 def _num(v, default=0):
     try:
@@ -14,8 +32,9 @@ def _num(v, default=0):
 
 
 def _sanitize(s):
-    """Strip control characters to prevent terminal escape injection."""
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(s))
+    """Strip control characters and bidi overrides to prevent terminal escape injection."""
+    s = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(s))
+    return re.sub(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", s)
 
 
 def f_dur(ms):

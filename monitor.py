@@ -20,12 +20,16 @@ import platform
 import re
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 
-from shared import calc_rates, _num, _sanitize, f_tok, f_cost, f_dur
+from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME,
+                    E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 # ---------------------------------------------------------------------------
 # Transcript usage scanner — reads ~/.claude/projects/**/*.jsonl
@@ -63,16 +67,17 @@ def scan_transcript_stats(period="all", ttl=30.0):
     overview: {"sessions": int, "active_days": set, "longest_dur_ms": float,
                "first_date": str, "daily_tokens": {date_str: int}}
     """
-    now = time.monotonic()
+    mono = time.monotonic()
     cached = _usage_cache.get(period)
-    if cached and now - cached["t"] < ttl:
+    if cached and mono - cached["t"] < ttl:
         return cached["models"], cached["overview"]
 
     cutoff = 0
+    wall = time.time()
     if period == "7d":
-        cutoff = now - 7 * 86400
+        cutoff = wall - 7 * 86400
     elif period == "30d":
-        cutoff = now - 30 * 86400
+        cutoff = wall - 30 * 86400
 
     models = {}
     active_days = set()
@@ -85,7 +90,11 @@ def scan_transcript_stats(period="all", ttl=30.0):
                      "first_date": None, "daily_tokens": {}}
         return models, empty_ov
 
+    _file_count = 0
     for jl in _CLAUDE_DIR.glob("**/*.jsonl"):
+        _file_count += 1
+        if _file_count > 1000:
+            break
         # Skip subagent transcripts for session counting
         is_subagent = "subagents" in str(jl)
         try:
@@ -167,7 +176,7 @@ def scan_transcript_stats(period="all", ttl=30.0):
         "daily_tokens": daily_tokens,
     }
 
-    _usage_cache[period] = {"t": now, "models": models, "overview": overview}
+    _usage_cache[period] = {"t": mono, "models": models, "overview": overview}
     return models, overview
 
 
@@ -266,9 +275,8 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# ANSI
+# ANSI — E, R, B, C_RED..C_DIM imported from shared.py
 # ---------------------------------------------------------------------------
-E = "\033["
 HIDE_CUR = E + "?25l"
 SHOW_CUR = E + "?25h"
 ALT_ON = E + "?1049h"
@@ -279,24 +287,11 @@ EL = E + "K"
 SYNC_ON = E + "?2026h"
 SYNC_OFF = E + "?2026l"
 
-R = E + "0m"
-B = E + "1m"
-
-# Nord-inspired truecolor
-C_RED = E + "38;2;191;97;106m"
-C_GRN = E + "38;2;163;190;140m"
-C_YEL = E + "38;2;235;203;139m"
-C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
-C_CYN = E + "38;2;136;192;208m"
-C_WHT = E + "38;2;216;222;233m"
-C_DIM = E + "38;2;76;86;106m"
-C_FG = E + "38;2;180;186;200m"
+C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.7.0"
-_SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-_ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
-MAX_FILE_SIZE = 1_048_576  # 1 MB — keep in sync with statusline.py
+VERSION = "1.8.0"
+# _SID_RE, _ANSI_RE, MAX_FILE_SIZE imported from shared.py
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 
 try:
@@ -400,7 +395,7 @@ def _limit_color(pct):
 
 
 def _reset_color(resets_epoch, window_secs):
-    """Inverse color for reset countdown — green=lots of time, red=almost expired."""
+    """Color for reset countdown — green=close to reset, red=far from reset."""
     if resets_epoch <= 0:
         return C_DIM
     remaining = resets_epoch - time.time()
@@ -408,10 +403,10 @@ def _reset_color(resets_epoch, window_secs):
         return C_GRN  # just reset
     pct_remaining = remaining / window_secs * 100
     if pct_remaining > 50:
-        return C_GRN
+        return C_RED
     if pct_remaining > 20:
         return C_YEL
-    return C_RED
+    return C_GRN
 
 
 # ---------------------------------------------------------------------------
@@ -434,24 +429,7 @@ def collect_warnings(data, cpm, xpm):
         if ctx_pct < 100:
             eta_mins = (100 - ctx_pct) / xpm
             if eta_mins < 30:
-                warnings.append(f"CTF <{int(eta_mins)}m")
-    # 5HL
-    rl = data.get("rate_limits") or {}
-    fh = rl.get("five_hour") or {}
-    fh_pct = _num(fh.get("used_percentage"))
-    fh_resets = _num(fh.get("resets_at"), 0)
-    if fh_resets > 0 and fh_resets < time.time():
-        fh_pct = 0
-    if fh_pct > 80:
-        warnings.append(f"5HL {fh_pct:.0f}%")
-    # 7DL
-    sd = rl.get("seven_day") or {}
-    sd_pct = _num(sd.get("used_percentage"))
-    sd_resets = _num(sd.get("resets_at"), 0)
-    if sd_resets > 0 and sd_resets < time.time():
-        sd_pct = 0
-    if sd_pct > 80:
-        warnings.append(f"7DL {sd_pct:.0f}%")
+                warnings.append(f"CTF <{max(1, int(eta_mins))}m")
     # BRN
     if cpm and cpm > WARN_BRN:
         warnings.append(f"BRN {cpm:.4f}$/m")
@@ -462,6 +440,103 @@ def collect_warnings(data, cpm, xpm):
 # Cross-session cost aggregation
 # ---------------------------------------------------------------------------
 _cost_cache = {"t": 0.0, "today": 0.0, "week": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# RLS — background release check
+# ---------------------------------------------------------------------------
+_REPO_ROOT = pathlib.Path(__file__).parent.resolve()
+_RLS_TTL = 3600  # check once per hour
+_RLS_BLINK_INTERVAL = 0.5
+_rls_cache = {"t": 0.0, "status": None, "remote_ver": None}
+_rls_fetching = False
+_rls_blink_last = 0.0
+_rls_blink_on = True
+_VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
+
+
+def _parse_version(ver_str):
+    """Parse version string to comparable tuple, ignoring non-numeric suffixes."""
+    parts = []
+    for p in ver_str.split("."):
+        m = re.match(r"(\d+)", p)
+        parts.append(int(m.group(1)) if m else 0)
+    return tuple(parts)
+
+
+def _rls_check_worker():
+    """Background worker: git fetch + compare VERSION. Writes result atomically."""
+    global _rls_fetching
+    try:
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        kw = dict(cwd=_REPO_ROOT, capture_output=True, text=True,
+                   encoding="utf-8", errors="replace", timeout=15, env=env)
+        r = subprocess.run(["git", "fetch", "origin", "main"], **kw)
+        if r.returncode != 0:
+            _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+            return
+        r = subprocess.run(["git", "show", "origin/main:monitor.py"], **kw)
+        if r.returncode != 0:
+            _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+            return
+        m = _VERSION_RE.search(r.stdout)
+        if not m:
+            _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+            return
+        remote_ver = m.group(1)
+        local_t = _parse_version(VERSION)
+        remote_t = _parse_version(remote_ver)
+        if remote_t > local_t:
+            status = "update"
+        else:
+            status = "ok"
+        # Atomic swap — safe under GIL
+        new = {"t": time.monotonic(), "status": status, "remote_ver": remote_ver}
+        _rls_cache.update(new)
+    except FileNotFoundError:
+        _rls_cache.update({"t": time.monotonic(), "status": "no_git", "remote_ver": None})
+    except subprocess.TimeoutExpired:
+        _rls_cache.update({"t": time.monotonic(), "status": "timeout", "remote_ver": None})
+    except Exception:
+        _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+    finally:
+        _rls_fetching = False
+        # Write RLS status to temp file for statusline.py
+        try:
+            DATA_DIR.mkdir(exist_ok=True)
+            rls_file = DATA_DIR / "rls.json"
+            rls_data = {"status": _rls_cache.get("status"), "remote_ver": _rls_cache.get("remote_ver")}
+            fd = tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".tmp", delete=False, mode="w", encoding="utf-8")
+            fd.write(json.dumps(rls_data))
+            fd.close()
+            pathlib.Path(fd.name).replace(rls_file)
+        except OSError:
+            pass
+
+
+def _rls_maybe_check():
+    """Trigger background check if TTL expired. Non-blocking."""
+    global _rls_fetching
+    if os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK") == "1":
+        return
+    if _rls_fetching:
+        return
+    if time.monotonic() - _rls_cache["t"] < _RLS_TTL:
+        return
+    _rls_fetching = True
+    t = threading.Thread(target=_rls_check_worker, daemon=True)
+    t.start()
+
+
+def _rls_blink():
+    """Toggle blink state for update-available indicator."""
+    global _rls_blink_last, _rls_blink_on
+    now = time.monotonic()
+    if now - _rls_blink_last >= _RLS_BLINK_INTERVAL:
+        _rls_blink_on = not _rls_blink_on
+        _rls_blink_last = now
+    return _rls_blink_on
 
 
 def calc_cross_session_costs():
@@ -492,25 +567,35 @@ def calc_cross_session_costs():
         if not entries:
             continue
         entries.sort(key=lambda e: _num(e.get("t"), 0))
-        # Today cost = last entry today - last entry before today (baseline)
-        baseline_today = 0.0
+        # Today cost = last entry today - baseline (last entry before today, or first entry today)
+        baseline_today = None
         final_today = 0.0
+        first_today = None
         for e in entries:
             cost = _num(e.get("cost", {}).get("total_cost_usd"))
             if _num(e.get("t"), 0) < today_start:
                 baseline_today = cost
             else:
+                if first_today is None:
+                    first_today = cost
                 final_today = cost
+        if baseline_today is None:
+            baseline_today = first_today or 0.0
         today_total += max(0.0, final_today - baseline_today)
         # Week cost
-        baseline_week = 0.0
+        baseline_week = None
         final_week = 0.0
+        first_week = None
         for e in entries:
             cost = _num(e.get("cost", {}).get("total_cost_usd"))
             if _num(e.get("t"), 0) < week_start:
                 baseline_week = cost
             else:
+                if first_week is None:
+                    first_week = cost
                 final_week = cost
+        if baseline_week is None:
+            baseline_week = first_week or 0.0
         week_total += max(0.0, final_week - baseline_week)
     return today_total, week_total
 
@@ -522,7 +607,35 @@ def cached_cross_session_costs(ttl=30.0):
         return _cost_cache["today"], _cost_cache["week"]
     today, week = calc_cross_session_costs()
     _cost_cache.update({"t": now, "today": today, "week": week})
+    # Write model stats to temp file for statusline.py (piggyback on cost TTL)
+    _write_shared_stats()
     return today, week
+
+
+def _write_shared_stats():
+    """Write model usage percentages to temp file for statusline.py."""
+    try:
+        models, _ = scan_transcript_stats(period="all", ttl=30.0)
+        if not models:
+            return
+        total = sum(m.get("input", 0) + m.get("output", 0) for m in models.values())
+        if total <= 0:
+            return
+        pcts = {}
+        for mid, m in models.items():
+            tokens = m.get("input", 0) + m.get("output", 0)
+            pct = round(tokens / total * 100, 1)
+            label = _model_label(mid)
+            pcts[label] = pct
+        stats_file = DATA_DIR / "stats.json"
+        fd = tempfile.NamedTemporaryFile(
+            dir=DATA_DIR, suffix=".tmp", delete=False, mode="w", encoding="utf-8"
+        )
+        fd.write(json.dumps({"models": pcts}))
+        fd.close()
+        pathlib.Path(fd.name).replace(stats_file)
+    except (OSError, TypeError, ValueError):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +648,10 @@ def sep(w):
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-DATA_DIR = pathlib.Path(tempfile.gettempdir()) / "claude-aio-monitor"
+DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
+
+
+_RESERVED_FILES = {"rls", "stats"}  # non-session JSON files written by monitor
 
 
 def list_sessions():
@@ -552,6 +668,8 @@ def list_sessions():
     for f in DATA_DIR.glob("*.json"):
         sid = f.stem
         if not _SID_RE.match(sid):
+            continue
+        if sid in _RESERVED_FILES:
             continue
         try:
             st = f.stat()
@@ -609,23 +727,39 @@ def load_history(sid, n=120):
 
 
 # ---------------------------------------------------------------------------
-# Spinner
+# Spinners
 # ---------------------------------------------------------------------------
-# line spinner (cli-spinners) — 4 frames, 130ms interval
-_LINE = ["-", "\\", "|", "/"]
-_line_idx = 0
-_line_last = 0.0
-LINE_INTERVAL = 0.13
+# Session spinner — braille dots, 10 frames, 80ms
+_SPIN_SESSION = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+_spin_session_idx = 0
+_spin_session_last = 0.0
+_SPIN_SESSION_INTERVAL = 0.08
+
+# RLS spinner — pulse dot, 4 frames, 500ms
+_SPIN_RLS = ["∙", "○", "●", "○"]
+_spin_rls_idx = 0
+_spin_rls_last = 0.0
+_SPIN_RLS_INTERVAL = 0.5
 
 
-def spin_line():
-    """Return 1-char line spinner frame, auto-advance on interval."""
-    global _line_idx, _line_last
+def spin_session():
+    """Return 1-char braille spinner frame for session status."""
+    global _spin_session_idx, _spin_session_last
     now = time.monotonic()
-    if now - _line_last >= LINE_INTERVAL:
-        _line_idx += 1
-        _line_last = now
-    return _LINE[_line_idx % len(_LINE)]
+    if now - _spin_session_last >= _SPIN_SESSION_INTERVAL:
+        _spin_session_idx += 1
+        _spin_session_last = now
+    return _SPIN_SESSION[_spin_session_idx % len(_SPIN_SESSION)]
+
+
+def spin_rls():
+    """Return 1-char pulse spinner frame for RLS status."""
+    global _spin_rls_idx, _spin_rls_last
+    now = time.monotonic()
+    if now - _spin_rls_last >= _SPIN_RLS_INTERVAL:
+        _spin_rls_idx += 1
+        _spin_rls_last = now
+    return _SPIN_RLS[_spin_rls_idx % len(_SPIN_RLS)]
 
 
 def _fit_buf_height(buf, rows, *, clip_tail=False):
@@ -719,17 +853,19 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
                 _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
             except OSError:
                 pass
-        buf.append(f"{C_RED}{B}Session Inactive {spin_line()}{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
+        buf.append(f"{C_RED}{B}Session Inactive {spin_session()}{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
     else:
-        buf.append(f"{C_GRN}{B}Session Active {spin_line()}{R}  {C_FG}{session_label}{R}")
-
-    # ── Smart warnings (suppressed when stale) ─────────────
-    _warns = [] if stale else collect_warnings(data, cpm, xpm)
-    if _warns:
-        warn_parts = [f"{C_RED}{B}{w}{R}" for w in _warns]
-        buf.append(f"  {'   '.join(warn_parts)}")
+        buf.append(f"{C_GRN}{B}Session Active {spin_session()}{R}  {C_FG}{session_label}{R}")
 
     buf.append(sep(SW))
+
+    # ── Smart warnings (suppressed when stale, blink 500ms) ──
+    _warns = [] if stale else collect_warnings(data, cpm, xpm)
+    if _warns:
+        wc = f"{C_RED}{B}" if _rls_blink() else C_DIM
+        warn_parts = [f"{wc}{w}{R}" for w in _warns]
+        buf.append(f"{'   '.join(warn_parts)}")
+        buf.append(sep(SW))
 
     inp = _num(usage.get("input_tokens", 0))
     out = _num(usage.get("output_tokens", 0))
@@ -774,7 +910,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             if resets > 0 and resets < time.time():
                 pct = 0.0
             lc = c(_limit_color(pct))
-            buf.append(f"{lc}{B}5HL{R} {mkbar(pct, c(_limit_color(pct)))}")
+            buf.append(f"{lc}{B}5HL{R} {mkbar(pct, lc)}")
             rc = c(_reset_color(resets, 18000))  # 5h window
             buf.append(f"    {c(C_WHT)}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
@@ -786,7 +922,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
             if resets > 0 and resets < time.time():
                 pct = 0.0
             lc = c(_limit_color(pct))
-            buf.append(f"{lc}{B}7DL{R} {mkbar(pct, c(_limit_color(pct)))}")
+            buf.append(f"{lc}{B}7DL{R} {mkbar(pct, lc)}")
             rc = c(_reset_color(resets, 604800))  # 7d window
             buf.append(f"    {c(C_WHT)}reset in:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
@@ -832,9 +968,24 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
     if added or removed:
         buf.append(f"{c(C_WHT)}LNS{R} {c(C_GRN)}{added:,}{R} {C_DIM}-{R} {c(C_RED)}{removed:,}{R}")
 
+    # ── RLS (release check) ────────────────────────────────
+    _rls_maybe_check()
+    rls_s = _rls_cache["status"]
+    if rls_s == "update" and _rls_cache["remote_ver"]:
+        rv = _rls_cache["remote_ver"]
+        if _rls_blink():
+            buf.append(f"{c(C_RED)}{B}RLS{R} {c(C_RED)}{B}{spin_rls()} v{rv} available{R}")
+        else:
+            buf.append(f"{c(C_RED)}{B}RLS{R} {C_DIM}{spin_rls()} v{rv} available{R}")
+    elif rls_s == "ok":
+        buf.append(f"{c(C_GRN)}RLS{R} {c(C_GRN)}{spin_rls()} Up to date{R}")
+    elif rls_s is None:
+        buf.append(f"{C_DIM}RLS {spin_rls()} Checking...{R}")
+    # error/no_git/timeout — ticho, nič nezobrazí
+
     # ── Footer ──────────────────────────────────────────────
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}u{R}{C_DIM}]us{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]qt{R}  {C_DIM}[{R}{C_WHT}r{R}{C_DIM}]rf{R}  {C_DIM}[{R}{C_WHT}s{R}{C_DIM}]se{R}  {C_DIM}[{R}{C_WHT}t{R}{C_DIM}]tk{R}  {C_DIM}[{R}{C_WHT}u{R}{C_DIM}]up{R}  {C_DIM}[{R}{C_WHT}l{R}{C_DIM}]le{R}")
 
     _fit_buf_height(buf, rows, clip_tail=False)
     return buf
@@ -862,27 +1013,41 @@ def render_legend(cols, rows):
     buf.append(f"{C_YEL}CTR{R}  {C_DIM}Context Rate{R}  {C_DIM}(0 - {CTR_MAX} %/min){R}")
     buf.append(f"{C_ORN}CST{R}  {C_DIM}Session Cost{R}  {C_DIM}(0 - {CST_MAX:.0f} $){R}")
     buf.append(f"{C_ORN}TDY{R}  {C_DIM}Today's Cost (all sessions){R}")
-    buf.append(f"{C_ORN}WEK{R}  {C_DIM}This Week's Cost (all sessions){R}")
+    buf.append(f"{C_ORN}WEK{R}  {C_DIM}Rolling 7-Day Cost (all sessions){R}")
     buf.append(f"{C_WHT}LNS{R}  {C_DIM}Lines Changed ({C_GRN}added{R} {C_RED}removed{R}{C_DIM}){R}")
     buf.append(f"{C_WHT}NOW{R}  {C_DIM}Current Time{R}")
     buf.append(f"{C_WHT}UPD{R}  {C_DIM}Last Data Update{R}")
+    buf.append(f"{C_GRN}RLS{R}  {C_DIM}Release Status ({C_GRN}●{R} {C_DIM}Up to date / {C_RED}▶{R} {C_DIM}update available){R}")
     buf.append("")
     buf.append(f"{C_WHT}{B}KEYS{R}")
     buf.append(sep(SW))
     buf.append(f"{C_WHT}q{R}    {C_DIM}Quit{R}")
     buf.append(f"{C_WHT}r{R}    {C_DIM}Refresh (reset stale){R}")
     buf.append(f"{C_WHT}s{R}    {C_DIM}Session picker{R}")
-    buf.append(f"{C_WHT}u{R}    {C_DIM}Usage stats{R}")
-    buf.append(f"{C_WHT}1-9{R}  {C_DIM}Select session{R}")
+    buf.append(f"{C_WHT}t{R}    {C_DIM}Token usage stats (period: 1=all 2=7d 3=30d){R}")
+    buf.append(f"{C_WHT}u{R}    {C_DIM}Update manager (a=apply){R}")
+    buf.append(f"{C_WHT}1-9{R}  {C_DIM}Select session / period filter in stats{R}")
     buf.append(f"{C_WHT}l{R}    {C_DIM}Legend toggle{R}")
     buf.append("")
-    buf.append(f"{C_WHT}{B}USAGE STATS{R}")
+    buf.append(f"{C_WHT}{B}TOKEN USAGE STATS (t){R}")
     buf.append(sep(SW))
     buf.append(f"{C_WHT}SES{R}  {C_DIM}Total Sessions{R}")
     buf.append(f"{C_WHT}DAY{R}  {C_DIM}Active Days{R}")
     buf.append(f"{C_WHT}STK{R}  {C_DIM}Streak (current/best){R}")
     buf.append(f"{C_WHT}LSS{R}  {C_DIM}Longest Session{R}")
     buf.append(f"{C_WHT}TOP{R}  {C_DIM}Most Active Day{R}")
+    buf.append("")
+    buf.append(f"{C_WHT}{B}UPDATE MANAGER (u){R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}Shows current vs remote version, new commits,{R}")
+    buf.append(f"{C_DIM}changelog preview, safety warnings. Press a to apply.{R}")
+    buf.append("")
+    buf.append(f"{C_WHT}{B}WHY CC AIO MON?{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}claude-monitor   JSONL cost logs     Estimated, not real-time{R}")
+    buf.append(f"{C_DIM}ccusage          CLI aggregator      Historical only, no live view{R}")
+    buf.append(f"{C_DIM}ccstatusline     Status line script   No TUI, no multi-session{R}")
+    buf.append(f"{C_CYN}{B}CC AIO MON       Official stdin JSON  Real-time, stdlib only{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
@@ -891,7 +1056,179 @@ def render_legend(cols, rows):
 
 
 # ---------------------------------------------------------------------------
-# Usage stats modal
+# Update modal
+# ---------------------------------------------------------------------------
+_update_result = None  # None=not run, str=output message
+
+
+def _git_cmd(args, timeout=15):
+    """Run git command in repo root, return (returncode, stdout, stderr)."""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        r = subprocess.run(
+            ["git"] + args, cwd=_REPO_ROOT,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=timeout, env=env,
+        )
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except FileNotFoundError:
+        return -1, "", "git not found"
+    except subprocess.TimeoutExpired:
+        return -2, "", "timeout"
+
+
+def _update_checks():
+    """Return list of warning strings for update safety."""
+    warns = []
+    rc, out, _ = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"])
+    if rc == 0 and out != "main":
+        warns.append(f"Not on main branch (current: {out})")
+    rc, out, _ = _git_cmd(["status", "--porcelain", "-uno"])
+    if rc == 0 and out:
+        warns.append("Uncommitted changes in working tree")
+    rc, out, _ = _git_cmd(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
+    if rc == 0:
+        parts = out.split()
+        if len(parts) == 2:
+            ahead, behind = int(parts[0]), int(parts[1])
+            if ahead > 0 and behind > 0:
+                warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+    return warns
+
+
+def _get_new_commits(max_lines=10):
+    """Return list of oneline commit strings from HEAD to origin/main."""
+    rc, out, _ = _git_cmd(["log", "--oneline", f"--max-count={max_lines}", "HEAD..origin/main"])
+    if rc != 0 or not out:
+        return []
+    return out.split("\n")
+
+
+def _get_remote_changelog_preview(version, max_lines=15):
+    """Extract changelog section for a version from origin/main."""
+    rc, out, _ = _git_cmd(["show", "origin/main:CHANGELOG.md"])
+    if rc != 0:
+        return []
+    pattern = rf"## v{re.escape(version)}\b.*?(?=\n## v|\Z)"
+    m = re.search(pattern, out, re.DOTALL)
+    if not m:
+        return []
+    lines = m.group(0).strip().split("\n")
+    return lines[:max_lines]
+
+
+def _apply_update_action():
+    """Run git pull --ff-only and store result."""
+    global _update_result
+    rc, out, err = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
+    if rc == 0:
+        # Syntax check
+        bad = []
+        for f in ["monitor.py", "statusline.py", "shared.py", "update.py"]:
+            fp = _REPO_ROOT / f
+            if fp.exists():
+                r = subprocess.run(
+                    [sys.executable, "-m", "py_compile", str(fp)],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    bad.append(f)
+        if bad:
+            _update_result = f"Updated but syntax errors in: {', '.join(bad)}"
+        else:
+            _update_result = "Update complete. Restart monitor to apply."
+    else:
+        _update_result = f"Update failed: {_sanitize(err or out or 'unknown error')}"
+
+
+def render_update_modal(cols, rows):
+    """Render the update manager modal."""
+    global _update_result
+    SW = cols
+    buf = []
+    buf.append(sep(SW))
+    up_pad = max(0, SW - 6)
+    buf.append(f"{BG_BAR}{C_WHT}{B}UPDATE{R}{BG_BAR}{' ' * up_pad}{R}")
+    buf.append(sep(SW))
+
+    rls_s = _rls_cache["status"]
+    remote_ver = _rls_cache.get("remote_ver")
+
+    buf.append(f"{C_WHT}Current:{R}  v{VERSION}")
+    if remote_ver:
+        buf.append(f"{C_WHT}Remote:{R}   v{remote_ver}")
+    else:
+        buf.append(f"{C_DIM}Remote:   unknown{R}")
+    buf.append("")
+
+    if rls_s == "update" and remote_ver:
+        # Show new commits
+        commits = _get_new_commits()
+        if commits:
+            buf.append(f"{C_WHT}{B}New commits:{R}")
+            for c_line in commits:
+                buf.append(f"  {C_DIM}{_sanitize(c_line)}{R}")
+            buf.append("")
+
+        # Changelog preview
+        cl = _get_remote_changelog_preview(remote_ver)
+        if cl:
+            buf.append(f"{C_WHT}{B}Changelog:{R}")
+            for c_line in cl:
+                buf.append(f"  {C_DIM}{_sanitize(c_line)}{R}")
+            buf.append("")
+
+        # Safety warnings
+        warns = _update_checks()
+        if warns:
+            buf.append(f"{C_RED}{B}Warnings:{R}")
+            for w in [_sanitize(x) for x in warns]:
+                buf.append(f"  {C_RED}{w}{R}")
+            buf.append("")
+
+        if _update_result:
+            if "complete" in _update_result:
+                buf.append(f"{C_GRN}{B}{_update_result}{R}")
+            else:
+                buf.append(f"{C_RED}{B}{_update_result}{R}")
+            buf.append("")
+            buf.append(f"{C_DIM}press any key to close{R}")
+        elif warns:
+            buf.append(sep(SW))
+            buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] Apply update (risky){R}  {C_DIM}[any key] Back{R}")
+        else:
+            buf.append(sep(SW))
+            buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] Apply update{R}  {C_DIM}[any key] Back{R}")
+
+    elif rls_s == "ok":
+        buf.append(f"{C_GRN}{spin_rls()} Up to date — nothing to do.{R}")
+        buf.append("")
+        buf.append(f"{C_DIM}press any key to close{R}")
+
+    elif rls_s is None:
+        buf.append(f"{C_DIM}{spin_rls()} Checking for updates...{R}")
+        buf.append("")
+        buf.append(f"{C_DIM}press any key to close{R}")
+
+    else:
+        buf.append(f"{C_DIM}Could not check for updates.{R}")
+        if rls_s == "no_git":
+            buf.append(f"{C_DIM}Git is not installed or not on PATH.{R}")
+        elif rls_s == "timeout":
+            buf.append(f"{C_DIM}Network timeout — check your connection.{R}")
+        else:
+            buf.append(f"{C_DIM}Unknown error during check.{R}")
+        buf.append("")
+        buf.append(f"{C_DIM}press any key to close{R}")
+
+    _fit_buf_height(buf, rows, clip_tail=True)
+    return buf
+
+
+# ---------------------------------------------------------------------------
+# Token stats modal
 # ---------------------------------------------------------------------------
 _PERIOD_LABELS = {"all": "All Time", "7d": "Last 7 Days", "30d": "Last 30 Days"}
 _PERIOD_CYCLE = ["all", "7d", "30d"]
@@ -916,7 +1253,7 @@ def render_stats(cols, rows, period="all"):
     SW = cols
     buf = []
     buf.append(sep(SW))
-    title = f"USAGE STATS  {_PERIOD_LABELS.get(period, period)}"
+    title = f"TOKEN STATS  {_PERIOD_LABELS.get(period, period)}"
     tp = max(0, SW - len(title))
     buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
     buf.append(sep(SW))
@@ -1095,8 +1432,11 @@ def main():
     if sid and not _SID_RE.match(sid):
         print(f"Invalid session ID: {sid}")
         return
+    global _update_result
     show_legend = False
     show_stats = None  # None=off, "all"/"7d"/"30d"=active period
+    show_update = False
+    _update_result = None
     _render_errors = 0
     last_mt = 0
     last_seen = 0  # monotonic timestamp of last successful data load
@@ -1119,9 +1459,22 @@ def main():
             k = poll_key()
             if k == "q":
                 break
+            # ── Modal-specific handlers first (priority) ──
+            elif show_update and k == "a" and _update_result is None:
+                _apply_update_action()
+            elif show_update and k is not None:
+                show_update = False
+                _update_result = None
+            elif show_stats is not None and k in ("1", "2", "3"):
+                show_stats = _PERIOD_CYCLE[int(k) - 1]
+            elif show_stats is not None and k is not None:
+                show_stats = None
+            elif show_legend and k is not None:
+                show_legend = False
+            # ── Global handlers ──
             elif k == "r":
                 last_mt = 0
-                last_seen = time.monotonic()  # reset stale on manual refresh
+                last_seen = time.monotonic()
             elif k == "s":
                 sid = None
                 last_data = None
@@ -1132,22 +1485,35 @@ def main():
             elif k == "l":
                 show_legend = not show_legend
                 show_stats = None
-            elif k == "u":
+                show_update = False
+                _update_result = None
+            elif k == "t":
                 if show_stats is not None:
                     show_stats = None
                 else:
                     show_stats = "all"
                     show_legend = False
-            elif show_stats is not None and k in ("1", "2", "3"):
-                show_stats = _PERIOD_CYCLE[int(k) - 1]
-            elif show_stats is not None and k is not None:
-                show_stats = None
-            elif show_legend and k is not None:
+                    show_update = False
+                    _update_result = None
+            elif k == "u":
+                show_update = not show_update
+                if not show_update:
+                    _update_result = None
                 show_legend = False
+                show_stats = None
 
             # Render every tick when we have data (for spinner), reload data on interval
             need_render = size_changed or last_data is not None or since_data >= data_interval
             if not need_render:
+                time.sleep(tick)
+                continue
+
+            # Update modal
+            if show_update:
+                try:
+                    flush(render_update_modal(cols, rows), cols)
+                except (TypeError, ValueError, KeyError, OSError):
+                    pass
                 time.sleep(tick)
                 continue
 
@@ -1164,18 +1530,14 @@ def main():
             if sid is None:
                 sessions = list_sessions()
                 active = [s for s in sessions if not s["stale"]]
-                if len(active) == 1 and len(sessions) == 1:
+                if len(active) == 1:
                     sid = active[0]["id"]
                 elif not sessions:
                     flush(render_picker([], cols, rows), cols)
-                    if k == "q":
-                        break
                     time.sleep(tick)
                     continue
                 else:
                     flush(render_picker(sessions, cols, rows), cols)
-                    if k == "q":
-                        break
                     if k and k.isdigit():
                         idx = int(k) - 1
                         if 0 <= idx < len(sessions):
