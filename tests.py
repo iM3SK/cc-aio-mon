@@ -43,12 +43,9 @@ from monitor import (
     render_picker,
 )
 from shared import (
-    MAX_FILE_SIZE, _ANSI_RE, _ANSI_RE as M_ANSI_RE,
-    _sanitize,
-    C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM,
+    MAX_FILE_SIZE, _ANSI_RE, _sanitize,
+    C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_DIM,
 )
-# M_* aliases for backward compat with existing test assertions
-M_RED = C_RED; M_YEL = C_YEL; M_GRN = C_GRN; M_DIM = C_DIM; M_ORN = C_ORN
 
 from statusline import (
     _get_terminal_width,
@@ -156,35 +153,35 @@ class TestFitBufHeight(unittest.TestCase):
 class TestLimitColor(unittest.TestCase):
 
     def test_low_usage_yellow(self):
-        self.assertEqual(_limit_color(20), M_YEL)
+        self.assertEqual(_limit_color(20), C_YEL)
 
     def test_mid_usage_yellow(self):
-        self.assertEqual(_limit_color(55), M_YEL)
+        self.assertEqual(_limit_color(55), C_YEL)
 
     def test_high_usage_red(self):
-        self.assertEqual(_limit_color(85), M_RED)
+        self.assertEqual(_limit_color(85), C_RED)
 
 
 class TestResetColor(unittest.TestCase):
 
     def test_lots_of_time_red(self):
         # Reset in 4h out of 5h window = 80% remaining → red (far from reset)
-        self.assertEqual(_reset_color(time.time() + 14400, 18000), M_RED)
+        self.assertEqual(_reset_color(time.time() + 14400, 18000), C_RED)
 
     def test_some_time_yellow(self):
         # Reset in 1.5h out of 5h window = 30% remaining → yellow
-        self.assertEqual(_reset_color(time.time() + 5400, 18000), M_YEL)
+        self.assertEqual(_reset_color(time.time() + 5400, 18000), C_YEL)
 
     def test_little_time_green(self):
         # Reset in 15min out of 5h window = 5% remaining → green (close to reset)
-        self.assertEqual(_reset_color(time.time() + 900, 18000), M_GRN)
+        self.assertEqual(_reset_color(time.time() + 900, 18000), C_GRN)
 
     def test_just_reset_green(self):
         # Reset epoch in the past → just reset
-        self.assertEqual(_reset_color(time.time() - 10, 18000), M_GRN)
+        self.assertEqual(_reset_color(time.time() - 10, 18000), C_GRN)
 
     def test_no_data_dim(self):
-        self.assertEqual(_reset_color(0, 18000), M_DIM)
+        self.assertEqual(_reset_color(0, 18000), C_DIM)
 
 
 # ---------------------------------------------------------------------------
@@ -739,45 +736,45 @@ class TestMkbar(unittest.TestCase):
 
     def test_zero_percent(self):
         result = mkbar(0)
-        plain = M_ANSI_RE.sub("", result)
+        plain = _ANSI_RE.sub("", result)
         self.assertIn("0.0", plain)
         self.assertIn("[", plain)
         self.assertIn("]", plain)
 
     def test_100_percent(self):
         result = mkbar(100)
-        plain = M_ANSI_RE.sub("", result)
+        plain = _ANSI_RE.sub("", result)
         self.assertIn("100.0", plain)
 
     def test_clamps_negative(self):
         result = mkbar(-10)
-        plain = M_ANSI_RE.sub("", result)
+        plain = _ANSI_RE.sub("", result)
         self.assertIn("0.0", plain)
 
     def test_clamps_over_100(self):
         result = mkbar(150)
-        plain = M_ANSI_RE.sub("", result)
+        plain = _ANSI_RE.sub("", result)
         self.assertIn("100.0", plain)
 
     def test_green_under_50(self):
         result = mkbar(30)
-        self.assertIn(M_GRN, result)
+        self.assertIn(C_GRN, result)
 
     def test_yellow_50_79(self):
         result = mkbar(60)
-        self.assertIn(M_YEL, result)
+        self.assertIn(C_YEL, result)
 
     def test_red_over_80(self):
         result = mkbar(90)
-        self.assertIn(M_RED, result)
+        self.assertIn(C_RED, result)
 
     def test_custom_color(self):
-        result = mkbar(30, M_ORN)
-        self.assertIn(M_ORN, result)
+        result = mkbar(30, C_ORN)
+        self.assertIn(C_ORN, result)
 
     def test_visual_width(self):
         result = mkbar(50)
-        plain = M_ANSI_RE.sub("", result)
+        plain = _ANSI_RE.sub("", result)
         # [████░░░]  XX.X %  → brackets + BAR_W + space + percent
         self.assertIn("[", plain)
         self.assertIn("]", plain)
@@ -1195,7 +1192,7 @@ class TestRenderStats(unittest.TestCase):
 
     def test_no_data_shows_placeholder(self):
         buf = render_stats(80, 24, "all")
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("No transcript data", plain)
 
     def test_with_data_shows_model(self):
@@ -1209,7 +1206,7 @@ class TestRenderStats(unittest.TestCase):
         })]
         (d / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         buf = render_stats(80, 40, "all")
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("Opus 4.6", plain)
         self.assertIn("100.0", plain)  # 100% single model
         self.assertIn("Total", plain)
@@ -1225,7 +1222,7 @@ class TestRenderStats(unittest.TestCase):
         })]
         (d / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         buf = render_stats(80, 40, "all")
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("SES", plain)
         self.assertIn("DAY", plain)
         self.assertIn("STK", plain)
@@ -1235,13 +1232,13 @@ class TestRenderStats(unittest.TestCase):
         buf_all = render_stats(80, 24, "all")
         buf_7d = render_stats(80, 24, "7d")
         buf_30d = render_stats(80, 24, "30d")
-        self.assertIn("All Time", M_ANSI_RE.sub("", "\n".join(buf_all)))
-        self.assertIn("Last 7 Days", M_ANSI_RE.sub("", "\n".join(buf_7d)))
-        self.assertIn("Last 30 Days", M_ANSI_RE.sub("", "\n".join(buf_30d)))
+        self.assertIn("All Time", _ANSI_RE.sub("", "\n".join(buf_all)))
+        self.assertIn("Last 7 Days", _ANSI_RE.sub("", "\n".join(buf_7d)))
+        self.assertIn("Last 30 Days", _ANSI_RE.sub("", "\n".join(buf_30d)))
 
     def test_footer_has_keys(self):
         buf = render_stats(80, 24, "all")
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("1", plain)
         self.assertIn("2", plain)
         self.assertIn("3", plain)
@@ -1260,20 +1257,20 @@ class TestRenderLegend(unittest.TestCase):
 
     def test_contains_all_metrics(self):
         buf = render_legend(80, 60)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         for label in ["APR", "CHR", "CTX", "5HL", "7DL", "BRN", "CTR", "CST",
                        "TDY", "WEK", "LNS", "NOW", "UPD", "RLS"]:
             self.assertIn(label, plain)
 
     def test_contains_usage_stats_section(self):
         buf = render_legend(80, 60)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         for label in ["SES", "DAY", "STK", "LSS", "TOP"]:
             self.assertIn(label, plain)
 
     def test_contains_keys(self):
         buf = render_legend(80, 60)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         for key in ["q", "r", "s", "u", "l", "1-9"]:
             self.assertIn(key, plain)
 
@@ -1290,17 +1287,17 @@ class TestRenderFrame(unittest.TestCase):
 
     def test_stale_shows_inactive(self):
         buf = render_frame(_full_data(), [], 80, 30, stale=True)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("Inactive", plain)
 
     def test_legend_mode(self):
         buf = render_frame(_full_data(), [], 80, 50, show_legend=True)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("LEGEND", plain)
 
     def test_footer_has_keys(self):
         buf = render_frame(_full_data(), [], 80, 35)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("[t]tk", plain)
         self.assertIn("[u]up", plain)
 
@@ -1386,7 +1383,7 @@ class TestRlsInDashboard(unittest.TestCase):
         import monitor
         monitor._rls_cache.update({"t": time.monotonic(), "status": "ok", "remote_ver": "1.8.0"})
         buf = render_frame(_full_data(), [], 80, 35)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("RLS", plain)
         self.assertIn("Up to date", plain)
 
@@ -1396,7 +1393,7 @@ class TestRlsInDashboard(unittest.TestCase):
         monitor._rls_blink_on = True
         monitor._rls_blink_last = time.monotonic()
         buf = render_frame(_full_data(), [], 80, 35)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("RLS", plain)
         self.assertIn("v9.9.9 available", plain)
 
@@ -1404,20 +1401,20 @@ class TestRlsInDashboard(unittest.TestCase):
         import monitor
         monitor._rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
         buf = render_frame(_full_data(), [], 80, 35)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertNotIn("RLS", plain)
 
     def test_rls_checking(self):
         import monitor
         monitor._rls_cache.update({"t": time.monotonic(), "status": None, "remote_ver": None})
         buf = render_frame(_full_data(), [], 80, 35)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("RLS", plain)
         self.assertIn("Checking", plain)
 
     def test_legend_contains_rls(self):
         buf = render_legend(80, 60)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("RLS", plain)
 
 
@@ -1437,10 +1434,17 @@ class TestRlsCheckWorker(unittest.TestCase):
         self._orig_fetching = _monitor_mod._rls_fetching
         # Start each test as if fetching is in progress (worker sets it False in finally)
         _monitor_mod._rls_fetching = True
+        # Acquire lock so worker can release it (mirrors _rls_maybe_check behavior)
+        _monitor_mod._rls_lock.acquire(blocking=False)
 
     def tearDown(self):
         _rls_cache.update(self._orig_cache)
         _monitor_mod._rls_fetching = self._orig_fetching
+        # Ensure lock is released for next test
+        try:
+            _monitor_mod._rls_lock.release()
+        except RuntimeError:
+            pass
 
     def _make_run(self, fetch_rc=0, show_rc=0, show_stdout=""):
         """Return a side_effect callable for subprocess.run."""
@@ -1546,8 +1550,12 @@ class TestRlsMaybeCheck(unittest.TestCase):
         self._orig_cache = dict(_rls_cache)
         self._orig_fetching = _monitor_mod._rls_fetching
         _monitor_mod._rls_fetching = False
+        # Ensure lock is free
+        try:
+            _monitor_mod._rls_lock.release()
+        except RuntimeError:
+            pass
         # Expire the cache so TTL check would normally pass
-        # Note: t=0.0 may NOT be expired on fresh CI runners where monotonic() < _RLS_TTL
         _rls_cache.update({"t": time.monotonic() - _RLS_TTL - 1, "status": None, "remote_ver": None})
         # Remove the env var if set
         self._env_var_was_set = "CC_AIO_MON_NO_UPDATE_CHECK" in os.environ
@@ -1556,6 +1564,10 @@ class TestRlsMaybeCheck(unittest.TestCase):
     def tearDown(self):
         _rls_cache.update(self._orig_cache)
         _monitor_mod._rls_fetching = self._orig_fetching
+        try:
+            _monitor_mod._rls_lock.release()
+        except RuntimeError:
+            pass
         if self._env_var_was_set:
             os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = "1"
         else:
@@ -1572,15 +1584,14 @@ class TestRlsMaybeCheck(unittest.TestCase):
         self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
-    # b. _rls_fetching=True → no thread spawned
+    # b. Lock already held → no thread spawned
     # ------------------------------------------------------------------
     def test_already_fetching_skips(self):
-        _monitor_mod._rls_fetching = True
+        # Acquire lock to simulate in-progress fetch
+        _monitor_mod._rls_lock.acquire(blocking=False)
         with patch("monitor.threading.Thread") as mock_thread:
             _rls_maybe_check()
         mock_thread.assert_not_called()
-        # Still True — we didn't change it
-        self.assertTrue(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # c. Cache TTL not expired → no thread spawned
@@ -2071,7 +2082,7 @@ class TestRenderUpdateModal(unittest.TestCase):
         import monitor
         monitor._rls_cache.update({"t": time.monotonic(), "status": "ok", "remote_ver": VERSION})
         buf = render_update_modal(80, 24)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("Up to date", plain)
 
     def test_update_available(self):
@@ -2083,7 +2094,7 @@ class TestRenderUpdateModal(unittest.TestCase):
             with patch("monitor._update_checks", return_value=[]):
                 with patch("monitor._get_remote_changelog_preview", return_value=[]):
                     buf = render_update_modal(80, 40)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn(remote_ver, plain)
 
 
@@ -2304,7 +2315,7 @@ class TestRenderPicker(unittest.TestCase):
 
     def test_empty_sessions_shows_waiting_message(self):
         buf = render_picker([], 80, 24)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("Waiting", plain)
 
     def test_non_empty_sessions_shows_session_list(self):
@@ -2318,7 +2329,7 @@ class TestRenderPicker(unittest.TestCase):
             }
         ]
         buf = render_picker(sessions, 80, 24)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("MyProject", plain)
 
     def test_returns_buffer_of_correct_length(self):
@@ -2336,7 +2347,7 @@ class TestRenderPicker(unittest.TestCase):
             }
         ]
         buf = render_picker(sessions, 80, 30)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("stale", plain)
 
     def test_live_session_shows_live_label(self):
@@ -2350,7 +2361,7 @@ class TestRenderPicker(unittest.TestCase):
             }
         ]
         buf = render_picker(sessions, 80, 30)
-        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("live", plain)
 
 

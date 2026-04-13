@@ -28,7 +28,7 @@ import time
 from datetime import datetime
 
 from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur,
-                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME, VERSION_RE,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 # ---------------------------------------------------------------------------
@@ -291,7 +291,6 @@ C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
 VERSION = "1.8.1"
-# _SID_RE, _ANSI_RE, MAX_FILE_SIZE imported from shared.py
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
@@ -450,10 +449,11 @@ _REPO_ROOT = pathlib.Path(__file__).parent.resolve()
 _RLS_TTL = 3600  # check once per hour
 _RLS_BLINK_INTERVAL = 0.5
 _rls_cache = {"t": 0.0, "status": None, "remote_ver": None}
+_rls_lock = threading.Lock()
 _rls_fetching = False
 _rls_blink_last = 0.0
 _rls_blink_on = True
-_VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
+_VERSION_RE = VERSION_RE  # alias from shared.py
 
 
 def _parse_version(ver_str):
@@ -503,9 +503,10 @@ def _rls_check_worker():
         _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
     finally:
         _rls_fetching = False
+        _rls_lock.release()
         # Write RLS status to temp file for statusline.py
         try:
-            DATA_DIR.mkdir(exist_ok=True)
+            DATA_DIR.mkdir(mode=0o700, exist_ok=True)
             rls_file = DATA_DIR / "rls.json"
             rls_data = {"status": _rls_cache.get("status"), "remote_ver": _rls_cache.get("remote_ver")}
             fd = tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".tmp", delete=False, mode="w", encoding="utf-8")
@@ -521,9 +522,9 @@ def _rls_maybe_check():
     global _rls_fetching
     if os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK") == "1":
         return
-    if _rls_fetching:
-        return
     if time.monotonic() - _rls_cache["t"] < _RLS_TTL:
+        return
+    if not _rls_lock.acquire(blocking=False):
         return
     _rls_fetching = True
     t = threading.Thread(target=_rls_check_worker, daemon=True)
@@ -656,7 +657,7 @@ _RESERVED_FILES = {"rls", "stats"}  # non-session JSON files written by monitor
 
 
 def list_sessions():
-    if not DATA_DIR.exists():
+    if not DATA_DIR.exists() or DATA_DIR.is_symlink():
         return []
     now = time.time()
     # Clean up stale .tmp files (orphans from crashed writes)
@@ -885,7 +886,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, stale=False):
 
     # ── APR — API Ratio ─────────────────────────────────────
     if dur > 0:
-        apr_pct = round(api_dur / dur * 100, 1)
+        apr_pct = min(100.0, round(api_dur / dur * 100, 1))
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
         buf.append(f"    {c(C_DIM)}DUR {f_dur(dur)}{R} {C_DIM}-{R} {c(C_DIM)}API {f_dur(api_dur)}{R}")
     else:
