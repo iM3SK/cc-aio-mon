@@ -43,8 +43,8 @@ from monitor import (
     render_picker,
 )
 from shared import (
-    MAX_FILE_SIZE, _SID_RE, _ANSI_RE, _ANSI_RE as M_ANSI_RE,
-    _sanitize, E, R, B,
+    MAX_FILE_SIZE, _ANSI_RE, _ANSI_RE as M_ANSI_RE,
+    _sanitize,
     C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM,
 )
 # M_* aliases for backward compat with existing test assertions
@@ -87,7 +87,9 @@ class TestFitBufHeight(unittest.TestCase):
         buf = [str(i) for i in range(30)]
         _fit_buf_height(buf, 10, clip_tail=True)
         self.assertEqual(len(buf), 10)
-        self.assertEqual(buf[-1], "29")
+        # Header preserved, bottom clipped
+        self.assertEqual(buf[0], "0")
+        self.assertEqual(buf[-1], "9")
 
     def test_clip_tail_rows_zero(self):
         buf = ["a", "b", "c"]
@@ -1425,7 +1427,6 @@ class TestRlsInDashboard(unittest.TestCase):
 
 import monitor as _monitor_mod
 import subprocess
-import threading
 
 
 class TestRlsCheckWorker(unittest.TestCase):
@@ -2086,7 +2087,6 @@ class TestRenderUpdateModal(unittest.TestCase):
         self.assertIn(remote_ver, plain)
 
 
-import monitor as _monitor_mod2  # noqa: F811 — second alias for new test classes
 import pathlib
 import json
 
@@ -2183,6 +2183,29 @@ class TestListSessions(unittest.TestCase):
         # mtime is now — should NOT be cleaned
         list_sessions()
         self.assertTrue(tmp_file.exists())
+
+    def test_dead_session_purged_after_48h(self):
+        import monitor
+        sid = "oldSession"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        h = pathlib.Path(self._tmp) / f"{sid}.jsonl"
+        p.write_text('{"model": {}}', encoding="utf-8")
+        h.write_text('{"t": 1}\n', encoding="utf-8")
+        # Set mtime to 49h ago
+        old_time = time.time() - 176400
+        os.utime(p, (old_time, old_time))
+        list_sessions()
+        self.assertFalse(p.exists())
+        self.assertFalse(h.exists())
+
+    def test_recent_session_not_purged(self):
+        import monitor
+        sid = "recentSession"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_text('{"model": {"display_name": "Opus"}, "session_name": "", "cwd": ""}', encoding="utf-8")
+        result = list_sessions()
+        self.assertTrue(p.exists())
+        self.assertEqual(len(result), 1)
 
 
 # ---------------------------------------------------------------------------
