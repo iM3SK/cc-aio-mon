@@ -5,12 +5,22 @@ Run:
     python tests.py
 """
 
+import os
 import re
 import sys
+import tempfile
 import time
 import unittest
+from unittest.mock import patch, MagicMock
 
 import shared
+from update import (
+    get_local_version,
+    get_remote_version,
+    get_ahead_behind,
+    get_remote_changelog_entry,
+    check_clean,
+)
 
 # Import target functions directly
 from monitor import (
@@ -22,38 +32,37 @@ from monitor import (
     scan_transcript_stats, render_stats, render_legend, render_frame,
     _CLAUDE_DIR, _usage_cache,
     WARN_BRN, BRN_MAX, CTR_MAX, CST_MAX,
-    BAR_W, MAX_FILE_SIZE, _SID_RE, _ANSI_RE as M_ANSI_RE,
-    C_RED as M_RED, C_YEL as M_YEL, C_GRN as M_GRN, C_DIM as M_DIM,
-    C_ORN as M_ORN,
+    BAR_W,
+    _parse_version, _rls_cache, _rls_blink, VERSION,
+    _rls_check_worker, _rls_maybe_check, _RLS_TTL,
+    spin_session, spin_rls, _SPIN_SESSION, _SPIN_RLS,
+    _git_cmd, _update_checks, _get_new_commits,
+    _get_remote_changelog_preview, _apply_update_action,
+    render_update_modal,
+    _RESERVED_FILES, list_sessions, load_state, load_history, DATA_DIR,
+    render_picker,
 )
+from shared import (
+    MAX_FILE_SIZE, _SID_RE, _ANSI_RE, _ANSI_RE as M_ANSI_RE,
+    _sanitize, E, R, B,
+    C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM,
+)
+# M_* aliases for backward compat with existing test assertions
+M_RED = C_RED; M_YEL = C_YEL; M_GRN = C_GRN; M_DIM = C_DIM; M_ORN = C_ORN
 
 from statusline import (
-    _ANSI_RE,
-    BG_BAR,
-    R,
-    RB,
-    EL,
-    C_GRN,
-    C_YEL,
-    C_RED,
-    C_ORN,
-    C_DIM,
     _get_terminal_width,
-    _sanitize,
     _calc_rates as sl_calc_rates,
     seg_model,
     seg_ctx,
     seg_5hl,
     seg_7dl,
     seg_cost,
-    seg_dur,
     seg_chr,
     seg_brn,
-    seg_ctr,
     seg_apr,
-    seg_ctf,
-    seg_now,
     build_line,
+    cpc_base,
 )
 
 
@@ -156,17 +165,17 @@ class TestLimitColor(unittest.TestCase):
 
 class TestResetColor(unittest.TestCase):
 
-    def test_lots_of_time_green(self):
-        # Reset in 4h out of 5h window = 80% remaining → green
-        self.assertEqual(_reset_color(time.time() + 14400, 18000), M_GRN)
+    def test_lots_of_time_red(self):
+        # Reset in 4h out of 5h window = 80% remaining → red (far from reset)
+        self.assertEqual(_reset_color(time.time() + 14400, 18000), M_RED)
 
     def test_some_time_yellow(self):
         # Reset in 1.5h out of 5h window = 30% remaining → yellow
         self.assertEqual(_reset_color(time.time() + 5400, 18000), M_YEL)
 
-    def test_little_time_red(self):
-        # Reset in 15min out of 5h window = 5% remaining → red
-        self.assertEqual(_reset_color(time.time() + 900, 18000), M_RED)
+    def test_little_time_green(self):
+        # Reset in 15min out of 5h window = 5% remaining → green (close to reset)
+        self.assertEqual(_reset_color(time.time() + 900, 18000), M_GRN)
 
     def test_just_reset_green(self):
         # Reset epoch in the past → just reset
@@ -522,24 +531,6 @@ class TestSegCost(unittest.TestCase):
         self.assertIsNone(seg_cost(d))
 
 
-class TestSegDur(unittest.TestCase):
-
-    def test_basic(self):
-        text, vl = seg_dur(_full_data())
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("DUR", _ANSI_RE.sub("", text))
-        self.assertIn("2m", _ANSI_RE.sub("", text))
-
-    def test_uses_dim(self):
-        text, _ = seg_dur(_full_data())
-        self.assertIn(C_DIM, text)
-
-    def test_zero_duration(self):
-        d = _full_data()
-        d["cost"]["total_duration_ms"] = 0
-        self.assertIsNone(seg_dur(d))
-
-
 class TestSegChr(unittest.TestCase):
 
     def test_basic(self):
@@ -597,49 +588,6 @@ class TestSegBrn(unittest.TestCase):
         self.assertIsNone(seg_brn(0))
 
 
-class TestSegCtr(unittest.TestCase):
-
-    def test_basic(self):
-        text, vl = seg_ctr(1.5)
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("CTR", _ANSI_RE.sub("", text))
-
-    def test_none(self):
-        self.assertIsNone(seg_ctr(None))
-
-
-class TestSegCtf(unittest.TestCase):
-
-    def test_basic(self):
-        d = _full_data()
-        text, vl = seg_ctf(2.0, d)
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("CTF", _ANSI_RE.sub("", text))
-
-    def test_none_ctr(self):
-        self.assertIsNone(seg_ctf(None, _full_data()))
-
-    def test_full_context(self):
-        d = _full_data()
-        d["context_window"]["used_percentage"] = 100
-        self.assertIsNone(seg_ctf(2.0, d))
-
-
-
-class TestSegNow(unittest.TestCase):
-
-    def test_returns_time(self):
-        text, vl = seg_now()
-        self.assertEqual(vl, _vlen(text))
-        plain = _ANSI_RE.sub("", text)
-        self.assertIn("NOW", plain)
-        self.assertRegex(plain, r"\d{2}:\d{2}:\d{2}")
-
-    def test_uses_dim(self):
-        text, _ = seg_now()
-        self.assertIn(C_DIM, text)
-
-
 # ---------------------------------------------------------------------------
 # build_line
 # ---------------------------------------------------------------------------
@@ -650,12 +598,12 @@ class TestBuildLine(unittest.TestCase):
         self.assertIsNotNone(line)
         self.assertGreater(len(line), 0)
 
-    def test_visual_width_matches_cols_wide(self):
-        # When right segments fit, spacer pads to exact cols
+    def test_visual_width_fits_cols(self):
+        # Line should not exceed terminal width
         for cols in (120, 200, 300):
             line = build_line(_full_data(), cols)
             vl = _vlen(line)
-            self.assertEqual(vl, cols, f"cols={cols}, got vl={vl}")
+            self.assertLessEqual(vl, cols, f"cols={cols}, got vl={vl}")
 
     def test_narrow_no_right_segments_shorter_than_cols(self):
         # When all right segments dropped, line is shorter — EL fills the rest
@@ -678,51 +626,6 @@ class TestBuildLine(unittest.TestCase):
         line = build_line({}, 80)
         # Should still produce something (empty model at minimum)
         self.assertIsNotNone(line)
-
-
-# ---------------------------------------------------------------------------
-# RB — bar background persistence
-# ---------------------------------------------------------------------------
-class TestBarBackgroundPersistence(unittest.TestCase):
-    """Verify that BG_BAR is never killed inside the bar line.
-
-    The fix: segments and SEP use RB (reset + re-apply bg) instead of R
-    (full reset). Every bare R inside the bar would create a gap in the
-    background color. Only the final R after EL is allowed.
-    """
-
-    def test_no_bare_reset_inside_line(self):
-        line = build_line(_full_data(), 200)
-        full = f"{BG_BAR}{line}{EL}{R}"
-        # Pattern: \033[0m NOT followed by \033[48;2;46;52;64m
-        bare_reset = re.compile(r"\033\[0m(?!\033\[48;2;46;52;64m)")
-        matches = bare_reset.findall(full)
-        # Exactly 1 bare reset: the final R after EL
-        self.assertEqual(len(matches), 1,
-                         f"Expected 1 bare reset (final), found {len(matches)}")
-
-    def test_rb_count_matches_segments(self):
-        line = build_line(_full_data(), 200)
-        rb_pattern = re.compile(r"\033\[0m\033\[48;2;46;52;64m")
-        rb_count = len(rb_pattern.findall(line))
-        # At least a few RB resets (segments + separators)
-        self.assertGreater(rb_count, 5)
-
-    def test_el_fires_with_bg_active(self):
-        """After all segments, the last escape before EL should be BG_BAR (via RB)."""
-        line = build_line(_full_data(), 200)
-        full = f"{BG_BAR}{line}{EL}"
-        # Find the last \033[...m before EL (\033[K)
-        # The line ends with RB (from last segment), then spacer (spaces), then EL
-        # BG_BAR should be active (last color set contains 48;2;46;52;64)
-        idx_el = full.rfind("\033[K")
-        before_el = full[:idx_el]
-        # Find last SGR sequence before EL
-        last_sgr = list(re.finditer(r"\033\[[0-9;]*m", before_el))
-        self.assertTrue(len(last_sgr) > 0)
-        last_escape = last_sgr[-1].group()
-        self.assertIn("48;2;46;52;64", last_escape,
-                       "BG_BAR must be active when EL fires")
 
 
 # ---------------------------------------------------------------------------
@@ -761,17 +664,17 @@ class TestCollectWarnings(unittest.TestCase):
         warns = collect_warnings(data, 0.01, 0.1)  # 90% / 0.1 = 900 min
         self.assertFalse(any("CTF" in w for w in warns))
 
-    def test_5hl_above_80(self):
+    def test_5hl_above_80_no_warn(self):
         data = _full_data()
         data["rate_limits"]["five_hour"]["used_percentage"] = 85
         warns = collect_warnings(data, 0.01, 0.1)
-        self.assertTrue(any("5HL" in w for w in warns))
+        self.assertFalse(any("5HL" in w for w in warns))
 
-    def test_7dl_above_80(self):
+    def test_7dl_above_80_no_warn(self):
         data = _full_data()
         data["rate_limits"]["seven_day"]["used_percentage"] = 90
         warns = collect_warnings(data, 0.01, 0.1)
-        self.assertTrue(any("7DL" in w for w in warns))
+        self.assertFalse(any("7DL" in w for w in warns))
 
     def test_brn_above_threshold(self):
         warns = collect_warnings(_full_data(), WARN_BRN + 0.01, 0.1)
@@ -781,19 +684,11 @@ class TestCollectWarnings(unittest.TestCase):
         warns = collect_warnings(_full_data(), 0.01, 0.1)
         self.assertFalse(any("BRN" in w for w in warns))
 
-    def test_expired_reset_no_warn(self):
-        data = _full_data()
-        data["rate_limits"]["five_hour"]["used_percentage"] = 90
-        data["rate_limits"]["five_hour"]["resets_at"] = 1000  # far past
-        warns = collect_warnings(data, 0.01, 0.1)
-        self.assertFalse(any("5HL" in w for w in warns))
-
     def test_multiple_warnings(self):
         data = _full_data()
         data["context_window"]["used_percentage"] = 95
-        data["rate_limits"]["five_hour"]["used_percentage"] = 85
-        warns = collect_warnings(data, WARN_BRN + 0.5, 5.0)  # CTF + 5HL + BRN
-        self.assertGreaterEqual(len(warns), 3)
+        warns = collect_warnings(data, WARN_BRN + 0.5, 5.0)  # CTF + BRN
+        self.assertGreaterEqual(len(warns), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1362,20 +1257,20 @@ class TestRenderLegend(unittest.TestCase):
         self.assertEqual(len(buf), 24)
 
     def test_contains_all_metrics(self):
-        buf = render_legend(80, 40)
+        buf = render_legend(80, 60)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         for label in ["APR", "CHR", "CTX", "5HL", "7DL", "BRN", "CTR", "CST",
-                       "TDY", "WEK", "LNS", "NOW", "UPD"]:
+                       "TDY", "WEK", "LNS", "NOW", "UPD", "RLS"]:
             self.assertIn(label, plain)
 
     def test_contains_usage_stats_section(self):
-        buf = render_legend(80, 40)
+        buf = render_legend(80, 60)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         for label in ["SES", "DAY", "STK", "LSS", "TOP"]:
             self.assertIn(label, plain)
 
     def test_contains_keys(self):
-        buf = render_legend(80, 40)
+        buf = render_legend(80, 60)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         for key in ["q", "r", "s", "u", "l", "1-9"]:
             self.assertIn(key, plain)
@@ -1401,10 +1296,1147 @@ class TestRenderFrame(unittest.TestCase):
         plain = M_ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("LEGEND", plain)
 
-    def test_footer_has_usage_key(self):
-        buf = render_frame(_full_data(), [], 80, 30)
+    def test_footer_has_keys(self):
+        buf = render_frame(_full_data(), [], 80, 35)
         plain = M_ANSI_RE.sub("", "\n".join(buf))
-        self.assertIn("[u]us", plain)
+        self.assertIn("[t]tk", plain)
+        self.assertIn("[u]up", plain)
+
+
+# ---------------------------------------------------------------------------
+# _parse_version / RLS
+# ---------------------------------------------------------------------------
+class TestParseVersion(unittest.TestCase):
+
+    def test_simple(self):
+        self.assertEqual(_parse_version("1.7.1"), (1, 7, 1))
+
+    def test_comparison_minor(self):
+        self.assertGreater(_parse_version("1.7.2"), _parse_version("1.7.1"))
+
+    def test_comparison_major(self):
+        self.assertGreater(_parse_version("2.0.0"), _parse_version("1.99.99"))
+
+    def test_comparison_ten(self):
+        # String compare would fail this: "1.10.0" < "1.9.0"
+        self.assertGreater(_parse_version("1.10.0"), _parse_version("1.9.0"))
+
+    def test_pre_release_suffix(self):
+        # "1.7.2-beta" should parse as (1, 7, 2)
+        self.assertEqual(_parse_version("1.7.2-beta"), (1, 7, 2))
+
+    def test_equal(self):
+        self.assertEqual(_parse_version("1.7.1"), _parse_version("1.7.1"))
+
+    def test_current_version_parses(self):
+        t = _parse_version(VERSION)
+        self.assertIsInstance(t, tuple)
+        self.assertGreaterEqual(len(t), 3)
+
+
+class TestRlsBlink(unittest.TestCase):
+
+    def test_returns_bool(self):
+        self.assertIsInstance(_rls_blink(), bool)
+
+    def test_toggles(self):
+        # Force blink state by manipulating internals
+        import monitor
+        monitor._rls_blink_last = 0.0  # expired
+        monitor._rls_blink_on = True
+        result1 = _rls_blink()
+        monitor._rls_blink_last = 0.0  # expired again
+        result2 = _rls_blink()
+        # Should have toggled
+        self.assertNotEqual(result1, result2)
+
+
+class TestRlsCache(unittest.TestCase):
+
+    def test_initial_state(self):
+        # status starts as None (not yet checked)
+        self.assertIn("status", _rls_cache)
+        self.assertIn("t", _rls_cache)
+
+    def test_cache_has_remote_ver(self):
+        self.assertIn("remote_ver", _rls_cache)
+
+
+class TestRlsInDashboard(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._old_cache = monitor._rls_cache.copy()
+        self._old_blink = monitor._rls_blink_on
+        self._old_env = os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK")
+        os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = "1"
+
+    def tearDown(self):
+        import monitor
+        monitor._rls_cache.update(self._old_cache)
+        monitor._rls_blink_on = self._old_blink
+        if self._old_env is None:
+            os.environ.pop("CC_AIO_MON_NO_UPDATE_CHECK", None)
+        else:
+            os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = self._old_env
+
+    def test_rls_up_to_date(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "ok", "remote_ver": "1.8.0"})
+        buf = render_frame(_full_data(), [], 80, 35)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("RLS", plain)
+        self.assertIn("Up to date", plain)
+
+    def test_rls_update_available(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "update", "remote_ver": "9.9.9"})
+        monitor._rls_blink_on = True
+        monitor._rls_blink_last = time.monotonic()
+        buf = render_frame(_full_data(), [], 80, 35)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("RLS", plain)
+        self.assertIn("v9.9.9 available", plain)
+
+    def test_rls_error_silent(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+        buf = render_frame(_full_data(), [], 80, 35)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertNotIn("RLS", plain)
+
+    def test_rls_checking(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": None, "remote_ver": None})
+        buf = render_frame(_full_data(), [], 80, 35)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("RLS", plain)
+        self.assertIn("Checking", plain)
+
+    def test_legend_contains_rls(self):
+        buf = render_legend(80, 60)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("RLS", plain)
+
+
+# ===========================================================================
+# RLS BACKGROUND CHECK TESTS
+# ===========================================================================
+
+import monitor as _monitor_mod
+import subprocess
+import threading
+
+
+class TestRlsCheckWorker(unittest.TestCase):
+    """Tests for _rls_check_worker() — mocks subprocess.run, no real git."""
+
+    def setUp(self):
+        self._orig_cache = dict(_rls_cache)
+        self._orig_fetching = _monitor_mod._rls_fetching
+        # Start each test as if fetching is in progress (worker sets it False in finally)
+        _monitor_mod._rls_fetching = True
+
+    def tearDown(self):
+        _rls_cache.update(self._orig_cache)
+        _monitor_mod._rls_fetching = self._orig_fetching
+
+    def _make_run(self, fetch_rc=0, show_rc=0, show_stdout=""):
+        """Return a side_effect callable for subprocess.run."""
+        call_count = [0]
+
+        def _run(cmd, **_kw):
+            r = MagicMock()
+            call_count[0] += 1
+            if call_count[0] == 1:          # git fetch
+                r.returncode = fetch_rc
+                r.stdout = ""
+            else:                           # git show
+                r.returncode = show_rc
+                r.stdout = show_stdout
+            return r
+
+        return _run
+
+    # ------------------------------------------------------------------
+    # a. git fetch fails → status "error"
+    # ------------------------------------------------------------------
+    def test_fetch_fail_sets_error(self):
+        with patch("monitor.subprocess.run", side_effect=self._make_run(fetch_rc=1)):
+            _rls_check_worker()
+        self.assertEqual(_rls_cache["status"], "error")
+        self.assertIsNone(_rls_cache["remote_ver"])
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # b. git show fails → status "error"
+    # ------------------------------------------------------------------
+    def test_show_fail_sets_error(self):
+        with patch("monitor.subprocess.run", side_effect=self._make_run(fetch_rc=0, show_rc=1)):
+            _rls_check_worker()
+        self.assertEqual(_rls_cache["status"], "error")
+        self.assertIsNone(_rls_cache["remote_ver"])
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # c. VERSION regex not found in remote output → status "error"
+    # ------------------------------------------------------------------
+    def test_version_regex_not_found_sets_error(self):
+        stdout_no_version = "# some python file\nfoo = 'bar'\n"
+        with patch("monitor.subprocess.run",
+                   side_effect=self._make_run(show_stdout=stdout_no_version)):
+            _rls_check_worker()
+        self.assertEqual(_rls_cache["status"], "error")
+        self.assertIsNone(_rls_cache["remote_ver"])
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # d. Remote version > local → status "update", remote_ver set
+    # ------------------------------------------------------------------
+    def test_remote_newer_sets_update(self):
+        local_parts = [int(p) for p in VERSION.split(".")]
+        # Bump the last component to guarantee remote > local
+        local_parts[-1] += 1
+        remote_ver = ".".join(str(p) for p in local_parts)
+        stdout = f'VERSION = "{remote_ver}"\n'
+        with patch("monitor.subprocess.run", side_effect=self._make_run(show_stdout=stdout)):
+            _rls_check_worker()
+        self.assertEqual(_rls_cache["status"], "update")
+        self.assertEqual(_rls_cache["remote_ver"], remote_ver)
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # e. Remote version == local → status "ok"
+    # ------------------------------------------------------------------
+    def test_remote_same_sets_ok(self):
+        stdout = f'VERSION = "{VERSION}"\n'
+        with patch("monitor.subprocess.run", side_effect=self._make_run(show_stdout=stdout)):
+            _rls_check_worker()
+        self.assertEqual(_rls_cache["status"], "ok")
+        self.assertEqual(_rls_cache["remote_ver"], VERSION)
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # f. FileNotFoundError (no git binary) → status "no_git"
+    # ------------------------------------------------------------------
+    def test_no_git_sets_no_git(self):
+        with patch("monitor.subprocess.run", side_effect=FileNotFoundError):
+            _rls_check_worker()
+        self.assertEqual(_rls_cache["status"], "no_git")
+        self.assertIsNone(_rls_cache["remote_ver"])
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # g. TimeoutExpired → status "timeout"
+    # ------------------------------------------------------------------
+    def test_timeout_sets_timeout(self):
+        with patch("monitor.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd="git", timeout=15)):
+            _rls_check_worker()
+        self.assertEqual(_rls_cache["status"], "timeout")
+        self.assertIsNone(_rls_cache["remote_ver"])
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+
+class TestRlsMaybeCheck(unittest.TestCase):
+    """Tests for _rls_maybe_check() — verifies thread spawning decisions."""
+
+    def setUp(self):
+        self._orig_cache = dict(_rls_cache)
+        self._orig_fetching = _monitor_mod._rls_fetching
+        _monitor_mod._rls_fetching = False
+        # Expire the cache so TTL check would normally pass
+        # Note: t=0.0 may NOT be expired on fresh CI runners where monotonic() < _RLS_TTL
+        _rls_cache.update({"t": time.monotonic() - _RLS_TTL - 1, "status": None, "remote_ver": None})
+        # Remove the env var if set
+        self._env_var_was_set = "CC_AIO_MON_NO_UPDATE_CHECK" in os.environ
+        os.environ.pop("CC_AIO_MON_NO_UPDATE_CHECK", None)
+
+    def tearDown(self):
+        _rls_cache.update(self._orig_cache)
+        _monitor_mod._rls_fetching = self._orig_fetching
+        if self._env_var_was_set:
+            os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = "1"
+        else:
+            os.environ.pop("CC_AIO_MON_NO_UPDATE_CHECK", None)
+
+    # ------------------------------------------------------------------
+    # a. NO_UPDATE_CHECK=1 → no thread spawned
+    # ------------------------------------------------------------------
+    def test_no_update_check_env_skips(self):
+        os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = "1"
+        with patch("monitor.threading.Thread") as mock_thread:
+            _rls_maybe_check()
+        mock_thread.assert_not_called()
+        self.assertFalse(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # b. _rls_fetching=True → no thread spawned
+    # ------------------------------------------------------------------
+    def test_already_fetching_skips(self):
+        _monitor_mod._rls_fetching = True
+        with patch("monitor.threading.Thread") as mock_thread:
+            _rls_maybe_check()
+        mock_thread.assert_not_called()
+        # Still True — we didn't change it
+        self.assertTrue(_monitor_mod._rls_fetching)
+
+    # ------------------------------------------------------------------
+    # c. Cache TTL not expired → no thread spawned
+    # ------------------------------------------------------------------
+    def test_ttl_not_expired_skips(self):
+        _rls_cache.update({"t": time.monotonic(), "status": "ok", "remote_ver": VERSION})
+        with patch("monitor.threading.Thread") as mock_thread:
+            _rls_maybe_check()
+        mock_thread.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # d. TTL expired, not fetching → thread spawned and started
+    # ------------------------------------------------------------------
+    def test_ttl_expired_spawns_thread(self):
+        # Force cache TTL to be expired (monotonic=0 may be within TTL on fresh CI runners)
+        _monitor_mod._rls_fetching = False
+        _rls_cache.update({"t": time.monotonic() - _RLS_TTL - 1, "status": None, "remote_ver": None})
+        mock_thread_instance = MagicMock()
+        with patch("monitor.threading.Thread", return_value=mock_thread_instance) as mock_thread_cls:
+            _rls_maybe_check()
+        mock_thread_cls.assert_called_once_with(
+            target=_rls_check_worker, daemon=True
+        )
+        mock_thread_instance.start.assert_called_once()
+        # _rls_fetching must be True after spawning
+        self.assertTrue(_monitor_mod._rls_fetching)
+
+
+# ---------------------------------------------------------------------------
+# TestUpdate — update.py
+# ---------------------------------------------------------------------------
+class TestUpdate(unittest.TestCase):
+
+    # -- get_local_version ---------------------------------------------------
+
+    def test_get_local_version_double_quotes(self):
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            import update
+            old_root = update.REPO_ROOT
+            update.REPO_ROOT = Path(td)
+            (Path(td) / "monitor.py").write_text('VERSION = "1.2.3"\n', encoding="utf-8")
+            try:
+                result = update.get_local_version()
+                self.assertEqual(result, "1.2.3")
+            finally:
+                update.REPO_ROOT = old_root
+
+    def test_get_local_version_single_quotes(self):
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            import update
+            old_root = update.REPO_ROOT
+            update.REPO_ROOT = Path(td)
+            (Path(td) / "monitor.py").write_text("VERSION = '2.0.0'\n", encoding="utf-8")
+            try:
+                result = update.get_local_version()
+                self.assertEqual(result, "2.0.0")
+            finally:
+                update.REPO_ROOT = old_root
+
+    def test_get_local_version_missing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            import update
+            old_root = update.REPO_ROOT
+            update.REPO_ROOT = Path(td)
+            try:
+                with self.assertRaises(RuntimeError):
+                    update.get_local_version()
+            finally:
+                update.REPO_ROOT = old_root
+
+    def test_get_local_version_missing_constant(self):
+        with tempfile.TemporaryDirectory() as td:
+            from pathlib import Path
+            import update
+            old_root = update.REPO_ROOT
+            update.REPO_ROOT = Path(td)
+            (Path(td) / "monitor.py").write_text("# no version here\n", encoding="utf-8")
+            try:
+                with self.assertRaises(RuntimeError):
+                    update.get_local_version()
+            finally:
+                update.REPO_ROOT = old_root
+
+    # -- get_remote_version --------------------------------------------------
+
+    def test_get_remote_version_parses_stdout(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = 'VERSION = "3.4.5"\n# other stuff\n'
+        with patch("update.run_git", return_value=fake):
+            result = get_remote_version()
+        self.assertEqual(result, "3.4.5")
+
+    def test_get_remote_version_single_quotes(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = "VERSION = '0.1.0'\n"
+        with patch("update.run_git", return_value=fake):
+            result = get_remote_version()
+        self.assertEqual(result, "0.1.0")
+
+    def test_get_remote_version_git_failure(self):
+        fake = MagicMock()
+        fake.returncode = 128
+        fake.stdout = ""
+        with patch("update.run_git", return_value=fake):
+            with self.assertRaises(RuntimeError):
+                get_remote_version()
+
+    def test_get_remote_version_no_constant(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = "# just a comment\nprint('hello')\n"
+        with patch("update.run_git", return_value=fake):
+            with self.assertRaises(RuntimeError):
+                get_remote_version()
+
+    # -- get_ahead_behind ----------------------------------------------------
+
+    def test_get_ahead_behind_normal(self):
+        # rev-list --left-right: parts[0]=HEAD(ahead), parts[1]=origin(behind)
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = "3\t5\n"
+        with patch("update.run_git", return_value=fake):
+            behind, ahead = get_ahead_behind()
+        self.assertEqual(behind, 5)
+        self.assertEqual(ahead, 3)
+
+    def test_get_ahead_behind_up_to_date(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = "0\t0\n"
+        with patch("update.run_git", return_value=fake):
+            behind, ahead = get_ahead_behind()
+        self.assertEqual(behind, 0)
+        self.assertEqual(ahead, 0)
+
+    def test_get_ahead_behind_only_behind(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = "0\t2\n"
+        with patch("update.run_git", return_value=fake):
+            behind, ahead = get_ahead_behind()
+        self.assertEqual(behind, 2)
+        self.assertEqual(ahead, 0)
+
+    def test_get_ahead_behind_git_failure(self):
+        fake = MagicMock()
+        fake.returncode = 1
+        fake.stdout = ""
+        with patch("update.run_git", return_value=fake):
+            with self.assertRaises(RuntimeError):
+                get_ahead_behind()
+
+    def test_get_ahead_behind_unexpected_output(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = "garbage\n"
+        with patch("update.run_git", return_value=fake):
+            with self.assertRaises((RuntimeError, ValueError)):
+                get_ahead_behind()
+
+    # -- get_remote_changelog_entry ------------------------------------------
+
+    _CHANGELOG = (
+        "# Changelog\n\n"
+        "## v2.0.0\n\n"
+        "- New dashboard layout\n"
+        "- Bug fixes\n\n"
+        "## v1.9.0\n\n"
+        "- Added feature X\n\n"
+        "## v1.8.0\n\n"
+        "- Initial release\n"
+    )
+
+    def test_get_remote_changelog_entry_found(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = self._CHANGELOG
+        with patch("update.run_git", return_value=fake):
+            result = get_remote_changelog_entry("2.0.0")
+        self.assertIsNotNone(result)
+        self.assertIn("New dashboard layout", result)
+        self.assertNotIn("Added feature X", result)
+
+    def test_get_remote_changelog_entry_middle_version(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = self._CHANGELOG
+        with patch("update.run_git", return_value=fake):
+            result = get_remote_changelog_entry("1.9.0")
+        self.assertIsNotNone(result)
+        self.assertIn("Added feature X", result)
+        self.assertNotIn("New dashboard layout", result)
+        self.assertNotIn("Initial release", result)
+
+    def test_get_remote_changelog_entry_not_found(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = self._CHANGELOG
+        with patch("update.run_git", return_value=fake):
+            result = get_remote_changelog_entry("99.0.0")
+        self.assertIsNone(result)
+
+    def test_get_remote_changelog_entry_git_failure(self):
+        fake = MagicMock()
+        fake.returncode = 128
+        fake.stdout = ""
+        with patch("update.run_git", return_value=fake):
+            result = get_remote_changelog_entry("2.0.0")
+        self.assertIsNone(result)
+
+    # -- check_clean ---------------------------------------------------------
+
+    def test_check_clean_passes_when_clean(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = ""
+        with patch("update.run_git", return_value=fake):
+            with patch("sys.exit") as mock_exit:
+                check_clean()
+                mock_exit.assert_not_called()
+
+    def test_check_clean_exits_when_dirty(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = " M monitor.py\n"
+        with patch("update.run_git", return_value=fake):
+            with self.assertRaises(SystemExit):
+                check_clean()
+
+    def test_check_clean_whitespace_only_is_clean(self):
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.stdout = "   \n"
+        with patch("update.run_git", return_value=fake):
+            with patch("sys.exit") as mock_exit:
+                check_clean()
+                mock_exit.assert_not_called()
+
+    # -- import safety -------------------------------------------------------
+
+    def test_import_does_not_replace_stdout(self):
+        original = sys.stdout
+        import update  # noqa: F401 — already imported, verifying no stdout side-effect
+        self.assertIs(sys.stdout, original)
+
+
+# ---------------------------------------------------------------------------
+# spin_session
+# ---------------------------------------------------------------------------
+class TestSpinSession(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig_idx = monitor._spin_session_idx
+        self._orig_last = monitor._spin_session_last
+
+    def tearDown(self):
+        import monitor
+        monitor._spin_session_idx = self._orig_idx
+        monitor._spin_session_last = self._orig_last
+
+    def test_returns_valid_char(self):
+        result = spin_session()
+        self.assertIn(result, _SPIN_SESSION)
+
+    def test_advances(self):
+        import monitor
+        monitor._spin_session_last = 0.0
+        monitor._spin_session_idx = 0
+        first = spin_session()
+        idx_after_first = monitor._spin_session_idx
+        monitor._spin_session_last = 0.0
+        spin_session()
+        idx_after_second = monitor._spin_session_idx
+        self.assertGreater(idx_after_second, idx_after_first)
+
+
+# ---------------------------------------------------------------------------
+# spin_rls
+# ---------------------------------------------------------------------------
+class TestSpinRls(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig_idx = monitor._spin_rls_idx
+        self._orig_last = monitor._spin_rls_last
+
+    def tearDown(self):
+        import monitor
+        monitor._spin_rls_idx = self._orig_idx
+        monitor._spin_rls_last = self._orig_last
+
+    def test_returns_valid_char(self):
+        result = spin_rls()
+        self.assertIn(result, _SPIN_RLS)
+
+
+# ---------------------------------------------------------------------------
+# _git_cmd
+# ---------------------------------------------------------------------------
+class TestGitCmd(unittest.TestCase):
+
+    def test_success(self):
+        import subprocess as sp
+        completed = sp.CompletedProcess(args=["git"], returncode=0, stdout="ok\n", stderr="")
+        with patch("monitor.subprocess.run", return_value=completed):
+            rc, out, err = _git_cmd(["status"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "ok")
+        self.assertEqual(err, "")
+
+    def test_file_not_found(self):
+        with patch("monitor.subprocess.run", side_effect=FileNotFoundError):
+            rc, out, err = _git_cmd(["status"])
+        self.assertEqual(rc, -1)
+        self.assertEqual(out, "")
+        self.assertIn("git not found", err)
+
+    def test_timeout(self):
+        import subprocess as sp
+        with patch("monitor.subprocess.run", side_effect=sp.TimeoutExpired(cmd="git", timeout=15)):
+            rc, out, err = _git_cmd(["status"])
+        self.assertEqual(rc, -2)
+        self.assertEqual(out, "")
+        self.assertIn("timeout", err)
+
+
+# ---------------------------------------------------------------------------
+# _update_checks
+# ---------------------------------------------------------------------------
+class TestUpdateChecks(unittest.TestCase):
+
+    def _mock_git(self, responses):
+        """Return a side_effect that pops from responses list on each call."""
+        responses = list(responses)
+        call_count = [0]
+
+        def _cmd(args, **_kw):
+            i = call_count[0]
+            call_count[0] += 1
+            if i < len(responses):
+                return responses[i]
+            return (0, "", "")
+
+        return _cmd
+
+    def test_clean_main(self):
+        responses = [(0, "main", ""), (0, "", ""), (0, "0\t0", "")]
+        with patch("monitor._git_cmd", side_effect=self._mock_git(responses)):
+            warns = _update_checks()
+        self.assertEqual(warns, [])
+
+    def test_not_main(self):
+        responses = [(0, "develop", ""), (0, "", ""), (0, "0\t0", "")]
+        with patch("monitor._git_cmd", side_effect=self._mock_git(responses)):
+            warns = _update_checks()
+        self.assertTrue(any("Not on main" in w for w in warns))
+
+    def test_dirty(self):
+        responses = [(0, "main", ""), (0, "M file.py", ""), (0, "0\t0", "")]
+        with patch("monitor._git_cmd", side_effect=self._mock_git(responses)):
+            warns = _update_checks()
+        self.assertTrue(any("Uncommitted" in w for w in warns))
+
+    def test_diverged(self):
+        responses = [(0, "main", ""), (0, "", ""), (0, "3\t5", "")]
+        with patch("monitor._git_cmd", side_effect=self._mock_git(responses)):
+            warns = _update_checks()
+        self.assertTrue(any("Diverged" in w for w in warns))
+
+
+# ---------------------------------------------------------------------------
+# _get_new_commits
+# ---------------------------------------------------------------------------
+class TestGetNewCommits(unittest.TestCase):
+
+    def test_success(self):
+        with patch("monitor._git_cmd", return_value=(0, "abc feat\ndef fix", "")):
+            result = _get_new_commits()
+        self.assertEqual(result, ["abc feat", "def fix"])
+
+    def test_failure(self):
+        with patch("monitor._git_cmd", return_value=(1, "", "error")):
+            result = _get_new_commits()
+        self.assertEqual(result, [])
+
+
+# ---------------------------------------------------------------------------
+# _get_remote_changelog_preview
+# ---------------------------------------------------------------------------
+class TestGetRemoteChangelogPreview(unittest.TestCase):
+
+    _CHANGELOG = (
+        "## v2.0.0\n"
+        "- item1\n"
+        "- item2\n"
+        "## v1.0.0\n"
+        "- old\n"
+    )
+
+    def test_extracts_version(self):
+        with patch("monitor._git_cmd", return_value=(0, self._CHANGELOG, "")):
+            result = _get_remote_changelog_preview("2.0.0")
+        self.assertEqual(result[0], "## v2.0.0")
+        self.assertIn("- item1", result)
+        self.assertIn("- item2", result)
+        # Must not bleed into next section
+        self.assertNotIn("- old", result)
+
+    def test_not_found(self):
+        content = "## v1.0.0\n- something\n"
+        with patch("monitor._git_cmd", return_value=(0, content, "")):
+            result = _get_remote_changelog_preview("9.9.9")
+        self.assertEqual(result, [])
+
+
+# ---------------------------------------------------------------------------
+# _apply_update_action
+# ---------------------------------------------------------------------------
+class TestApplyUpdateAction(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig_result = monitor._update_result
+        self._orig_env = os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK")
+        os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = "1"
+
+    def tearDown(self):
+        import monitor
+        monitor._update_result = self._orig_result
+        if self._orig_env is None:
+            os.environ.pop("CC_AIO_MON_NO_UPDATE_CHECK", None)
+        else:
+            os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = self._orig_env
+
+    def test_success(self):
+        import subprocess as sp
+        pull_ok = sp.CompletedProcess(args=["git"], returncode=0, stdout="ok\n", stderr="")
+        compile_ok = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        def _fake_subprocess_run(cmd, **kw):
+            # py_compile calls come through subprocess.run directly
+            return compile_ok
+
+        with patch("monitor._git_cmd", return_value=(0, "ok", "")):
+            with patch("monitor.subprocess.run", return_value=compile_ok):
+                _apply_update_action()
+
+        import monitor
+        self.assertIn("complete", monitor._update_result)
+
+    def test_failure(self):
+        with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
+            _apply_update_action()
+
+        import monitor
+        self.assertIn("failed", monitor._update_result)
+
+
+# ---------------------------------------------------------------------------
+# render_update_modal
+# ---------------------------------------------------------------------------
+class TestRenderUpdateModal(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig_cache = monitor._rls_cache.copy()
+        self._orig_result = monitor._update_result
+        self._orig_env = os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK")
+        os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = "1"
+
+    def tearDown(self):
+        import monitor
+        monitor._rls_cache.update(self._orig_cache)
+        monitor._update_result = self._orig_result
+        if self._orig_env is None:
+            os.environ.pop("CC_AIO_MON_NO_UPDATE_CHECK", None)
+        else:
+            os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = self._orig_env
+
+    def test_up_to_date(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "ok", "remote_ver": VERSION})
+        buf = render_update_modal(80, 24)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Up to date", plain)
+
+    def test_update_available(self):
+        import monitor
+        remote_ver = "9.9.9"
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "update", "remote_ver": remote_ver})
+        monitor._update_result = None
+        with patch("monitor._get_new_commits", return_value=["abc new feature"]):
+            with patch("monitor._update_checks", return_value=[]):
+                with patch("monitor._get_remote_changelog_preview", return_value=[]):
+                    buf = render_update_modal(80, 40)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn(remote_ver, plain)
+
+
+import monitor as _monitor_mod2  # noqa: F811 — second alias for new test classes
+import pathlib
+import json
+
+
+# ---------------------------------------------------------------------------
+# TestCpcBase — statusline.cpc_base
+# ---------------------------------------------------------------------------
+class TestCpcBase(unittest.TestCase):
+
+    def test_below_warn_returns_base(self):
+        self.assertEqual(cpc_base(30, C_CYN), C_CYN)
+
+    def test_at_warn_returns_yellow(self):
+        self.assertEqual(cpc_base(50, C_CYN), C_YEL)
+
+    def test_above_warn_returns_yellow(self):
+        self.assertEqual(cpc_base(70, C_GRN), C_YEL)
+
+    def test_at_crit_returns_red(self):
+        self.assertEqual(cpc_base(80, C_CYN), C_RED)
+
+    def test_above_crit_returns_red(self):
+        self.assertEqual(cpc_base(95, C_GRN), C_RED)
+
+
+# ---------------------------------------------------------------------------
+# TestListSessions — monitor.list_sessions
+# ---------------------------------------------------------------------------
+class TestListSessions(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig = monitor.DATA_DIR
+        self._tmp = tempfile.mkdtemp()
+        monitor.DATA_DIR = pathlib.Path(self._tmp)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_empty_dir_returns_empty_list(self):
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_valid_session_found(self):
+        sid = "validSession123"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_text(json.dumps({"model": {"display_name": "Opus"}, "session_name": "", "cwd": ""}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["id"], sid)
+
+    def test_rls_json_skipped(self):
+        p = pathlib.Path(self._tmp) / "rls.json"
+        p.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_stats_json_skipped(self):
+        p = pathlib.Path(self._tmp) / "stats.json"
+        p.write_text(json.dumps({"data": 1}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_invalid_sid_skipped(self):
+        # Dots in stem make SID invalid per _SID_RE
+        p = pathlib.Path(self._tmp) / "..evil.json"
+        p.write_text(json.dumps({"model": {}}), encoding="utf-8")
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_oversized_file_skipped(self):
+        import monitor
+        sid = "bigSession"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        # Write content slightly over MAX_FILE_SIZE
+        p.write_bytes(b"x" * (MAX_FILE_SIZE + 1))
+        result = list_sessions()
+        self.assertEqual(result, [])
+
+    def test_stale_tmp_files_cleaned_up(self):
+        tmp_file = pathlib.Path(self._tmp) / "orphan.tmp"
+        tmp_file.write_text("garbage", encoding="utf-8")
+        # Force mtime to be old (> 60s ago)
+        old_time = time.time() - 120
+        os.utime(str(tmp_file), (old_time, old_time))
+        list_sessions()
+        self.assertFalse(tmp_file.exists())
+
+    def test_recent_tmp_files_not_cleaned_up(self):
+        tmp_file = pathlib.Path(self._tmp) / "recent.tmp"
+        tmp_file.write_text("garbage", encoding="utf-8")
+        # mtime is now — should NOT be cleaned
+        list_sessions()
+        self.assertTrue(tmp_file.exists())
+
+
+# ---------------------------------------------------------------------------
+# TestLoadState — monitor.load_state
+# ---------------------------------------------------------------------------
+class TestLoadState(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig = monitor.DATA_DIR
+        self._tmp = tempfile.mkdtemp()
+        monitor.DATA_DIR = pathlib.Path(self._tmp)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_valid_json_returns_dict(self):
+        sid = "sess001"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        payload = {"session_id": sid, "cost": {"total_cost_usd": 1.5}}
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        result = load_state(sid)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["session_id"], sid)
+
+    def test_invalid_sid_returns_none(self):
+        result = load_state("../evil")
+        self.assertIsNone(result)
+
+    def test_missing_file_returns_none(self):
+        result = load_state("nonExistentSid")
+        self.assertIsNone(result)
+
+    def test_oversized_file_returns_none(self):
+        sid = "bigSess"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_bytes(b"{}" + b" " * MAX_FILE_SIZE)
+        result = load_state(sid)
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# TestLoadHistory — monitor.load_history
+# ---------------------------------------------------------------------------
+class TestLoadHistory(unittest.TestCase):
+
+    def setUp(self):
+        import monitor
+        self._orig = monitor.DATA_DIR
+        self._tmp = tempfile.mkdtemp()
+        monitor.DATA_DIR = pathlib.Path(self._tmp)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_valid_jsonl_returns_list(self):
+        sid = "histSess"
+        p = pathlib.Path(self._tmp) / f"{sid}.jsonl"
+        lines = [json.dumps({"t": 1_600_000_000 + i, "v": i}) for i in range(5)]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = load_history(sid)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result[0]["v"], 0)
+
+    def test_invalid_sid_returns_empty(self):
+        result = load_history("../../etc/passwd")
+        self.assertEqual(result, [])
+
+    def test_missing_file_returns_empty(self):
+        result = load_history("noSuchSession")
+        self.assertEqual(result, [])
+
+    def test_corrupt_json_lines_skipped(self):
+        sid = "partialSess"
+        p = pathlib.Path(self._tmp) / f"{sid}.jsonl"
+        lines = [
+            "not valid json",
+            json.dumps({"t": 1_600_000_000, "ok": True}),
+            "{broken",
+            json.dumps({"t": 1_600_000_060, "ok": True}),
+        ]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = load_history(sid)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(r.get("ok") for r in result))
+
+
+# ---------------------------------------------------------------------------
+# TestRenderPicker — monitor.render_picker
+# ---------------------------------------------------------------------------
+class TestRenderPicker(unittest.TestCase):
+
+    def test_empty_sessions_shows_waiting_message(self):
+        buf = render_picker([], 80, 24)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Waiting", plain)
+
+    def test_non_empty_sessions_shows_session_list(self):
+        sessions = [
+            {
+                "id": "sess001",
+                "session_name": "MyProject",
+                "model": "Opus 4",
+                "cwd": "/home/user",
+                "stale": False,
+            }
+        ]
+        buf = render_picker(sessions, 80, 24)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("MyProject", plain)
+
+    def test_returns_buffer_of_correct_length(self):
+        buf = render_picker([], 80, 24)
+        self.assertEqual(len(buf), 24)
+
+    def test_stale_session_shows_stale_label(self):
+        sessions = [
+            {
+                "id": "staleSess",
+                "session_name": "",
+                "model": "Haiku",
+                "cwd": "/tmp",
+                "stale": True,
+            }
+        ]
+        buf = render_picker(sessions, 80, 30)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("stale", plain)
+
+    def test_live_session_shows_live_label(self):
+        sessions = [
+            {
+                "id": "liveSess",
+                "session_name": "Active",
+                "model": "Sonnet",
+                "cwd": "/workspace",
+                "stale": False,
+            }
+        ]
+        buf = render_picker(sessions, 80, 30)
+        plain = M_ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("live", plain)
+
+
+# ---------------------------------------------------------------------------
+# TestSegAprClamp — seg_apr clamps >100%
+# ---------------------------------------------------------------------------
+class TestSegAprClamp(unittest.TestCase):
+
+    def test_clamp_over_100(self):
+        data = {"cost": {"total_duration_ms": 100, "total_api_duration_ms": 200}}
+        result = seg_apr(data)
+        self.assertIsNotNone(result)
+        text, vl = result
+        self.assertIn("100.0%", _ANSI_RE.sub("", text))
+
+    def test_visible_length_consistent(self):
+        data = {"cost": {"total_duration_ms": 100, "total_api_duration_ms": 200}}
+        text, vl = seg_apr(data)
+        self.assertEqual(vl, len(_ANSI_RE.sub("", text)))
+
+
+# ---------------------------------------------------------------------------
+# TestCollectWarningsCTFMin — CTF <1m fix (never shows <0m)
+# ---------------------------------------------------------------------------
+class TestCollectWarningsCTFMin(unittest.TestCase):
+
+    def test_ctf_shows_1m_minimum(self):
+        # xpm so large that eta_mins rounds to 0 — must clamp to 1
+        data = {"context_window": {"used_percentage": 99.99}}
+        warns = collect_warnings(data, None, 50.0)
+        self.assertTrue(any("CTF" in w for w in warns))
+        ctf = [w for w in warns if "CTF" in w][0]
+        self.assertIn("<1m", ctf)
+        self.assertNotIn("<0m", ctf)
+
+    def test_ctf_shows_actual_minutes_when_above_1(self):
+        # 100 - 70 = 30% remaining; xpm = 5 → eta = 6 min
+        data = {"context_window": {"used_percentage": 70}}
+        warns = collect_warnings(data, None, 5.0)
+        ctf = [w for w in warns if "CTF" in w]
+        self.assertTrue(ctf)
+        self.assertIn("<6m", ctf[0])
+
+
+# ---------------------------------------------------------------------------
+# TestSanitizeBidi — bidi control character stripping
+# ---------------------------------------------------------------------------
+class TestSanitizeBidi(unittest.TestCase):
+
+    def test_strips_bidi_override(self):
+        self.assertEqual(_sanitize("hello\u202eworld"), "helloworld")
+
+    def test_strips_bidi_isolate(self):
+        self.assertEqual(_sanitize("a\u2066b\u2069c"), "abc")
+
+    def test_strips_lrm_rlm(self):
+        self.assertEqual(_sanitize("a\u200eb\u200fc"), "abc")
+
+    def test_strips_lre_rle(self):
+        self.assertEqual(_sanitize("a\u202ab\u202bc"), "abc")
+
+    def test_preserves_regular_unicode(self):
+        self.assertEqual(_sanitize("café résumé"), "café résumé")
+
+
+# ---------------------------------------------------------------------------
+# TestFormatterEdgeCases — f_cost negative, f_tok boundary, f_dur negative
+# ---------------------------------------------------------------------------
+class TestFormatterEdgeCases(unittest.TestCase):
+
+    def test_f_cost_negative(self):
+        self.assertEqual(f_cost(-1.0), "--")
+
+    def test_f_tok_99999_is_one_decimal_k(self):
+        # 99999 < 100_000, so uses 1-decimal format: "100.0k"
+        self.assertEqual(f_tok(99999), "100.0k")
+
+    def test_f_tok_100k_boundary(self):
+        # 100000 >= 100_000, so uses 0-decimal format: "100k"
+        self.assertEqual(f_tok(100000), "100k")
+
+    def test_f_tok_very_large(self):
+        self.assertEqual(f_tok(1_000_000_000), "1000M")
+
+    def test_f_dur_negative(self):
+        self.assertEqual(f_dur(-1000), "--")
+
+    def test_f_dur_zero(self):
+        self.assertEqual(f_dur(0), "--")
+
+    def test_f_cost_very_small_positive(self):
+        result = f_cost(0.0001)
+        self.assertIn("$", result)
+        self.assertIn("0.0001", result)
+
+
+# ---------------------------------------------------------------------------
+# TestReservedFiles — _RESERVED_FILES contains expected sentinel names
+# ---------------------------------------------------------------------------
+class TestReservedFiles(unittest.TestCase):
+
+    def test_rls_in_reserved(self):
+        self.assertIn("rls", _RESERVED_FILES)
+
+    def test_stats_in_reserved(self):
+        self.assertIn("stats", _RESERVED_FILES)
+
+    def test_reserved_is_a_set(self):
+        self.assertIsInstance(_RESERVED_FILES, (set, frozenset))
 
 
 if __name__ == "__main__":
