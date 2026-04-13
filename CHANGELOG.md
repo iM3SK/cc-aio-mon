@@ -8,10 +8,32 @@
 **Bug fixes:**
 - Fixed `_fit_buf_height` clip direction — legend/picker/stats modals now clip content from bottom (preserving header) instead of from top (losing header on small terminals)
 - Removed competitor comparison table from legend overlay (belongs in README docs, not in the TUI)
-- Fixed BRN unit inconsistency — statusline now shows `$/min` (was `$/m`), consistent with dashboard
+- Fixed BRN unit inconsistency — `$/m` → `$/min` in statusline `seg_brn` and `collect_warnings` (consistent with dashboard)
+- Fixed `f_tok` accepting negative token counts — now returns `"--"` (consistent with `f_cost`/`f_dur`)
+- Fixed `render_frame` APR not clamped to 100% (statusline was clamped, dashboard was not)
+- Fixed `DATA_DIR.mkdir()` in monitor.py missing `mode=0o700` — default permissions were world-readable on shared Unix systems
+- Added symlink check on `DATA_DIR` in `list_sessions()` — rejects symlinked data directory (statusline.py already had this)
+- Fixed stray backslash in README session detection description
+- Fixed `_rls_fetching` race condition — now uses `threading.Lock` instead of bare boolean
+
+**Refactor:**
+- `VERSION_RE` regex deduplicated into `shared.py` — used by monitor.py and update.py (was defined 3 times)
+- Removed unused imports: `E` from statusline.py, `C_WHT` and `M_*` aliases from tests.py
+- Removed stale sync comments from statusline.py and monitor.py
+- Cleaned up `_ANSI_RE`/`M_ANSI_RE` dual import in tests.py — single name throughout
+- `update.py` `apply_update()` now captures and sanitizes git output via `_sanitize()` (was printing raw)
+
+**Docs:**
+- PROMO.md: updated LOC (1700 → 2400), test count (142 → 280), "zero dependencies" → "stdlib only"
+- README: added token stats + update manager screenshots, fixed stray backslash, updated macOS CI status
+- Added orphaned `cc-aio-mon-stats.png` and `cc-aio-mon-update.png` references to README
+
+**CI:**
+- Added macOS to test matrix (`macos-latest`, Python 3.12)
 
 **Tests:**
 - 278 → 280: added `test_dead_session_purged_after_48h`, `test_recent_session_not_purged`
+- Updated `TestRlsCheckWorker` and `TestRlsMaybeCheck` for `threading.Lock` refactor
 
 **Other:**
 - VERSION bumped to `1.8.1`

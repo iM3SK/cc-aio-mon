@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from shared import VERSION_RE, _sanitize
 
 
 # ---------- ANSI colors (Windows VT enable) ----------
@@ -118,7 +119,7 @@ def get_local_version():
     if not monitor.exists():
         raise RuntimeError("monitor.py not found")
     content = monitor.read_text(encoding="utf-8")
-    m = re.search(r'^VERSION\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
+    m = VERSION_RE.search(content)
     if not m:
         raise RuntimeError("VERSION constant not found in monitor.py")
     return m.group(1)
@@ -128,7 +129,7 @@ def get_remote_version():
     r = run_git(["show", "origin/main:monitor.py"])
     if r.returncode != 0:
         raise RuntimeError("Failed to read remote monitor.py")
-    m = re.search(r'^VERSION\s*=\s*["\']([^"\']+)["\']', r.stdout, re.MULTILINE)
+    m = VERSION_RE.search(r.stdout)
     if not m:
         raise RuntimeError("VERSION constant not found in remote monitor.py")
     return m.group(1)
@@ -165,10 +166,13 @@ def get_remote_changelog_entry(version):
 
 def apply_update():
     hdr("Applying update")
-    r = run_git(["pull", "--ff-only", "origin", "main"], capture=False)
+    r = run_git(["pull", "--ff-only", "origin", "main"])
     if r.returncode != 0:
-        err("git pull failed")
+        err(f"git pull failed: {_sanitize(r.stderr or r.stdout or 'unknown error')}")
         sys.exit(1)
+    if r.stdout.strip():
+        for line in r.stdout.strip().split("\n"):
+            note(_sanitize(line))
     ok("Pulled latest changes")
 
     try:

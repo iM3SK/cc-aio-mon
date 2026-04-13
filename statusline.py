@@ -22,7 +22,7 @@ import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME,
-                    E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
+                    R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -36,7 +36,6 @@ try:
 except (ValueError, TypeError):
     CRIT = 80
 
-# _SID_RE, _ANSI_RE, MAX_FILE_SIZE, ANSI colors — imported from shared.py
 
 
 _IS_WIN = platform.system() == "Windows"
