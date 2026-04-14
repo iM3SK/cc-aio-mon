@@ -47,7 +47,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin. No log scraping, no file watching, no API polling. Real data, real-time.
 - **Two-tier architecture** — `statusline.py` (single-line status bar, triggered per Claude Code event) + `monitor.py` (fullscreen TUI, polls temp files independently).
 - **Temp file IPC** — atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/`. No sockets, no databases, no shared memory. Works across terminal sessions.
-- **Progress bars with fixed ranges** — BRN (0-1.0 $/min), CTR (0-5.0 %/min), CST (0-$50) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL.
+- **Progress bars with fixed ranges** — BRN (0-2.0 $/min), CTR (0-5.0 %/min), CST (0-$200) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL.
 - **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
 - **Token usage stats** — press `t` for a per-model token breakdown (In/Out/Calls), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days.
@@ -84,9 +84,9 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **CTX** | Context window usage | 0-100% | statusline + dashboard |
 | **5HL** | 5-hour rate limit usage | 0-100% | statusline + dashboard |
 | **7DL** | 7-day rate limit usage | 0-100% | statusline + dashboard |
-| **BRN** | Cost burn rate | 0-1.0 $/min | statusline + dashboard |
+| **BRN** | Cost burn rate | 0-2.0 $/min | statusline + dashboard |
 | **CTR** | Context consumption rate | 0-5.0 %/min | dashboard |
-| **CST** | Session cost | 0-$50 | statusline + dashboard |
+| **CST** | Session cost | 0-$200 | statusline + dashboard |
 | **TDY** | Today's cost (all sessions) | — | dashboard |
 | **WEK** | Rolling 7-day cost (all sessions) | — | dashboard |
 | **LNS** | Lines added / removed | — | dashboard |
@@ -170,7 +170,7 @@ Exception: 5HL/7DL labels use yellow as base color (even below 50%) to visually 
 |----------|---------|-------|-------------|
 | `CLAUDE_STATUS_WARN` | `50` | statusline | Yellow threshold (%) |
 | `CLAUDE_STATUS_CRIT` | `80` | statusline | Red threshold (%) |
-| `CLAUDE_WARN_BRN` | `0.50` | dashboard | Burn rate warning threshold ($/min) |
+| `CLAUDE_WARN_BRN` | `1.00` | dashboard | Burn rate warning threshold ($/min) |
 | `CC_AIO_MON_NO_UPDATE_CHECK` | *(unset)* | dashboard | Set to `1` to disable background release check |
 
 ```bash
@@ -214,6 +214,10 @@ export CLAUDE_STATUS_CRIT=90
 - **Claude Code CLI** with statusline support
 - **Truecolor terminal** — Windows Terminal, iTerm2, Alacritty, Kitty, or any terminal supporting ANSI 24-bit color
 - **80 columns** minimum recommended
+
+## Known Limitations
+
+- **Delayed refresh after context compaction** — when Claude Code compacts the context window, the dashboard continues showing the pre-compaction CTX value until Claude Code emits the next statusline event (typically the next assistant message). This is a Claude Code protocol limitation — `statusline.py` is only invoked on assistant messages, permission mode changes, or vim mode toggles. There is no external API to trigger a refresh on demand.
 
 ## Troubleshooting
 

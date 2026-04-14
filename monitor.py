@@ -290,14 +290,14 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
 try:
-    WARN_BRN = float(os.environ.get("CLAUDE_WARN_BRN", "0.50"))
+    WARN_BRN = float(os.environ.get("CLAUDE_WARN_BRN", "1.00"))
 except (ValueError, TypeError):
-    WARN_BRN = 0.50
+    WARN_BRN = 1.00
 
 
 def vlen(s):
@@ -412,9 +412,9 @@ def _reset_color(resets_epoch, window_secs):
 # ---------------------------------------------------------------------------
 # Fixed-range bar for rate/cost metrics
 # ---------------------------------------------------------------------------
-BRN_MAX = 1.0    # $/min ceiling
+BRN_MAX = 2.0    # $/min ceiling
 CTR_MAX = 5.0    # %/min ceiling
-CST_MAX = 50.0   # $ ceiling
+CST_MAX = 200.0  # $ ceiling
 
 
 # ---------------------------------------------------------------------------
