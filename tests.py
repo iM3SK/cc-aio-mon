@@ -41,6 +41,8 @@ from monitor import (
     render_update_modal,
     _RESERVED_FILES, list_sessions, load_state, load_history, DATA_DIR,
     render_picker,
+    cached_cross_session_costs, _write_shared_stats, _cost_cache,
+    flush, SYNC_ON, SYNC_OFF,
 )
 from shared import (
     MAX_FILE_SIZE, _ANSI_RE, _sanitize,
@@ -635,11 +637,23 @@ class TestFixedRangeConstants(unittest.TestCase):
     def test_brn_max_positive(self):
         self.assertGreater(BRN_MAX, 0)
 
+    def test_brn_max_value(self):
+        self.assertEqual(BRN_MAX, 2.0)
+
     def test_ctr_max_positive(self):
         self.assertGreater(CTR_MAX, 0)
 
+    def test_ctr_max_value(self):
+        self.assertEqual(CTR_MAX, 5.0)
+
     def test_cst_max_positive(self):
         self.assertGreater(CST_MAX, 0)
+
+    def test_cst_max_value(self):
+        self.assertEqual(CST_MAX, 200.0)
+
+    def test_warn_brn_default(self):
+        self.assertEqual(WARN_BRN, 1.00)
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +863,61 @@ class TestTrimHistory(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _load_history_for_rates
+# ---------------------------------------------------------------------------
+class TestLoadHistoryForRates(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib
+        from statusline import _DATA_DIR
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_dir = _DATA_DIR
+        import statusline
+        statusline._DATA_DIR = pathlib.Path(self.tmpdir)
+
+    def tearDown(self):
+        import shutil, statusline
+        statusline._DATA_DIR = self._orig_dir
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_missing_file_returns_empty(self):
+        from statusline import _load_history_for_rates
+        self.assertEqual(_load_history_for_rates("nonexistent"), [])
+
+    def test_valid_jsonl_returns_entries(self):
+        import json, pathlib
+        from statusline import _load_history_for_rates, _DATA_DIR
+        p = pathlib.Path(_DATA_DIR) / "sess1.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps({"i": i, "t": 1000 + i}) for i in range(5)]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = _load_history_for_rates("sess1", n=120)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result[0]["i"], 0)
+
+    def test_tail_n_limits_entries(self):
+        import json, pathlib
+        from statusline import _load_history_for_rates, _DATA_DIR
+        p = pathlib.Path(_DATA_DIR) / "sess2.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps({"i": i}) for i in range(20)]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = _load_history_for_rates("sess2", n=5)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result[0]["i"], 15)  # last 5 entries
+
+    def test_corrupt_lines_skipped(self):
+        import json, pathlib
+        from statusline import _load_history_for_rates, _DATA_DIR
+        p = pathlib.Path(_DATA_DIR) / "sess3.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        content = 'not json\n{"i": 1}\n{bad\n{"i": 2}\n'
+        p.write_text(content, encoding="utf-8")
+        result = _load_history_for_rates("sess3")
+        self.assertEqual(len(result), 2)
+
+
+# ---------------------------------------------------------------------------
 # calc_cross_session_costs
 # ---------------------------------------------------------------------------
 class TestCalcCrossSessionCosts(unittest.TestCase):
@@ -892,6 +961,90 @@ class TestCalcCrossSessionCosts(unittest.TestCase):
         jl.write_text('{"t": 1, "cost": {"total_cost_usd": 999}}\n', encoding="utf-8")
         today, week = calc_cross_session_costs()
         self.assertEqual(today, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# cached_cross_session_costs
+# ---------------------------------------------------------------------------
+class TestCachedCrossSessionCosts(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib, monitor
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = monitor.DATA_DIR
+        self._orig_cache = _cost_cache.copy()
+        monitor.DATA_DIR = pathlib.Path(self.tmpdir)
+        _cost_cache.update({"t": 0, "today": 0.0, "week": 0.0})
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        _cost_cache.update(self._orig_cache)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_ttl_returns_cached(self):
+        import time
+        _cost_cache.update({"t": time.monotonic(), "today": 42.0, "week": 99.0})
+        today, week = cached_cross_session_costs(ttl=60)
+        self.assertEqual(today, 42.0)
+        self.assertEqual(week, 99.0)
+
+    def test_ttl_expired_refreshes(self):
+        _cost_cache.update({"t": 0, "today": 42.0, "week": 99.0})
+        today, week = cached_cross_session_costs(ttl=0)
+        # Empty dir → 0.0
+        self.assertEqual(today, 0.0)
+        self.assertEqual(week, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# _write_shared_stats
+# ---------------------------------------------------------------------------
+class TestWriteSharedStats(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib, monitor
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_data = monitor.DATA_DIR
+        self._orig_claude = monitor._CLAUDE_DIR
+        self._orig_cache = monitor._usage_cache.copy()
+        monitor.DATA_DIR = pathlib.Path(self.tmpdir)
+        monitor._CLAUDE_DIR = pathlib.Path(self.tmpdir) / "claude"
+        monitor._usage_cache.clear()
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig_data
+        monitor._CLAUDE_DIR = self._orig_claude
+        monitor._usage_cache.clear()
+        monitor._usage_cache.update(self._orig_cache)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_writes_stats_json(self):
+        import json, pathlib, monitor
+        # Create a transcript with data
+        claude_dir = monitor._CLAUDE_DIR
+        proj = claude_dir / "proj1"
+        proj.mkdir(parents=True)
+        lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 100, "output_tokens": 200}},
+        })]
+        (proj / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _write_shared_stats()
+        stats_file = pathlib.Path(self.tmpdir) / "stats.json"
+        self.assertTrue(stats_file.exists())
+        data = json.loads(stats_file.read_text(encoding="utf-8"))
+        self.assertIn("models", data)
+        self.assertIn("Opus 4.6", data["models"])
+        self.assertEqual(data["models"]["Opus 4.6"], 100.0)
+
+    def test_empty_dir_no_file(self):
+        import pathlib
+        _write_shared_stats()
+        stats_file = pathlib.Path(self.tmpdir) / "stats.json"
+        self.assertFalse(stats_file.exists())
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1148,15 @@ class TestModelLabel(unittest.TestCase):
 
     def test_known_haiku(self):
         self.assertEqual(_model_label("claude-haiku-4-5-20251001"), "Haiku 4.5")
+
+    def test_short_haiku(self):
+        self.assertEqual(_model_label("haiku"), "Haiku")
+
+    def test_short_sonnet(self):
+        self.assertEqual(_model_label("sonnet"), "Sonnet")
+
+    def test_short_opus(self):
+        self.assertEqual(_model_label("opus"), "Opus")
 
     def test_unknown_passthrough(self):
         self.assertEqual(_model_label("claude-future-99"), "claude-future-99")
@@ -1148,6 +1310,74 @@ class TestScanTranscriptStats(unittest.TestCase):
         _, ov = scan_transcript_stats("all", ttl=0)
         # 1 hour = 3600000 ms
         self.assertAlmostEqual(ov["longest_dur_ms"], 3600000, delta=1000)
+
+    def test_period_7d_filters_old_entries(self):
+        import json, time
+        from datetime import datetime
+        now = time.time()
+        old_ts = "2025-01-01T10:00:00Z"  # well outside 7d window
+        new_ts = datetime.fromtimestamp(now - 3600).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines = [
+            json.dumps({
+                "type": "assistant", "timestamp": old_ts,
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 100, "output_tokens": 200}},
+            }),
+            json.dumps({
+                "type": "assistant", "timestamp": new_ts,
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 50, "output_tokens": 80}},
+            }),
+        ]
+        self._write_session("proj1", "sess1", lines)
+        models_all, _ = scan_transcript_stats("all", ttl=0)
+        models_7d, _ = scan_transcript_stats("7d", ttl=0)
+        self.assertEqual(models_all["claude-opus-4-6"]["input"], 150)
+        self.assertEqual(models_7d["claude-opus-4-6"]["input"], 50)
+
+    def test_period_30d_filters_old_entries(self):
+        import json, time
+        from datetime import datetime
+        now = time.time()
+        old_ts = "2025-01-01T10:00:00Z"  # well outside 30d window
+        new_ts = datetime.fromtimestamp(now - 3600).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines = [
+            json.dumps({
+                "type": "assistant", "timestamp": old_ts,
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 100, "output_tokens": 200}},
+            }),
+            json.dumps({
+                "type": "assistant", "timestamp": new_ts,
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 50, "output_tokens": 80}},
+            }),
+        ]
+        self._write_session("proj1", "sess1", lines)
+        models_all, _ = scan_transcript_stats("all", ttl=0)
+        models_30d, _ = scan_transcript_stats("30d", ttl=0)
+        self.assertEqual(models_all["claude-opus-4-6"]["input"], 150)
+        self.assertEqual(models_30d["claude-opus-4-6"]["input"], 50)
+
+    def test_synthetic_model_filtered(self):
+        import json
+        lines = [
+            json.dumps({
+                "type": "assistant", "timestamp": "2026-04-12T10:00:00Z",
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 100, "output_tokens": 200}},
+            }),
+            json.dumps({
+                "type": "assistant", "timestamp": "2026-04-12T10:01:00Z",
+                "message": {"model": "<synthetic>",
+                            "usage": {"input_tokens": 0, "output_tokens": 0}},
+            }),
+        ]
+        self._write_session("proj1", "sess1", lines)
+        models, _ = scan_transcript_stats("all", ttl=0)
+        self.assertNotIn("<synthetic>", models)
+        self.assertEqual(len(models), 1)
+        self.assertEqual(models["claude-opus-4-6"]["calls"], 1)
 
     def test_multiple_models(self):
         import json
@@ -2097,6 +2327,34 @@ class TestRenderUpdateModal(unittest.TestCase):
         plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn(remote_ver, plain)
 
+    def test_checking_state(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": None, "remote_ver": None})
+        buf = render_update_modal(80, 24)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Checking", plain)
+
+    def test_no_git_state(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "no_git", "remote_ver": None})
+        buf = render_update_modal(80, 24)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Git is not installed", plain)
+
+    def test_timeout_state(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "timeout", "remote_ver": None})
+        buf = render_update_modal(80, 24)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("timeout", plain.lower())
+
+    def test_unknown_error_state(self):
+        import monitor
+        monitor._rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+        buf = render_update_modal(80, 24)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("Unknown error", plain)
+
 
 import pathlib
 import json
@@ -2471,6 +2729,103 @@ class TestReservedFiles(unittest.TestCase):
 
     def test_reserved_is_a_set(self):
         self.assertIsInstance(_RESERVED_FILES, (set, frozenset))
+
+
+# ---------------------------------------------------------------------------
+# TestUpdateFlowFunctions — update.py check_repo, check_branch, fetch_remote, etc.
+# ---------------------------------------------------------------------------
+class TestUpdateFlowFunctions(unittest.TestCase):
+
+    def _mock_result(self, returncode=0, stdout="", stderr=""):
+        r = MagicMock()
+        r.returncode = returncode
+        r.stdout = stdout
+        r.stderr = stderr
+        return r
+
+    def test_check_repo_success(self):
+        from update import check_repo
+        with patch("update.run_git", return_value=self._mock_result(0, "true\n")):
+            check_repo()  # should not raise
+
+    def test_check_repo_failure(self):
+        from update import check_repo
+        with patch("update.run_git", return_value=self._mock_result(1, "")):
+            with self.assertRaises(SystemExit):
+                check_repo()
+
+    def test_check_branch_main(self):
+        from update import check_branch
+        with patch("update.run_git", return_value=self._mock_result(0, "main\n")):
+            check_branch()  # should not raise
+
+    def test_check_branch_not_main(self):
+        from update import check_branch
+        with patch("update.run_git", return_value=self._mock_result(0, "feature\n")):
+            with self.assertRaises(SystemExit):
+                check_branch()
+
+    def test_check_branch_detached(self):
+        from update import check_branch
+        with patch("update.run_git", return_value=self._mock_result(0, "HEAD\n")):
+            with self.assertRaises(SystemExit):
+                check_branch()
+
+    def test_fetch_remote_success(self):
+        from update import fetch_remote
+        with patch("update.run_git", return_value=self._mock_result(0, "")):
+            fetch_remote()  # should not raise
+
+    def test_fetch_remote_failure(self):
+        from update import fetch_remote
+        with patch("update.run_git", return_value=self._mock_result(1, "", "error")):
+            with self.assertRaises(SystemExit):
+                fetch_remote()
+
+    def test_get_new_commits(self):
+        from update import get_new_commits
+        with patch("update.run_git", return_value=self._mock_result(0, "abc feat\ndef fix\n")):
+            commits = get_new_commits()
+        self.assertEqual(len(commits), 2)
+
+    def test_get_new_commits_failure(self):
+        from update import get_new_commits
+        with patch("update.run_git", return_value=self._mock_result(1, "")):
+            commits = get_new_commits()
+        self.assertEqual(commits, [])
+
+
+# ---------------------------------------------------------------------------
+# TestFlush — screen flush output contains ANSI sync markers
+# ---------------------------------------------------------------------------
+class TestFlush(unittest.TestCase):
+
+    def test_contains_sync_markers(self):
+        from io import StringIO
+        buf = ["line1", "line2"]
+        with patch("sys.stdout", new_callable=StringIO) as mock_out:
+            flush(buf, cols=80)
+            output = mock_out.getvalue()
+        self.assertIn(SYNC_ON, output)
+        self.assertIn(SYNC_OFF, output)
+
+    def test_correct_line_count(self):
+        from io import StringIO
+        buf = ["a", "b", "c"]
+        with patch("sys.stdout", new_callable=StringIO) as mock_out:
+            flush(buf, cols=80)
+            output = mock_out.getvalue()
+        # Should have exactly len(buf)-1 newlines between lines
+        newline_count = output.count("\n")
+        self.assertEqual(newline_count, len(buf) - 1)
+
+    def test_empty_buf(self):
+        from io import StringIO
+        with patch("sys.stdout", new_callable=StringIO) as mock_out:
+            flush([], cols=80)
+            output = mock_out.getvalue()
+        self.assertIn(SYNC_ON, output)
+        self.assertIn(SYNC_OFF, output)
 
 
 if __name__ == "__main__":
