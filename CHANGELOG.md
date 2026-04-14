@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.8.2 — 2026-04-14
+
+**Bug fixes:**
+- Fixed BRN and CST progress bar ceilings undersized for Opus 4.6 1M (Max 20 plan) — `BRN_MAX` raised from 1.0 to **2.0** $/min, `CST_MAX` raised from 50.0 to **200.0** $. Previous ceilings caused both bars to pin at 100% during normal usage on higher-tier models.
+- Fixed `WARN_BRN` default too low for higher-tier models — raised from 0.50 to **1.00** $/min. Previous threshold triggered BRN smart warning constantly on Opus 4.6 1M.
+
+**Docs:**
+- README: updated BRN range (0-2.0 $/min), CST range (0-$200), `CLAUDE_WARN_BRN` default (1.00) in Features, Metrics table, and Configuration table
+- README: added Known Limitations section — documents delayed metric refresh after context compaction (Claude Code protocol limitation)
+
+**Other:**
+- VERSION bumped to `1.8.2`
+
 ## v1.8.1 — 2026-04-13
 
 **Features:**
