@@ -141,6 +141,8 @@ def scan_transcript_stats(period="all", ttl=30.0):
                         continue
 
                     model = msg.get("model", "unknown")
+                    if model.startswith("<") or not model:
+                        continue  # skip synthetic/internal entries
                     u = msg["usage"]
                     inp = int(_num(u.get("input_tokens", 0)))
                     out = int(_num(u.get("output_tokens", 0)))
@@ -290,7 +292,7 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
@@ -1243,6 +1245,9 @@ _MODEL_NAMES = {
     "claude-opus-4-6": "Opus 4.6",
     "claude-sonnet-4-6": "Sonnet 4.6",
     "claude-haiku-4-5-20251001": "Haiku 4.5",
+    "haiku": "Haiku",
+    "sonnet": "Sonnet",
+    "opus": "Opus",
 }
 
 

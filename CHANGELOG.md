@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.3 — 2026-04-14
+
+**Bug fixes:**
+- Fixed `<synthetic>` internal model appearing in Token Stats — these are Claude Code internal entries with 0 tokens that inflated the Calls count
+- Added short model ID mappings (`"haiku"`, `"sonnet"`, `"opus"`) to `_MODEL_NAMES` — some transcript entries use abbreviated IDs instead of full `claude-*` identifiers
+
+**Other:**
+- VERSION bumped to `1.8.3`
+
 ## v1.8.2 — 2026-04-14
 
 **Bug fixes:**
