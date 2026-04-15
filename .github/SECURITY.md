@@ -14,7 +14,7 @@ Report privately via GitHub's [Security Advisories](../../security/advisories/ne
 - Steps to reproduce
 - Potential impact
 
-You will receive a response within 7 days. If confirmed, a fix will be released as soon as possible.
+You will receive a response within 72 hours. If confirmed, a fix will be released as soon as possible.
 
 ## Scope
 
@@ -39,6 +39,7 @@ Key protections:
 - Session ID validated against `[a-zA-Z0-9_-]{1,128}` — prevents path traversal
 - All JSON fields sanitized before terminal output — prevents escape injection
 - Atomic writes via `NamedTemporaryFile` + `os.replace()` — prevents partial reads
-- File size limits on all reads — prevents memory exhaustion
+- File size limits on all reads (1 MB JSON, 2 MB JSONL, 10 MB cross-session) — prevents memory exhaustion
+- Symlink and NTFS junction rejection on temp data directory — `lstat()` + `S_ISDIR` verification with `FILE_ATTRIBUTE_REPARSE_POINT` check on Windows. Defends against TOCTOU races between mkdir and validation.
 - Temp directory created with `0o700` permissions where supported
 - `update.py` guards: dirty tree, wrong branch, detached HEAD, divergence, downgrade, Python version mismatch

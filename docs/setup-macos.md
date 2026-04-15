@@ -1,6 +1,6 @@
 # Setup — macOS
 
-> macOS is not included in CI. Tested manually on macOS 13+ with Python 3.12. Report issues if something breaks.
+> macOS is tested in CI (`macos-latest`, Python 3.12). Report issues if something breaks.
 
 > **Python command:** This guide uses `python3`. If your system only has `python` (no `python3`), replace every `python3` in the commands below with `python`. Run `check-requirements.sh` to see which command is detected on your machine.
 
