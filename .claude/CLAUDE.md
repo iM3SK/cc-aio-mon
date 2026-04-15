@@ -39,10 +39,6 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
 }
 ```
 
-## Roadmap
-
-See `docs/ROADMAP.md` for planned features (multi-session view, sparklines, rate limit forecast, activity heatmap, efficiency score). Cost breakdown is already implemented (`c` key).
-
 ## Rules
 
 - Stdlib only — no pip packages, no external dependencies
