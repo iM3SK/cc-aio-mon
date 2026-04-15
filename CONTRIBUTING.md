@@ -24,7 +24,7 @@
 
 ## What to keep in sync
 
-- `shared.py` is the single source of truth for shared constants (`_SID_RE`, `_ANSI_RE`, `MAX_FILE_SIZE`, `DATA_DIR_NAME`), ANSI colors (`C_RED`, `C_GRN`, etc.), helpers (`_num`, `_sanitize`, `f_tok`, `f_cost`, `f_dur`), and `calc_rates`. Both `statusline.py` and `monitor.py` import from it.
+- `shared.py` is the single source of truth for shared constants (`_SID_RE`, `_ANSI_RE`, `MAX_FILE_SIZE`, `DATA_DIR_NAME`), ANSI colors (`C_RED`, `C_GRN`, etc.), helpers (`_num`, `_sanitize`, `f_tok`, `f_cost`, `f_dur`, `char_width`, `is_safe_dir`, `ensure_data_dir`), and `calc_rates`. Both `statusline.py` and `monitor.py` import from it.
 
 ## Pull requests
 

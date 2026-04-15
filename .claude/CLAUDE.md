@@ -14,7 +14,7 @@ Claude Code → stdin JSON → statusline.py → $TMPDIR/claude-aio-monitor/ →
 
 - **statusline.py** — reads Claude Code statusLine JSON from stdin, renders single-line ANSI status bar (Model │ CTX │ 5HL │ 7DL │ CST │ BRN │ APR │ CHR), writes atomic snapshots + JSONL history to temp dir
 - **monitor.py** — fullscreen TUI dashboard, polls temp files every 500ms, renders live metrics, keyboard shortcuts, usage stats modal (reads `~/.claude/projects/` transcripts), background RLS release check (daemon thread, git fetch, 1h TTL)
-- **shared.py** — shared helpers (`_num`, `_sanitize`, `f_dur`, `f_tok`, `f_cost`, `calc_rates`), ANSI color constants, and regexes (`_SID_RE`, `_ANSI_RE`) used by statusline.py and monitor.py (`f_dur` only in monitor.py)
+- **shared.py** — shared helpers (`_num`, `_sanitize`, `f_dur`, `f_tok`, `f_cost`, `calc_rates`, `char_width`, `is_safe_dir`, `ensure_data_dir`), ANSI color constants, and regexes (`_SID_RE`, `_ANSI_RE`) used by statusline.py and monitor.py
 - **update.py** — self-update checker with git pull --ff-only safety guards
 - **tests.py** — unit tests, stdlib unittest
 
@@ -45,7 +45,7 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
 - All file I/O confined to temp directory ($TMPDIR/claude-aio-monitor/) and ~/.claude/projects/ (read-only, for usage stats)
 - Session IDs validated with regex: `^[a-zA-Z0-9_\-]{1,128}$`
 - Atomic writes via NamedTemporaryFile + os.replace()
-- File size limits: JSON 1MB, JSONL 10MB read / 1MB trim
+- File size limits: JSON 1MB, JSONL 2MB read / 1MB trim (cross-session cost aggregation: 10MB)
 - Cross-platform: Windows (py, ctypes, msvcrt) + Unix (python3, termios, select)
 - ANSI 24-bit color — Windows Terminal required on Windows
 - Python 3.8+ compatibility

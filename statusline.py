@@ -11,6 +11,7 @@ Config env vars:
     CLAUDE_STATUS_CRIT  — red threshold % (default 80)
 """
 
+import codecs
 import json
 import os
 import pathlib
@@ -21,6 +22,7 @@ import tempfile
 import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost,
+                    is_safe_dir, ensure_data_dir,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME,
                     R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
@@ -82,14 +84,15 @@ def _get_terminal_width(fallback: int = 80) -> int:
                 None,
             )
             if h not in (-1, 0):
-                csbi = ctypes.create_string_buffer(22)
-                if kernel32.GetConsoleScreenBufferInfo(h, csbi):
-                    _, _, _, _, _, left, _, right, _, _, _ = struct.unpack("hhhhHhhhhhh", csbi.raw)
-                    w = right - left + 1
+                try:
+                    csbi = ctypes.create_string_buffer(22)
+                    if kernel32.GetConsoleScreenBufferInfo(h, csbi):
+                        _, _, _, _, _, left, _, right, _, _, _ = struct.unpack("hhhhHhhhhhh", csbi.raw)
+                        w = right - left + 1
+                        if w > 0:
+                            return w
+                finally:
                     kernel32.CloseHandle(h)
-                    if w > 0:
-                        return w
-                kernel32.CloseHandle(h)
         except Exception:
             pass
     else:
@@ -256,7 +259,11 @@ def build_line(data, cols, brn=None):
 # ---------------------------------------------------------------------------
 def main():
     # Force UTF-8 on Windows (cp1250/cp1252 can't handle unicode box-drawing)
-    if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
+    try:
+        is_utf8 = sys.stdout.encoding and codecs.lookup(sys.stdout.encoding).name == "utf-8"
+    except LookupError:
+        is_utf8 = False
+    if not is_utf8:
         sys.stdout.flush()
         sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", errors="replace", closefd=False)
 
@@ -268,7 +275,7 @@ def main():
     except (json.JSONDecodeError, ValueError):
         return
 
-    sid = data.get("session_id", "default")
+    sid = data.get("session_id") or "default"
     if not _SID_RE.match(str(sid)):
         sid = "default"
 
@@ -295,11 +302,13 @@ _DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 
 def _load_history_for_rates(sid, n=120):
     """Read last n history entries for BRN/CTR rate computation. Call BEFORE write_shared_state."""
+    if not is_safe_dir(_DATA_DIR):
+        return []
     try:
         p = _DATA_DIR / f"{sid}.jsonl"
         with open(p, "rb") as fh:
-            raw = fh.read(MAX_FILE_SIZE * 10 + 1)
-        if len(raw) > MAX_FILE_SIZE * 10:
+            raw = fh.read(MAX_FILE_SIZE * 2 + 1)
+        if len(raw) > MAX_FILE_SIZE * 2:
             return []
         out = []
         for ln in raw.decode("utf-8").splitlines()[-n:]:
@@ -313,24 +322,11 @@ def _load_history_for_rates(sid, n=120):
 
 
 def write_shared_state(data: dict):
-    sid = str(data.get("session_id", "default"))
+    sid = str(data.get("session_id") or "default")
     if not _SID_RE.match(sid):
         sid = "default"
-    try:
-        _DATA_DIR.mkdir(mode=0o700, exist_ok=True)
-    except OSError:
-        _DATA_DIR.mkdir(exist_ok=True)
-    # Verify permissions on Unix (mkdir mode ignored on Windows)
-    if sys.platform != "win32":
-        try:
-            import stat
-            if _DATA_DIR.is_symlink():
-                return  # reject symlinked data directory
-            st = _DATA_DIR.stat()
-            if stat.S_IMODE(st.st_mode) & 0o077:
-                os.chmod(_DATA_DIR, 0o700)
-        except OSError:
-            pass
+    if not ensure_data_dir(_DATA_DIR):
+        return
     base = _DATA_DIR
 
     # Serialize once — same rules for snapshot and history (avoid TypeError mid-write)
@@ -343,6 +339,7 @@ def write_shared_state(data: dict):
     # Atomic write of current state via unpredictable temp file
     target = base / f"{sid}.json"
     snapshot_ok = False
+    fd = None
     try:
         fd = tempfile.NamedTemporaryFile(
             dir=base, suffix=".tmp", delete=False, mode="w", encoding="utf-8"
@@ -352,7 +349,15 @@ def write_shared_state(data: dict):
         pathlib.Path(fd.name).replace(target)
         snapshot_ok = True
     except OSError:
-        pass
+        if fd is not None:
+            try:
+                fd.close()
+            except OSError:
+                pass
+            try:
+                os.unlink(fd.name)
+            except OSError:
+                pass
 
     # History must stay aligned with the latest snapshot (avoid BRN/CTR vs stale JSON)
     if not snapshot_ok:
@@ -371,6 +376,7 @@ def write_shared_state(data: dict):
 
 
 def _trim_history(path: pathlib.Path):
+    fd = None
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
         if len(lines) > HISTORY_TRIM_TO:
@@ -383,7 +389,15 @@ def _trim_history(path: pathlib.Path):
             fd.close()
             pathlib.Path(fd.name).replace(path)
     except OSError:
-        pass
+        if fd is not None:
+            try:
+                fd.close()
+            except OSError:
+                pass
+            try:
+                os.unlink(fd.name)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

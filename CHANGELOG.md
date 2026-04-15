@@ -1,5 +1,71 @@
 # Changelog
 
+## v1.8.4 — 2026-04-15
+
+**UI:**
+- Redesigned all modals to unified design language — `BG_BAR` header bands on all section headers, `[key]` bracket pattern for hotkeys, single-space separators, consistent footer. Applied across: legend, menu, cost breakdown, token stats, update manager, session picker.
+- Legend: `KEYS` → `HOTKEYS` with `[key]` bracket format. All sub-sections (HOTKEYS, TOKEN STATS, COST BREAKDOWN, UPDATE) now have `BG_BAR` header bands. Added RST (Reset Countdown) and RTE (Rate Value) sub-codes. Complete set: 32 metric codes + 9 hotkeys.
+- Menu: `[key]` bracket format matching legend. Removed `[1-9] Select Session` (picker-only). Sub-sections VIEWS and SYSTEM have `BG_BAR` headers.
+- Session picker: compact display — UUID truncated to 8 chars, model as short code (OP 4.6), live/stale tag. Active sessions sorted first, max 9 shown (+N more). `force_picker` flag prevents auto-connect bypass when pressing `[s]`.
+- Cost breakdown: `BURN RATE OVER TIME` section — 3 equal time slices (ERL/MID/LAT) with `mkbar` bars scaled to `BRN_MAX`. All sub-sections (TOKEN COSTS, SESSION TOTALS, BURN RATE) have `BG_BAR` header bands. Removed padding/right-alignment from token values. Model context suffix stripped (`Opus 4.6 (1M context)` → `Opus 4.6 1M`). Fixed O(n×buckets) → O(n + log n) via bisect.
+- Token stats: model labels as 3-char codes (OP 4.6, HA 4.5, SO 4.6). `MODELS` section has `BG_BAR` header, models separated by `sep()`. Sub-values: `In:`→`INP:`, `Out:`→`OUT:`, `Calls:`→`CLS:`. `Total` → `ALL`.
+- Update modal: `CUR`/`REM` 3-letter codes. `[a] apply` shown in all states (disabled with reason when no update). Section headers UPPERCASE with `BG_BAR` bands.
+- All sub-value labels uppercase 3-char: `DUR:`, `API:`, `CRD:`, `CWR:`, `INP:`, `OUT:`, `RST:`, `RTE:`, `CST:`, `TDY:`, `WEK:`, `NOW:`, `UPD:`, `LNS:`, `CLS:`, `TIN:`, `TOT:`, `CPM:`.
+- Unified color scheme — labels always C_DIM, values in parent metric color. Fixed 21 mismatches.
+- Unified spacing — single space between all values, no padding/right-alignment, no dash separators.
+- `mkbar` percentage format: `5.1f` → `.1f` (no leading space), `%` without space.
+- Session auto-connect: only when exactly 1 total session (not 1 active + stale). `force_picker` flag ensures picker shows after `[s]`.
+
+**Bug fixes:**
+- Fixed release check never triggering on freshly booted systems — `_rls_cache["t"]` initialized to `0.0` caused TTL check to pass when `time.monotonic()` (system uptime) was under 1 hour. Now initialized to `-_RLS_TTL` to guarantee immediate first check.
+- Fixed `_model_label()` not stripping `[1m]` context suffix — model IDs like `claude-opus-4-6[1m]` displayed as raw strings instead of "Opus 4.6". Now strips `[...]` suffix consistently with `_get_pricing()`.
+- Fixed `session_id: null` in JSON creating file `None.json` — `data.get("session_id", "default")` returned `None` for explicit null. Changed to `data.get("session_id") or "default"` in both statusline locations.
+- Fixed double `CloseHandle` on Windows in `_get_terminal_width()` — when `GetConsoleScreenBufferInfo` succeeded but width was ≤0, handle was closed twice (undefined behavior). Restructured to single `CloseHandle` in `finally` block.
+- Fixed `_apply_update_action()` blocking main thread for up to 30+ seconds — git pull + syntax check now runs in background daemon thread. UI remains responsive during update.
+- Fixed SIGTERM handler calling `cleanup()` twice — explicit call + `atexit` handler. Now SIGTERM just calls `sys.exit(0)`, letting `atexit` handle cleanup once.
+- Fixed potential lock deadlock if `Thread.start()` fails in `_rls_maybe_check()` — lock is now released in except block if thread spawn fails.
+- Fixed floating-point drift in data reload interval — `since_data += tick` accumulated float error over long sessions. Now uses `time.monotonic()` difference for accurate interval tracking.
+- Fixed rate limit bars showing 0% indefinitely after session ends — expired `resets_at` timestamps now show `(expired)` indicator.
+
+- Fixed `stale` parameter shadowed by local variable in `render_frame()` rate limit section — renamed to `expired_tag` to prevent future bugs if code is reordered.
+- Fixed `truncate()` and `vlen()` miscounting CJK fullwidth characters — East Asian Wide/Fullwidth characters (CJK, fullwidth punctuation) are now counted as 2 columns via `unicodedata.east_asian_width()`. Prevents terminal overflow on lines with CJK text.
+- Fixed `codecs.lookup()` crashing on exotic/unrecognized encoding names — unhandled `LookupError` could crash all three scripts on systems with non-standard `sys.stdout.encoding`. Now caught with fallback to UTF-8 re-wrapping.
+
+**Security:**
+- Centralized data directory validation into `is_safe_dir()` and `ensure_data_dir()` in `shared.py` — replaces scattered `is_symlink()` calls with `lstat()` + `S_ISDIR` verification. Defends against symlinks, NTFS junctions (`FILE_ATTRIBUTE_REPARSE_POINT`), and TOCTOU races between `mkdir` and symlink checks. Applied across all file I/O paths in `monitor.py` (6 locations) and `statusline.py` (2 locations).
+- Model names from transcript data now sanitized via `_sanitize()` before terminal output in `render_stats()` — prevents ANSI escape injection from crafted transcript files.
+- `_ANSI_RE` regex expanded to match CSI sequences with `?` parameter bytes and OSC sequences — prevents escape leakage from malformed input.
+- `_update_result` global is now thread-safe — read/write access wrapped with `threading.Lock` via `_get_update_result()` / `_set_update_result()`. Previously relied on CPython GIL atomicity for correctness.
+- `.github/SECURITY.md` response SLA updated from 7 days to 72 hours.
+
+**Refactor:**
+- New shared helpers in `shared.py`: `char_width()` (CJK-aware character width), `is_safe_dir()` (lstat-based directory validation), `ensure_data_dir()` (mkdir + validate + chmod in one call). Replaces inline mkdir/symlink/chmod logic duplicated across `statusline.py` and `monitor.py`.
+- Removed dead `_rls_fetching` variable — was set in 5 places but never read.
+- Removed unreachable `k == "q"` check inside menu modal handler — already caught by global quit handler.
+- Encoding check uses `codecs.lookup()` for robust codec comparison — previous `.replace("-", "")` approach missed Python's `utf_8` normalized form. Applied across `monitor.py`, `statusline.py`, `update.py`. Guarded with `try/except LookupError`.
+- `NamedTemporaryFile` writes now clean up on failure across all locations — `fd.close()` + `os.unlink()` in except blocks prevent orphan temp files on disk-full errors. Applied to `statusline.py` (`write_shared_state`, `_trim_history`) and `monitor.py` (`_rls_check_worker`, `_write_shared_stats`).
+- History JSONL read limit reduced from `MAX_FILE_SIZE * 10` (10 MB) to `MAX_FILE_SIZE * 2` (2 MB) in `load_history()` and `_load_history_for_rates()` — files are trimmed at 1 MB, 10x over-read was wasteful. `calc_cross_session_costs()` retains 10 MB limit for broader aggregation.
+- Syntax check in `update.py` and `_apply_update_worker()` uses `compile()` with source text instead of `subprocess.run` + `py_compile` — avoids interpreter version mismatch on updates.
+- File scan truncation warning — `scan_transcript_stats` now reports `truncated: True` in overview when 1000-file limit is hit, shown as `(1000 file limit)` in stats modal.
+- Fixed stale CST comment: `$50` → `$200` to match actual `CST_MAX` constant.
+
+**Docs:**
+- Removed duplicate root `SECURITY.md` — `.github/SECURITY.md` (more detailed) is the canonical version displayed by GitHub.
+- Untracked `PROMO.md` from git — was tracked despite `.gitignore` rule (added before ignore took effect).
+- `.claude/CLAUDE.md`: updated JSONL file size limits, shared.py description updated with new helpers.
+- `docs/setup-macos.md`: removed stale "not included in CI" note (macOS CI added in v1.8.1).
+- `docs/ROADMAP.md`: cost breakdown marked as Done (v1.8.0), multi-session keybinding changed from `m` to `v` (conflict with menu modal).
+- `README.md`: added menu modal and cost breakdown features, `m`/`c` keyboard shortcuts, updated security table (NTFS junction, lstat TOCTOU, CJK truncation), updated file size limits.
+
+**Tests:**
+- 325 → 354 tests (+46 new, -3 redundant). 8 new test classes: `TestModelCode`, `TestCostThirds`, `TestGetPricing`, `TestCharWidth`, `TestIsSafeDir`, `TestEnsureDataDir`, `TestSessionAutoConnect`, `TestRenderPickerLimit`.
+- Removed 3 redundant `*_positive` constant tests from `TestFixedRangeConstants`.
+- Updated `TestRlsCheckWorker` and `TestRlsMaybeCheck` — removed all `_rls_fetching` assertions (variable removed).
+- Updated `TestApplyUpdateAction` — tests now call `_apply_update_worker()` directly (synchronous) instead of the thread-spawning `_apply_update_action()`.
+
+**Other:**
+- VERSION bumped to `1.8.4`
+
 ## v1.8.3 — 2026-04-14
 
 **Bug fixes:**

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Shared helpers and rate calculation for monitor.py and statusline.py."""
 
+import os
 import re
+import stat as _stat_mod
+import sys
+import unicodedata
 
 MIN_EPOCH = 1_577_836_800  # 2020-01-01 — reject implausible timestamps
 
 # Shared constants — single source of truth for statusline.py + monitor.py
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-_ANSI_RE = re.compile(r"\033\[[0-9;]*[a-zA-Z]")
+_ANSI_RE = re.compile(r"\033(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*\x07)")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
 DATA_DIR_NAME = "claude-aio-monitor"
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
@@ -72,6 +76,51 @@ def f_cost(usd):
     if usd < 0.01:
         return f"{usd:.4f} $"
     return f"{usd:.2f} $"
+
+
+def char_width(ch):
+    """Display width: 2 for CJK fullwidth/wide, 1 for everything else."""
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def is_safe_dir(p):
+    """Verify path is a real directory (not symlink/junction). TOCTOU-resistant via lstat."""
+    try:
+        st = p.lstat()
+    except OSError:
+        return False
+    if not _stat_mod.S_ISDIR(st.st_mode):
+        return False
+    # Windows: junctions are reparse points but is_symlink() misses them
+    if sys.platform == "win32":
+        try:
+            if getattr(st, "st_file_attributes", 0) & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+                return False
+        except AttributeError:
+            pass
+    return True
+
+
+def ensure_data_dir(d):
+    """Create data dir with 0o700 and verify safety. Returns True if usable."""
+    try:
+        d.mkdir(mode=0o700, exist_ok=True)
+    except OSError:
+        try:
+            d.mkdir(exist_ok=True)
+        except OSError:
+            return False
+    if not is_safe_dir(d):
+        return False
+    # Fix permissions on Unix (mkdir mode is masked by umask)
+    if sys.platform != "win32":
+        try:
+            st = d.stat()
+            if _stat_mod.S_IMODE(st.st_mode) & 0o077:
+                os.chmod(d, 0o700)
+        except OSError:
+            pass
+    return True
 
 
 def calc_rates(hist):
