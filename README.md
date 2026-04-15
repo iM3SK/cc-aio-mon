@@ -16,6 +16,8 @@
 
 <p align="center"><a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></a></p>
 
+<p align="center"><a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — single-line ANSI status bar showing Model, CTX, 5HL, 7DL, CST, BRN, APR, CHR segments"></a></p>
+
 ## Why CC AIO MON?
 
 | Project | Data source | Limitation |
@@ -27,9 +29,9 @@
 
 Other monitors scrape log files or estimate costs from token counts. CC AIO MON reads the **official Claude Code statusline JSON** — the same data Claude Code uses internally. No estimation, no guessing, no stale logs.
 
-<p align="center"><a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — single-line ANSI status bar showing Model, CTX, 5HL, 7DL, CST, BRN, APR, CHR segments with Nord truecolor palette"></a></p>
+<p align="center"><a href="screenshots/cc-aio-mon-menu.png"><img src="screenshots/cc-aio-mon-menu.png" alt="CC AIO MON — menu modal with navigation hub, views, and system sections"></a></p>
 
-<p align="center"><a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay showing all metric codes, keyboard shortcuts, token usage stats, and update manager descriptions"></a></p>
+<p align="center"><a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay showing all metric codes, hotkeys, token stats, cost breakdown, and update sections"></a></p>
 
 ## Setup
 
@@ -53,8 +55,9 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Token usage stats** — press `t` for a per-model token breakdown (In/Out/Calls), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
 <p align="center">
-<a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token usage stats modal with per-model breakdown, session count, streaks"></a>
-<a href="screenshots/cc-aio-mon-update.png"><img src="screenshots/cc-aio-mon-update.png" alt="CC AIO MON — update manager modal showing current vs remote version"></a>
+<a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal with per-model breakdown using 3-char codes"></a>
+<a href="screenshots/cc-aio-mon-cost.png"><img src="screenshots/cc-aio-mon-cost.png" alt="CC AIO MON — cost breakdown modal with token costs, cache savings, burn rate over time"></a>
+<a href="screenshots/cc-aio-mon-update.png"><img src="screenshots/cc-aio-mon-update.png" alt="CC AIO MON — update manager showing current vs remote version with apply option"></a>
 </p>
 
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8 + 3.12), Windows (Python 3.12), macOS (Python 3.12).
@@ -64,13 +67,15 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
 - **Auto-purge** — dead session files older than 48 hours are automatically cleaned up from the temp directory.
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
-- **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, file size limits (1MB JSON, 10MB JSONL).
+- **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, cost breakdown, update manager.
+- **Cost breakdown** — press `c` for per-model cost estimation with token-level pricing (input, output, cache read, cache write), cache savings percentage, and burn rate over time bars.
+- **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink rejection on data directory, file size limits (1MB JSON, 2MB JSONL, 10MB cross-session).
 
 ## Session States
 
 The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes, `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
-<p align="center"><a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker showing multiple active and stale sessions with model info, session names, and live/stale status badges"></a></p>
+<p align="center"><a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with compact display, 8-char UUID, model codes, live/stale tags, max 9 sessions"></a></p>
 
 Press `r` to force a refresh (resets the stale timer if new data has arrived), or `s` to switch to a different session from the picker. If the session has truly ended and you want it out of the picker, delete its JSON/JSONL pair from `$TMPDIR/claude-aio-monitor/`.
 
@@ -121,9 +126,11 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
+| `m` | Menu (navigation hub) |
 | `r` | Force refresh (resets stale timer) |
 | `s` | Switch session (picker) |
 | `t` | Token usage stats (per-model breakdown) |
+| `c` | Cost breakdown (token costs, cache savings, burn rate over time) |
 | `u` | Update manager (version check, changelog, apply) |
 | `l` | Toggle legend overlay |
 | `1-9` | Select session (picker) |
@@ -131,7 +138,7 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Session Picker
 
-Shown on launch when multiple session files exist. Press `1-9` to select. Lists both live and stale sessions. With exactly one active (non-stale) session, connects automatically regardless of stale session count.
+Shown on launch when multiple session files exist. Press `1-9` to select. Active sessions sorted first, max 9 shown. Auto-connects only when exactly one session exists (no stale sessions). Press `s` to force picker from dashboard or menu.
 
 ## How It Works
 
@@ -195,11 +202,14 @@ export CLAUDE_STATUS_CRIT=90
 | Measure | Protection |
 |---------|------------|
 | Session ID validation | Strict regex `[a-zA-Z0-9_-]{1,128}` prevents path traversal |
-| Input sanitization | C0/C1 control characters stripped from string fields before terminal output |
-| File size limits | JSON capped at 1 MB, JSONL at 10 MB — oversized files skipped |
+| Input sanitization | C0/C1 control characters + bidi overrides stripped before terminal output |
+| File size limits | JSON capped at 1 MB, JSONL at 2 MB (10 MB for cross-session aggregation) — oversized files skipped |
 | Atomic writes | Unpredictable temp filenames prevent symlink attacks |
+| Directory validation | `lstat()` + `S_ISDIR` verification — rejects symlinks, NTFS junctions, and defends against TOCTOU races |
 | TOCTOU prevention | Single open + bounded read instead of separate stat + read |
 | Directory permissions | Temp directory created with `0o700` where supported |
+| CJK-aware truncation | `unicodedata.east_asian_width()` prevents terminal overflow from fullwidth characters |
+| Thread safety | `_update_result` protected by `threading.Lock` — safe across Python implementations |
 | Graceful shutdown | SIGTERM handler + atexit restore terminal state |
 | Render isolation | Corrupted data caught per-frame — TUI never crashes |
 

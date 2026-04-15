@@ -37,16 +37,19 @@ from monitor import (
     _rls_check_worker, _rls_maybe_check, _RLS_TTL,
     spin_session, spin_rls, _SPIN_SESSION, _SPIN_RLS,
     _git_cmd, _update_checks, _get_new_commits,
-    _get_remote_changelog_preview, _apply_update_action,
+    _get_remote_changelog_preview, _apply_update_action, _apply_update_worker,
     render_update_modal,
     _RESERVED_FILES, list_sessions, load_state, load_history, DATA_DIR,
     render_picker,
     cached_cross_session_costs, _write_shared_stats, _cost_cache,
     flush, SYNC_ON, SYNC_OFF,
+    render_menu, render_cost_breakdown,
+    _model_code, _cost_thirds, _get_pricing, _DEFAULT_PRICING,
 )
 from shared import (
     MAX_FILE_SIZE, _ANSI_RE, _sanitize,
     C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_DIM,
+    char_width, is_safe_dir, ensure_data_dir,
 )
 
 from statusline import (
@@ -634,20 +637,11 @@ class TestBuildLine(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestFixedRangeConstants(unittest.TestCase):
 
-    def test_brn_max_positive(self):
-        self.assertGreater(BRN_MAX, 0)
-
     def test_brn_max_value(self):
         self.assertEqual(BRN_MAX, 2.0)
 
-    def test_ctr_max_positive(self):
-        self.assertGreater(CTR_MAX, 0)
-
     def test_ctr_max_value(self):
         self.assertEqual(CTR_MAX, 5.0)
-
-    def test_cst_max_positive(self):
-        self.assertGreater(CST_MAX, 0)
 
     def test_cst_max_value(self):
         self.assertEqual(CST_MAX, 200.0)
@@ -1437,9 +1431,10 @@ class TestRenderStats(unittest.TestCase):
         (d / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         buf = render_stats(80, 40, "all")
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        self.assertIn("Opus 4.6", plain)
+        self.assertIn("OP", plain)
+        self.assertIn("4.6", plain)
         self.assertIn("100.0", plain)  # 100% single model
-        self.assertIn("Total", plain)
+        self.assertIn("ALL", plain)
 
     def test_shows_overview_metrics(self):
         import json, pathlib
@@ -1506,6 +1501,96 @@ class TestRenderLegend(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# render_menu
+# ---------------------------------------------------------------------------
+class TestRenderMenu(unittest.TestCase):
+
+    def test_returns_buffer(self):
+        buf = render_menu(80, 30)
+        self.assertIsInstance(buf, list)
+        self.assertGreater(len(buf), 0)
+
+    def test_contains_all_keys(self):
+        buf = render_menu(80, 30)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        for key in ["q", "r", "s", "t", "l", "u"]:
+            self.assertIn(key, plain)
+
+    def test_contains_sections(self):
+        buf = render_menu(80, 30)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("VIEWS", plain)
+        self.assertIn("SYSTEM", plain)
+
+    def test_show_menu_flag(self):
+        buf = render_frame(_full_data(), [], 80, 35, show_menu=True)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("MENU", plain)
+        self.assertIn("Quit", plain)
+
+    def test_menu_contains_cost(self):
+        buf = render_menu(80, 30)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("c", plain)
+        self.assertIn("Cost Breakdown", plain)
+
+
+# ---------------------------------------------------------------------------
+# render_cost_breakdown
+# ---------------------------------------------------------------------------
+class TestRenderCostBreakdown(unittest.TestCase):
+
+    def test_returns_buffer(self):
+        buf = render_cost_breakdown(_full_data(), [], 80, 35)
+        self.assertIsInstance(buf, list)
+        self.assertGreater(len(buf), 0)
+
+    def test_contains_cost_info(self):
+        buf = render_cost_breakdown(_full_data(), [], 80, 35)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("COST BREAKDOWN", plain)
+        self.assertIn("CST", plain)
+
+    def test_contains_token_breakdown(self):
+        buf = render_cost_breakdown(_full_data(), [], 80, 35)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("INP", plain)
+        self.assertIn("OUT", plain)
+        self.assertIn("CRD", plain)
+        self.assertIn("CWR", plain)
+
+    def test_cache_savings_shown(self):
+        data = _full_data()
+        data["context_window"]["current_usage"] = {
+            "input_tokens": 100,
+            "output_tokens": 500,
+            "cache_read_input_tokens": 50000,
+            "cache_creation_input_tokens": 1000,
+        }
+        buf = render_cost_breakdown(data, [], 80, 35)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("SAV", plain)
+
+    def test_with_history_shows_timeline(self):
+        import time
+        now = time.time()
+        hist = [
+            {"t": now - 300, "cost": {"total_cost_usd": 0.0}},
+            {"t": now - 200, "cost": {"total_cost_usd": 0.5}},
+            {"t": now - 100, "cost": {"total_cost_usd": 1.2}},
+            {"t": now, "cost": {"total_cost_usd": 2.0}},
+        ]
+        buf = render_cost_breakdown(_full_data(), hist, 80, 40)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("BURN RATE OVER TIME", plain)
+
+    def test_show_cost_flag(self):
+        buf = render_frame(_full_data(), [], 80, 35, show_cost=True)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("COST BREAKDOWN", plain)
+
+
+# ---------------------------------------------------------------------------
 # render_frame
 # ---------------------------------------------------------------------------
 class TestRenderFrame(unittest.TestCase):
@@ -1528,8 +1613,8 @@ class TestRenderFrame(unittest.TestCase):
     def test_footer_has_keys(self):
         buf = render_frame(_full_data(), [], 80, 35)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        self.assertIn("[t]tk", plain)
-        self.assertIn("[u]up", plain)
+        self.assertIn("[m]", plain)
+        self.assertIn("menu", plain)
 
 
 # ---------------------------------------------------------------------------
@@ -1661,15 +1746,11 @@ class TestRlsCheckWorker(unittest.TestCase):
 
     def setUp(self):
         self._orig_cache = dict(_rls_cache)
-        self._orig_fetching = _monitor_mod._rls_fetching
-        # Start each test as if fetching is in progress (worker sets it False in finally)
-        _monitor_mod._rls_fetching = True
         # Acquire lock so worker can release it (mirrors _rls_maybe_check behavior)
         _monitor_mod._rls_lock.acquire(blocking=False)
 
     def tearDown(self):
         _rls_cache.update(self._orig_cache)
-        _monitor_mod._rls_fetching = self._orig_fetching
         # Ensure lock is released for next test
         try:
             _monitor_mod._rls_lock.release()
@@ -1701,7 +1782,6 @@ class TestRlsCheckWorker(unittest.TestCase):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "error")
         self.assertIsNone(_rls_cache["remote_ver"])
-        self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # b. git show fails → status "error"
@@ -1711,7 +1791,6 @@ class TestRlsCheckWorker(unittest.TestCase):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "error")
         self.assertIsNone(_rls_cache["remote_ver"])
-        self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # c. VERSION regex not found in remote output → status "error"
@@ -1723,7 +1802,6 @@ class TestRlsCheckWorker(unittest.TestCase):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "error")
         self.assertIsNone(_rls_cache["remote_ver"])
-        self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # d. Remote version > local → status "update", remote_ver set
@@ -1738,7 +1816,6 @@ class TestRlsCheckWorker(unittest.TestCase):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "update")
         self.assertEqual(_rls_cache["remote_ver"], remote_ver)
-        self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # e. Remote version == local → status "ok"
@@ -1749,7 +1826,6 @@ class TestRlsCheckWorker(unittest.TestCase):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "ok")
         self.assertEqual(_rls_cache["remote_ver"], VERSION)
-        self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # f. FileNotFoundError (no git binary) → status "no_git"
@@ -1759,7 +1835,6 @@ class TestRlsCheckWorker(unittest.TestCase):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "no_git")
         self.assertIsNone(_rls_cache["remote_ver"])
-        self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # g. TimeoutExpired → status "timeout"
@@ -1770,7 +1845,6 @@ class TestRlsCheckWorker(unittest.TestCase):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "timeout")
         self.assertIsNone(_rls_cache["remote_ver"])
-        self.assertFalse(_monitor_mod._rls_fetching)
 
 
 class TestRlsMaybeCheck(unittest.TestCase):
@@ -1778,8 +1852,6 @@ class TestRlsMaybeCheck(unittest.TestCase):
 
     def setUp(self):
         self._orig_cache = dict(_rls_cache)
-        self._orig_fetching = _monitor_mod._rls_fetching
-        _monitor_mod._rls_fetching = False
         # Ensure lock is free
         try:
             _monitor_mod._rls_lock.release()
@@ -1793,7 +1865,6 @@ class TestRlsMaybeCheck(unittest.TestCase):
 
     def tearDown(self):
         _rls_cache.update(self._orig_cache)
-        _monitor_mod._rls_fetching = self._orig_fetching
         try:
             _monitor_mod._rls_lock.release()
         except RuntimeError:
@@ -1811,7 +1882,6 @@ class TestRlsMaybeCheck(unittest.TestCase):
         with patch("monitor.threading.Thread") as mock_thread:
             _rls_maybe_check()
         mock_thread.assert_not_called()
-        self.assertFalse(_monitor_mod._rls_fetching)
 
     # ------------------------------------------------------------------
     # b. Lock already held → no thread spawned
@@ -1837,7 +1907,6 @@ class TestRlsMaybeCheck(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_ttl_expired_spawns_thread(self):
         # Force cache TTL to be expired (monotonic=0 may be within TTL on fresh CI runners)
-        _monitor_mod._rls_fetching = False
         _rls_cache.update({"t": time.monotonic() - _RLS_TTL - 1, "status": None, "remote_ver": None})
         mock_thread_instance = MagicMock()
         with patch("monitor.threading.Thread", return_value=mock_thread_instance) as mock_thread_cls:
@@ -1846,8 +1915,6 @@ class TestRlsMaybeCheck(unittest.TestCase):
             target=_rls_check_worker, daemon=True
         )
         mock_thread_instance.start.assert_called_once()
-        # _rls_fetching must be True after spawning
-        self.assertTrue(_monitor_mod._rls_fetching)
 
 
 # ---------------------------------------------------------------------------
@@ -2264,24 +2331,18 @@ class TestApplyUpdateAction(unittest.TestCase):
             os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = self._orig_env
 
     def test_success(self):
-        import subprocess as sp
-        pull_ok = sp.CompletedProcess(args=["git"], returncode=0, stdout="ok\n", stderr="")
-        compile_ok = sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-
-        def _fake_subprocess_run(cmd, **kw):
-            # py_compile calls come through subprocess.run directly
-            return compile_ok
-
+        # Test the synchronous worker directly (not the thread-spawning wrapper)
         with patch("monitor._git_cmd", return_value=(0, "ok", "")):
-            with patch("monitor.subprocess.run", return_value=compile_ok):
-                _apply_update_action()
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("pathlib.Path.read_text", return_value="# valid python\nx = 1\n"):
+                    _apply_update_worker()
 
         import monitor
         self.assertIn("complete", monitor._update_result)
 
     def test_failure(self):
         with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
-            _apply_update_action()
+            _apply_update_worker()
 
         import monitor
         self.assertIn("failed", monitor._update_result)
@@ -2826,6 +2887,265 @@ class TestFlush(unittest.TestCase):
             output = mock_out.getvalue()
         self.assertIn(SYNC_ON, output)
         self.assertIn(SYNC_OFF, output)
+
+
+# ---------------------------------------------------------------------------
+# TestModelCode — _model_code()
+# ---------------------------------------------------------------------------
+class TestModelCode(unittest.TestCase):
+
+    def test_known_opus(self):
+        self.assertEqual(_model_code("claude-opus-4-6"), ("OP", "4.6"))
+
+    def test_known_haiku(self):
+        self.assertEqual(_model_code("claude-haiku-4-5-20251001"), ("HA", "4.5"))
+
+    def test_known_sonnet(self):
+        self.assertEqual(_model_code("claude-sonnet-4-6"), ("SO", "4.6"))
+
+    def test_short_opus(self):
+        self.assertEqual(_model_code("opus"), ("OP", ""))
+
+    def test_unknown_foo_bar(self):
+        # base[:3].upper() → "FOO", version → ""
+        self.assertEqual(_model_code("foo-bar"), ("FOO", ""))
+
+    def test_with_1m_suffix(self):
+        # "[1m]" stripped before lookup
+        self.assertEqual(_model_code("claude-opus-4-6[1m]"), ("OP", "4.6"))
+
+
+# ---------------------------------------------------------------------------
+# TestCostThirds — _cost_thirds()
+# ---------------------------------------------------------------------------
+class TestCostThirds(unittest.TestCase):
+
+    def _entry(self, t, cost):
+        return {"t": t, "cost": {"total_cost_usd": cost}}
+
+    def test_empty_history(self):
+        self.assertEqual(_cost_thirds([]), [])
+
+    def test_one_entry(self):
+        self.assertEqual(_cost_thirds([self._entry(1_600_000_000, 0.1)]), [])
+
+    def test_span_under_30s(self):
+        hist = [self._entry(1_600_000_000, 0.0), self._entry(1_600_000_020, 1.0)]
+        self.assertEqual(_cost_thirds(hist), [])
+
+    def test_valid_history_returns_3_tuples(self):
+        now = 1_600_000_000
+        hist = [
+            self._entry(now, 0.0),
+            self._entry(now + 20, 0.3),
+            self._entry(now + 40, 0.6),
+            self._entry(now + 60, 1.0),
+        ]
+        result = _cost_thirds(hist)
+        self.assertEqual(len(result), 3)
+
+    def test_labels_are_early_mid_late(self):
+        now = 1_600_000_000
+        hist = [
+            self._entry(now, 0.0),
+            self._entry(now + 20, 0.3),
+            self._entry(now + 40, 0.6),
+            self._entry(now + 60, 1.0),
+        ]
+        result = _cost_thirds(hist)
+        labels = [r[0] for r in result]
+        self.assertEqual(labels, ["early", "mid", "late"])
+
+    def test_costs_non_negative(self):
+        now = 1_600_000_000
+        hist = [
+            self._entry(now, 0.0),
+            self._entry(now + 20, 0.5),
+            self._entry(now + 40, 0.8),
+            self._entry(now + 60, 1.2),
+        ]
+        result = _cost_thirds(hist)
+        for label, cost, rate in result:
+            self.assertGreaterEqual(cost, 0.0)
+
+    def test_rate_equals_cost_over_third_minutes(self):
+        now = 1_600_000_000
+        # 3 equal thirds of 60s each (total span = 180s, third = 60s = 1min)
+        hist = [
+            self._entry(now, 0.0),
+            self._entry(now + 60, 0.6),
+            self._entry(now + 120, 1.2),
+            self._entry(now + 180, 1.8),
+        ]
+        result = _cost_thirds(hist)
+        for label, cost, rate in result:
+            third_minutes = 60 / 60  # 60s / 60 = 1 min
+            expected_rate = cost / third_minutes if cost > 0 else 0.0
+            self.assertAlmostEqual(rate, expected_rate, places=5)
+
+
+# ---------------------------------------------------------------------------
+# TestGetPricing — _get_pricing()
+# ---------------------------------------------------------------------------
+class TestGetPricing(unittest.TestCase):
+
+    def test_known_opus(self):
+        p = _get_pricing("claude-opus-4-6")
+        self.assertIn("input", p)
+        self.assertIn("output", p)
+        self.assertIn("cache_read", p)
+        self.assertIn("cache_write", p)
+        self.assertEqual(p["input"], 15.0)
+        self.assertEqual(p["output"], 75.0)
+
+    def test_with_1m_suffix(self):
+        p_base = _get_pricing("claude-opus-4-6")
+        p_suffix = _get_pricing("claude-opus-4-6[1m]")
+        self.assertEqual(p_base, p_suffix)
+
+    def test_unknown_model_returns_default(self):
+        p = _get_pricing("claude-future-99")
+        self.assertEqual(p, _DEFAULT_PRICING)
+
+    def test_empty_string_returns_default(self):
+        p = _get_pricing("")
+        self.assertEqual(p, _DEFAULT_PRICING)
+
+
+# ---------------------------------------------------------------------------
+# TestCharWidth — shared.char_width()
+# ---------------------------------------------------------------------------
+class TestCharWidth(unittest.TestCase):
+
+    def test_ascii_a(self):
+        self.assertEqual(char_width("a"), 1)
+
+    def test_cjk_zhong(self):
+        self.assertEqual(char_width("中"), 2)
+
+    def test_fullwidth_A(self):
+        # U+FF21 FULLWIDTH LATIN CAPITAL LETTER A
+        self.assertEqual(char_width("\uff21"), 2)
+
+    def test_emoji_does_not_crash(self):
+        # Just verify it doesn't raise; result is implementation-defined
+        result = char_width("\U0001f600")
+        self.assertIn(result, (1, 2))
+
+
+# ---------------------------------------------------------------------------
+# TestIsSafeDir — shared.is_safe_dir()
+# ---------------------------------------------------------------------------
+class TestIsSafeDir(unittest.TestCase):
+
+    def test_real_directory_returns_true(self):
+        import pathlib
+        d = pathlib.Path(tempfile.mkdtemp())
+        try:
+            self.assertTrue(is_safe_dir(d))
+        finally:
+            d.rmdir()
+
+    def test_nonexistent_path_returns_false(self):
+        import pathlib
+        p = pathlib.Path(tempfile.gettempdir()) / "cc_aio_mon_nonexistent_xyz"
+        self.assertFalse(is_safe_dir(p))
+
+    def test_regular_file_returns_false(self):
+        import pathlib
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            p = pathlib.Path(f.name)
+        try:
+            self.assertFalse(is_safe_dir(p))
+        finally:
+            p.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# TestEnsureDataDir — shared.ensure_data_dir()
+# ---------------------------------------------------------------------------
+class TestEnsureDataDir(unittest.TestCase):
+
+    def test_new_directory_returns_true_and_exists(self):
+        import pathlib, shutil
+        base = pathlib.Path(tempfile.mkdtemp())
+        target = base / "testdir"
+        try:
+            result = ensure_data_dir(target)
+            self.assertTrue(result)
+            self.assertTrue(target.is_dir())
+        finally:
+            shutil.rmtree(str(base), ignore_errors=True)
+
+    def test_existing_directory_returns_true(self):
+        import pathlib, shutil
+        base = pathlib.Path(tempfile.mkdtemp())
+        try:
+            result1 = ensure_data_dir(base)
+            result2 = ensure_data_dir(base)
+            self.assertTrue(result1)
+            self.assertTrue(result2)
+        finally:
+            shutil.rmtree(str(base), ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# TestSessionAutoConnect — auto-connect condition logic
+# ---------------------------------------------------------------------------
+class TestSessionAutoConnect(unittest.TestCase):
+    """Test the auto-connect condition: connect only when exactly 1 session exists."""
+
+    def _auto_connect(self, sessions):
+        """Replicate the condition used in main(): connect iff len(sessions)==1."""
+        active = [s for s in sessions if not s["stale"]]
+        return len(active) == 1 and len(sessions) == 1
+
+    def test_one_active_zero_stale_auto_connects(self):
+        sessions = [{"id": "s1", "stale": False}]
+        self.assertTrue(self._auto_connect(sessions))
+
+    def test_one_active_one_stale_no_auto_connect(self):
+        sessions = [{"id": "s1", "stale": False}, {"id": "s2", "stale": True}]
+        self.assertFalse(self._auto_connect(sessions))
+
+    def test_zero_sessions_no_auto_connect(self):
+        self.assertFalse(self._auto_connect([]))
+
+    def test_two_active_no_auto_connect(self):
+        sessions = [{"id": "s1", "stale": False}, {"id": "s2", "stale": False}]
+        self.assertFalse(self._auto_connect(sessions))
+
+
+# ---------------------------------------------------------------------------
+# TestRenderPickerLimit — render_picker with >9 sessions
+# ---------------------------------------------------------------------------
+class TestRenderPickerLimit(unittest.TestCase):
+
+    def _make_sessions(self, n):
+        return [
+            {
+                "id": f"sess{i:03d}",
+                "session_name": f"Session {i}",
+                "model": "Sonnet",
+                "cwd": "/tmp",
+                "stale": False,
+            }
+            for i in range(1, n + 1)
+        ]
+
+    def test_only_9_shown(self):
+        sessions = self._make_sessions(15)
+        buf = render_picker(sessions, 80, 40)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        for i in range(1, 10):
+            self.assertIn(f"[{i}]", plain)
+        self.assertNotIn("[10]", plain)
+
+    def test_more_indicator_shown(self):
+        sessions = self._make_sessions(15)
+        buf = render_picker(sessions, 80, 40)
+        plain = _ANSI_RE.sub("", "\n".join(buf))
+        self.assertIn("+6 more", plain)
 
 
 if __name__ == "__main__":

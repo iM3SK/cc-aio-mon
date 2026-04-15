@@ -6,6 +6,7 @@
 # Stdlib only.
 
 import argparse
+import codecs
 import os
 import re
 import subprocess
@@ -28,7 +29,11 @@ def _enable_vt_on_windows():
 def _init_terminal():
     """Set up UTF-8 stdout and VT processing. Called from main() only."""
     # Force UTF-8 on Windows (cp1250/cp1252 can't handle em-dash, box chars)
-    if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
+    try:
+        is_utf8 = sys.stdout.encoding and codecs.lookup(sys.stdout.encoding).name == "utf-8"
+    except LookupError:
+        is_utf8 = False
+    if not is_utf8:
         sys.stdout.flush()
         sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8",
                           errors="replace", closefd=False)
@@ -187,11 +192,9 @@ def apply_update():
     for f in py_files:
         fp = REPO_ROOT / f
         if fp.exists():
-            rc = subprocess.run(
-                [sys.executable, "-m", "py_compile", str(fp)],
-                capture_output=True, text=True,
-            )
-            if rc.returncode != 0:
+            try:
+                compile(fp.read_text(encoding="utf-8"), str(fp), "exec")
+            except SyntaxError:
                 bad.append(f)
     if bad:
         warn(f"Syntax errors in: {', '.join(bad)} — update may be broken")
