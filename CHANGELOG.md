@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.9.0 — 2026-04-16
+
+**New feature — Anthropic Pulse modal:**
+- New `pulse.py` module — real-time Anthropic backend stability monitor. Press `p` to open modal. Stdlib only, zero dependencies, zero token cost, cross-platform.
+- **Stability score (0-100)** with weighted composite: status indicator (50%), active incidents (30%), API latency (20%). Verdict bands: ≥80 `SAFE TO CODE` (green), 50-79 `DEGRADED` (yellow), <50 `NOT SAFE TO CODE` (red), error states render in dim.
+- **Two-tier signal** — (1) passive: `status.anthropic.com/api/v2/summary.json` for indicator + components + incidents; (2) active: HTTPS GET to `api.anthropic.com/v1/messages` measures real TLS handshake + HTTP round-trip (any HTTP status = endpoint alive, only network/TLS errors = down).
+- **Rolling median smoothing** — `deque(maxlen=10)` keeps last 10 scores; verdict derived from median of last 5. Absorbs single-sample outliers (one slow probe doesn't flip verdict). Warm-up below 3 samples passes raw through.
+- **Latency percentiles** — p50 / p95 over ~30 min window (60 samples) displayed in modal when ≥3 samples available.
+- **Per-model tagging** — regex word-boundary match (`opus` / `sonnet` / `haiku`) against incident titles + first incident update body. Affected models displayed inline next to incidents (`[opus]`) and as a top-level rollup row (`MODELS  opus / sonnet / haiku` — red when affected, green when clear). Honest limitation: signal only available when Anthropic flag the model publicly.
+- **JSONL persistence** — every probe appended to `$TMPDIR/claude-aio-monitor/pulse.jsonl`. Schema: `{ts, score, level, indicator, incidents, latency_ms, error}`. Stores raw_score (truth), not smoothed.
+- **Hybrid cleanup** — (1) startup: drop entries older than 24h + cap at 2000 records; (2) runtime: check size every 100 appends, trim to last 500 lines if file exceeds 1 MB (aligned with `shared.MAX_FILE_SIZE`). Atomic rewrite via `NamedTemporaryFile` + `os.replace`.
+- **Error taxonomy** — `HTTPError` code (`HTTP 503`), `socket.timeout` (`timeout`), `socket.gaierror` (`DNS fail`), `URLError` (`net: <type>`), `JSONDecodeError` (`parse: JSONDecodeError`). Distinguishes API-side failures from client-side code bugs in the UI.
+- **Thread-safe** — daemon worker (`pulse.start_pulse_worker()`) fetches every 30s. All shared state guarded by `threading.Lock` (`_snapshot_lock`, `_history_lock`, `_log_lock`, `_worker_lock`). Best-effort I/O: all `OSError` silently swallowed to prevent worker death.
+- **Modal integration** — new `[p]` hotkey (global + menu), added to legend hotkeys section. Render dispatch is session-independent (works without any Claude Code session). Closes on any key.
+- **Bounded resources** — `MAX_RESPONSE_BYTES = 512 KB` cap on status.json response, HTTP timeout 5s, probe timeout 4s, fetch interval 30s. `User-Agent: cc-aio-mon-pulse/1.0`.
+
+**Refactor:**
+- `compute_score(raw)` refactored to use new pure helper `_score_to_verdict(score)` — enables verdict derivation from both raw and smoothed scores without code duplication.
+- `_ping_api()` replaced TCP connect with HTTPS probe (measures TLS + HTTP, not just socket) — realistic edge latency, catches Cloudflare 502/503 + TLS issues that pure TCP connects miss.
+
+**Tests:**
+- 53 new tests covering: scoring buckets + verdict mapping (incl. exact thresholds 50/80 and latency boundaries 300/800/2000 ms), indicator/incident extraction, snapshot schema + thread safety, modal rendering (empty/ok/error states), rolling median smoothing (outlier absorption, sustained drop, None handling, bounded history), latency percentiles (empty/below-min/basic/skip-none/bounded), JSONL persistence (append + line-delimited + bad data), startup cleanup (age cutoff + count cap + malformed lines + missing file), runtime rotation (over-max + only-every-N + noop-under-max + noop-at-exact-max-size), model tagging (case insensitive + word boundary + multi-model + empty + extract integration), network-layer error taxonomy (mocked `urlopen`: HTTPError 401/404/503, URLError+timeout/gaierror/other, direct socket.timeout, oversized response, JSONDecodeError, OSError), `_ping_api` HTTP-alive semantics (401/405 = alive), `_refresh_once` end-to-end (success path, fetch-error tag propagation, malformed `incident_updates` regression guard).
+- Total suite: 421 tests, all passing.
+
+**Hardening (post-audit fixes, same release):**
+- `CC_AIO_MON_NO_PULSE=1` environment variable — opt-out switch for the background Pulse worker. Mirrors the existing `CC_AIO_MON_NO_UPDATE_CHECK=1` pattern. Required for strict-firewall / air-gapped deployments. Documented in README env-var table + all three platform setup guides.
+- `_extract()` hardened against malformed `incident_updates` — wraps first-element access in `isinstance(..., dict)` guard to prevent `AttributeError` escape into the worker's last-resort handler when the status API returns non-dict elements.
+- `SECURITY.md` updated — stale claim removed, outbound network surface now documented (URLs, cadence, data sent = UA header only, opt-out env var).
+- CI workflows now include `pulse.py` — Bandit security scan, compile check in `tests.yml`, PR template tuple, `CONTRIBUTING.md` compile command, `README.md` compile command. Previously the highest-risk (network-facing) module was unscanned.
+- Indicator color fallback — unknown status indicators (future schema) render as `C_DIM` instead of alarming red.
+- `TestRenderMenu.test_contains_all_keys` now asserts on all 8 menu hotkeys (was checking only 6 — wouldn't catch silent removal of `[p]` / `[m]` / `[c]`).
+- `test_snapshot_has_schema` expanded to assert on `raw_score`, `latency_p50_ms`, `latency_p95_ms` (prevents silent breakage of modal rendering).
+
+**Other:**
+- VERSION bumped to `1.9.0`
+
 ## v1.8.4 — 2026-04-15
 
 **UI:**

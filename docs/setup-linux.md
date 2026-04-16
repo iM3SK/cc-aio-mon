@@ -111,6 +111,19 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 - If running inside tmux, check that `terminal-overrides` passes through correctly.
 - Test outside tmux first.
 
+## Outbound network
+
+The Anthropic Pulse worker (`p` in the dashboard) performs unauthenticated HTTPS requests every 30 s to:
+
+- `status.anthropic.com` — public status JSON
+- `api.anthropic.com` — liveness probe (expects 401/405)
+
+No credentials, no user data, no request body is sent. If you are behind a restrictive firewall or prefer zero outbound traffic, disable the worker:
+
+```bash
+CC_AIO_MON_NO_PULSE=1 python3 monitor.py
+```
+
 ## CI status
 
 CC AIO MON is CI-tested on **Ubuntu** with **Python 3.8 and 3.12**.

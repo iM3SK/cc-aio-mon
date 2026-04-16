@@ -32,6 +32,7 @@ from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur,
                     char_width, is_safe_dir, ensure_data_dir,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME, VERSION_RE,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
+import pulse
 
 # ---------------------------------------------------------------------------
 # Transcript usage scanner — reads ~/.claude/projects/**/*.jsonl
@@ -297,7 +298,7 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.8.4"
+VERSION = "1.9.0"
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
@@ -1084,6 +1085,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
@@ -1256,6 +1258,174 @@ def render_cost_breakdown(data, hist, cols, rows):
 
 
 # ---------------------------------------------------------------------------
+# Anthropic Pulse modal
+# ---------------------------------------------------------------------------
+_PULSE_LEVEL_COLOR = {
+    "ok":       C_GRN,
+    "degraded": C_YEL,
+    "bad":      C_RED,
+    "error":    C_DIM,
+}
+
+_PULSE_COMPONENT_COLOR = {
+    "operational":             C_GRN,
+    "degraded_performance":    C_YEL,
+    "partial_outage":          C_ORN,
+    "major_outage":            C_RED,
+    "under_maintenance":       C_CYN,
+}
+
+
+def _pulse_age(snap):
+    """Return human-readable age of the snapshot."""
+    wall_t = snap.get("wall_t", 0) or 0
+    if wall_t <= 0:
+        return "--"
+    age_s = max(0, int(time.time() - wall_t))
+    if age_s < 60:
+        return f"{age_s}s ago"
+    if age_s < 3600:
+        return f"{age_s // 60}m ago"
+    return f"{age_s // 3600}h ago"
+
+
+def render_pulse_modal(cols, rows):
+    """Render Anthropic backend stability modal (P key)."""
+    snap = pulse.get_pulse_snapshot()
+    SW = cols
+    buf = []
+
+    buf.append(sep(SW))
+    title = "ANTHROPIC PULSE"
+    t_pad = max(0, SW - len(title))
+    buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * t_pad}{R}")
+    buf.append(sep(SW))
+
+    level = snap.get("level") or "error"
+    color = _PULSE_LEVEL_COLOR.get(level, C_DIM)
+    score = snap.get("score")
+    verdict = _sanitize(snap.get("verdict") or "AWAITING DATA")
+    reason = _sanitize(snap.get("reason") or "")
+
+    if score is None:
+        buf.append(f"{C_DIM}{B}STB{R} {mkbar(0, C_DIM)}")
+    else:
+        buf.append(f"{color}{B}STB{R} {mkbar(float(score), color)}")
+
+    # Verdict line
+    buf.append("")
+    buf.append(f"{color}{B}>> {verdict} <<{R}")
+    if reason:
+        buf.append(f"{C_DIM}reason: {reason}{R}")
+
+    buf.append(sep(SW))
+    # Details
+    indicator = snap.get("indicator")
+    if indicator:
+        ind_label = pulse._indicator_label(indicator)
+        if indicator == "none":
+            ind_color = C_GRN
+        elif indicator in ("minor", "maintenance"):
+            ind_color = C_YEL
+        elif indicator in ("major", "critical"):
+            ind_color = C_RED
+        else:
+            # Unknown indicator from a future status schema — stay neutral rather than alarming red
+            ind_color = C_DIM
+        buf.append(f"{C_DIM}INDICATOR {R} {ind_color}{_sanitize(indicator)}{R} {C_DIM}({_sanitize(ind_label)}){R}")
+    else:
+        buf.append(f"{C_DIM}INDICATOR {R} {C_DIM}--{R}")
+
+    incidents = snap.get("incidents") or []
+    inc_color = C_GRN if not incidents else (C_YEL if len(incidents) < 3 else C_RED)
+    buf.append(f"{C_DIM}INCIDENTS {R} {inc_color}{len(incidents)}{R}")
+
+    # Per-model rollup — any model mentioned in any active incident = affected.
+    # Silent when no incidents mention models.
+    affected = set()
+    for inc in incidents:
+        for m in (inc.get("affected_models") or []):
+            affected.add(m)
+    if affected or incidents:
+        parts = []
+        for m in ("opus", "sonnet", "haiku"):
+            if m in affected:
+                parts.append(f"{C_RED}{B}{m}{R}")
+            else:
+                parts.append(f"{C_GRN}{m}{R}")
+        buf.append(f"{C_DIM}MODELS    {R} " + f" {C_DIM}/{R} ".join(parts))
+
+    latency = snap.get("latency_ms")
+    if latency is None:
+        buf.append(f"{C_DIM}LATENCY   {R} {C_RED}timeout{R}")
+    else:
+        if latency < 300:
+            lc = C_GRN
+        elif latency < 800:
+            lc = C_YEL
+        else:
+            lc = C_RED
+        buf.append(f"{C_DIM}LATENCY   {R} {lc}{int(latency)} ms{R}")
+
+    # p50 / p95 — appears once we have >=3 samples
+    p50 = snap.get("latency_p50_ms")
+    p95 = snap.get("latency_p95_ms")
+    if p50 is not None and p95 is not None:
+        buf.append(f"{C_DIM}P50 / P95 {R} {C_WHT}{p50} ms{R} {C_DIM}/{R} {C_WHT}{p95} ms{R}")
+
+    # Raw (instant) score — shown when it diverges from smoothed by > 5 points
+    raw_score = snap.get("raw_score")
+    if score is not None and raw_score is not None and abs(int(raw_score) - int(score)) > 5:
+        buf.append(f"{C_DIM}INSTANT   {R} {C_DIM}{int(raw_score)}% (smoothed: {int(score)}%){R}")
+
+    buf.append(f"{C_DIM}UPDATED   {R} {C_WHT}{_pulse_age(snap)}{R}")
+
+    # Error detail (if any)
+    err = snap.get("error")
+    if err:
+        buf.append(sep(SW))
+        buf.append(f"{C_RED}{B}ERROR{R} {C_DIM}{_sanitize(err)}{R}")
+
+    # Active incidents (first 3)
+    if incidents:
+        buf.append(sep(SW))
+        ih = "ACTIVE INCIDENTS"
+        ih_pad = max(0, SW - len(ih))
+        buf.append(f"{BG_BAR}{C_WHT}{B}{ih}{R}{BG_BAR}{' ' * ih_pad}{R}")
+        buf.append(sep(SW))
+        for inc in incidents[:3]:
+            name = _sanitize(inc.get("name") or "?")[:SW - 8]
+            impact = _sanitize(inc.get("impact") or "minor")
+            ic = C_RED if impact in ("major", "critical") else C_YEL
+            models = inc.get("affected_models") or []
+            tag = ""
+            if models:
+                tag = f" {C_DIM}[{R}{C_ORN}{','.join(models)}{R}{C_DIM}]{R}"
+            buf.append(f"{ic}{impact.upper()[:4]:<4}{R} {C_WHT}{name}{R}{tag}")
+
+    # Components
+    components = snap.get("components") or []
+    if components:
+        buf.append(sep(SW))
+        ch = "COMPONENTS"
+        ch_pad = max(0, SW - len(ch))
+        buf.append(f"{BG_BAR}{C_WHT}{B}{ch}{R}{BG_BAR}{' ' * ch_pad}{R}")
+        buf.append(sep(SW))
+        for c in components[:10]:
+            name = _sanitize(c.get("name") or "?")
+            cstatus = _sanitize(c.get("status") or "unknown")
+            cc = _PULSE_COMPONENT_COLOR.get(cstatus, C_DIM)
+            buf.append(f"  {C_WHT}{name[:20]:<20}{R} {cc}{cstatus.replace('_', ' ')}{R}")
+
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}source: status.anthropic.com + api.anthropic.com ping{R}")
+    buf.append(f"{C_DIM}press any key to close{R}")
+
+    _fit_buf_height(buf, rows, clip_tail=True)
+    return buf
+
+
+# ---------------------------------------------------------------------------
 # Menu modal
 # ---------------------------------------------------------------------------
 def render_menu(cols, rows):
@@ -1274,6 +1444,7 @@ def render_menu(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
     buf.append(sep(SW))
     sp = max(0, SW - 6)
@@ -1733,6 +1904,11 @@ def main():
     show_stats = None  # None=off, "all"/"7d"/"30d"=active period
     force_picker = False
     show_update = False
+    show_pulse = False
+    # Opt-out: CC_AIO_MON_NO_PULSE=1 disables the background Anthropic Pulse worker.
+    # Mirrors CC_AIO_MON_NO_UPDATE_CHECK=1 pattern for the release checker.
+    if os.environ.get("CC_AIO_MON_NO_PULSE") != "1":
+        pulse.start_pulse_worker()
     _set_update_result(None)
     _render_errors = 0
     last_mt = 0
@@ -1788,9 +1964,13 @@ def main():
                     show_update = True
                 elif k == "c":
                     show_cost = True
+                elif k == "p":
+                    show_pulse = True
                 show_menu = False
             elif show_cost and k is not None:
                 show_cost = False
+            elif show_pulse and k is not None:
+                show_pulse = False
             elif show_legend and k is not None:
                 show_legend = False
             # ── Global handlers ──
@@ -1838,6 +2018,15 @@ def main():
                     _set_update_result(None)
                 show_legend = False
                 show_stats = None
+                show_pulse = False
+            elif k == "p":
+                show_pulse = not show_pulse
+                show_menu = False
+                show_legend = False
+                show_stats = None
+                show_cost = False
+                show_update = False
+                _set_update_result(None)
 
             # Render every tick when we have data (for spinner), reload data on interval
             need_render = size_changed or last_data is not None or since_data >= data_interval
@@ -1849,6 +2038,15 @@ def main():
             if show_update:
                 try:
                     flush(render_update_modal(cols, rows), cols)
+                except (TypeError, ValueError, KeyError, OSError):
+                    pass
+                time.sleep(tick)
+                continue
+
+            # Pulse modal (no session required)
+            if show_pulse:
+                try:
+                    flush(render_pulse_modal(cols, rows), cols)
                 except (TypeError, ValueError, KeyError, OSError):
                     pass
                 time.sleep(tick)

@@ -4,14 +4,14 @@
 
 **Real-time terminal monitor for Claude Code CLI.** Track context window usage, API rate limits, session costs, burn rate, and cache performance — all in one compact TUI dashboard. Stdlib only (Python 3.8+), cross-platform.
 
-> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** after each assistant message, permission mode change, or vim mode toggle (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. **Four Python files, stdlib only, no build step.**
+> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** after each assistant message, permission mode change, or vim mode toggle (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Five Python files, stdlib only, no build step.**
 
 | | |
 |---|---|
 | **Input** | Claude Code `statusLine` JSON protocol via stdin — model info, context window, rate limits, cost, token counts, session metadata |
 | **Output** | ANSI truecolor terminal — single-line statusline + fullscreen TUI dashboard with progress bars, smart alerts, cross-session cost aggregation |
 | **Data flow** | `Claude Code → stdin JSON → statusline.py → temp files → monitor.py → TUI` |
-| **Files** | `statusline.py` (statusline renderer + IPC writer), `monitor.py` (TUI dashboard), `shared.py` (shared helpers + rate math), `update.py` (self-updater) |
+| **Files** | `statusline.py` (statusline renderer + IPC writer), `monitor.py` (TUI dashboard), `shared.py` (shared helpers + rate math), `update.py` (self-updater), `pulse.py` (Anthropic backend stability monitor) |
 | **IPC** | Atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/` — no sockets, no databases |
 
 <p align="center"><a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></a></p>
@@ -69,6 +69,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
 - **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, cost breakdown, update manager.
 - **Cost breakdown** — press `c` for per-model cost estimation with token-level pricing (input, output, cache read, cache write), cache savings percentage, and burn rate over time bars.
+- **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.anthropic.com` (indicator + incidents) + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku). JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink rejection on data directory, file size limits (1MB JSON, 2MB JSONL, 10MB cross-session).
 
 ## Session States
@@ -132,6 +133,7 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 | `t` | Token usage stats (per-model breakdown) |
 | `c` | Cost breakdown (token costs, cache savings, burn rate over time) |
 | `u` | Update manager (version check, changelog, apply) |
+| `p` | Anthropic Pulse (backend stability modal) |
 | `l` | Toggle legend overlay |
 | `1-9` | Select session (picker) |
 | `1/2/3` | Switch period in token usage stats (all/7d/30d) |
@@ -179,6 +181,7 @@ Exception: 5HL/7DL labels use yellow as base color (even below 50%) to visually 
 | `CLAUDE_STATUS_CRIT` | `80` | statusline | Red threshold (%) |
 | `CLAUDE_WARN_BRN` | `1.00` | dashboard | Burn rate warning threshold ($/min) |
 | `CC_AIO_MON_NO_UPDATE_CHECK` | *(unset)* | dashboard | Set to `1` to disable background release check |
+| `CC_AIO_MON_NO_PULSE` | *(unset)* | dashboard | Set to `1` to disable background Anthropic Pulse worker (no outbound network) |
 
 ```bash
 export CLAUDE_STATUS_WARN=60
@@ -277,7 +280,7 @@ Contributions welcome. Keep it stdlib only, ship `shared.py` alongside entry scr
 
 ```bash
 python3 tests.py
-python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py','statusline.py','monitor.py','update.py')]"
+python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py','statusline.py','monitor.py','update.py','pulse.py')]"
 ```
 
 Open an issue first for anything non-trivial so the approach can be discussed before work begins. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
