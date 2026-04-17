@@ -26,11 +26,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime
 
 from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur,
-                    char_width, is_safe_dir,
-                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, VERSION_RE,
+                    char_width, is_safe_dir, run_git,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, TRANSCRIPT_MAX_BYTES,
+                    DATA_DIR, VERSION_RE,
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     extract_changelog_entry,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
@@ -106,7 +108,7 @@ def scan_transcript_stats(period="all", ttl=30.0):
         is_subagent = "subagents" in str(jl)
         try:
             st = jl.stat()
-            if st.st_size > 50_000_000:
+            if st.st_size > TRANSCRIPT_MAX_BYTES:
                 continue
             if cutoff and st.st_mtime < cutoff:
                 continue
@@ -304,7 +306,7 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
@@ -472,9 +474,24 @@ _REPO_ROOT = pathlib.Path(__file__).parent.resolve()
 _RLS_TTL = 3600  # check once per hour
 _RLS_BLINK_INTERVAL = 0.5
 _rls_cache = {"t": -_RLS_TTL, "status": None, "remote_ver": None}
-_rls_lock = threading.Lock()
+_rls_lock = threading.Lock()       # worker-spawn coordination (one check at a time)
+_rls_data_lock = threading.Lock()  # cache field coherence across read/write threads
 _rls_blink_last = 0.0
 _rls_blink_on = True
+
+
+def _rls_snapshot():
+    """Thread-safe atomic snapshot of _rls_cache. Returns a shallow dict copy."""
+    with _rls_data_lock:
+        return dict(_rls_cache)
+
+
+def _rls_write(status, remote_ver=None):
+    """Thread-safe write of all three _rls_cache fields in one critical section."""
+    with _rls_data_lock:
+        _rls_cache["t"] = time.monotonic()
+        _rls_cache["status"] = status
+        _rls_cache["remote_ver"] = remote_ver
 def _parse_version(ver_str):
     """Parse version string to comparable tuple, ignoring non-numeric suffixes."""
     parts = []
@@ -485,40 +502,33 @@ def _parse_version(ver_str):
 
 
 def _rls_check_worker():
-    """Background worker: git fetch + compare VERSION. Writes result atomically."""
+    """Background worker: git fetch + compare VERSION. Writes result atomically.
+    Uses shared.run_git for consistent env whitelist (blocks GIT_SSH_COMMAND / LD_PRELOAD).
+    Writes via _rls_write() to keep three fields coherent under _rls_data_lock."""
     try:
-        env = os.environ.copy()
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        kw = dict(cwd=_REPO_ROOT, capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=15, env=env)
-        r = subprocess.run(["git", "fetch", "origin", "main"], **kw)
+        r = run_git(["fetch", "origin", "main"], cwd=_REPO_ROOT, timeout=15)
         if r.returncode != 0:
-            _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+            _rls_write("error")
             return
-        r = subprocess.run(["git", "show", "origin/main:monitor.py"], **kw)
+        r = run_git(["show", "origin/main:monitor.py"], cwd=_REPO_ROOT, timeout=15)
         if r.returncode != 0:
-            _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+            _rls_write("error")
             return
         m = VERSION_RE.search(r.stdout)
         if not m:
-            _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+            _rls_write("error")
             return
         remote_ver = m.group(1)
         local_t = _parse_version(VERSION)
         remote_t = _parse_version(remote_ver)
-        if remote_t > local_t:
-            status = "update"
-        else:
-            status = "ok"  # equal or local-ahead — both appear as up to date
-        # Atomic swap — safe under GIL
-        new = {"t": time.monotonic(), "status": status, "remote_ver": remote_ver}
-        _rls_cache.update(new)
+        status = "update" if remote_t > local_t else "ok"
+        _rls_write(status, remote_ver=remote_ver)
     except FileNotFoundError:
-        _rls_cache.update({"t": time.monotonic(), "status": "no_git", "remote_ver": None})
+        _rls_write("no_git")
     except subprocess.TimeoutExpired:
-        _rls_cache.update({"t": time.monotonic(), "status": "timeout", "remote_ver": None})
+        _rls_write("timeout")
     except Exception:
-        _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
+        _rls_write("error")
     finally:
         _rls_lock.release()
 
@@ -527,7 +537,7 @@ def _rls_maybe_check():
     """Trigger background check if TTL expired. Non-blocking."""
     if os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK") == "1":
         return
-    if time.monotonic() - _rls_cache["t"] < _RLS_TTL:
+    if time.monotonic() - _rls_snapshot()["t"] < _RLS_TTL:
         return
     if not _rls_lock.acquire(blocking=False):
         return
@@ -560,7 +570,7 @@ def calc_cross_session_costs():
         sid = jl.stem
         if not _SID_RE.match(sid):
             continue
-        if sid in _RESERVED_FILES:
+        if sid in RESERVED_SIDS:
             continue
         try:
             st = jl.stat()
@@ -631,7 +641,6 @@ def sep(w):
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-_RESERVED_FILES = RESERVED_SIDS  # backwards-compat alias — non-session files in data dir
 
 
 def list_sessions():
@@ -648,7 +657,7 @@ def list_sessions():
     # Auto-purge dead sessions older than 48h (.json + .jsonl pair)
     for f in DATA_DIR.glob("*.json"):
         sid = f.stem
-        if sid in _RESERVED_FILES or not _SID_RE.match(sid):
+        if sid in RESERVED_SIDS or not _SID_RE.match(sid):
             continue
         try:
             if now - f.stat().st_mtime > DEAD_SESSION_TTL:
@@ -662,7 +671,7 @@ def list_sessions():
         sid = f.stem
         if not _SID_RE.match(sid):
             continue
-        if sid in _RESERVED_FILES:
+        if sid in RESERVED_SIDS:
             continue
         try:
             st = f.stat()
@@ -983,9 +992,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
 
     # ── RLS (release check) ────────────────────────────────
     _rls_maybe_check()
-    rls_s = _rls_cache["status"]
-    if rls_s == "update" and _rls_cache["remote_ver"]:
-        rv = _rls_cache["remote_ver"]
+    rls = _rls_snapshot()  # atomic read: status + remote_ver coherent
+    rls_s = rls["status"]
+    if rls_s == "update" and rls["remote_ver"]:
+        rv = rls["remote_ver"]
         if _rls_blink():
             buf.append(f"{c(C_RED)}{B}RLS{R} {c(C_RED)}{B}{spin_rls()} v{rv} available{R}")
         else:
@@ -1107,7 +1117,8 @@ def _get_pricing(model_id):
     return _MODEL_PRICING.get(base, _DEFAULT_PRICING)
 
 
-_SESSION_COST_CACHE = {}  # {session_id: (ts, breakdown_dict)}
+_SESSION_COST_CACHE = OrderedDict()  # LRU: {session_id: (ts, breakdown_dict)}
+_SESSION_COST_CACHE_MAX = 64  # cap — prevents unbounded growth across rotating session IDs
 _SESSION_COST_TTL = 5.0   # refresh every 5s
 
 CLAUDE_PROJECTS_DIR = (pathlib.Path.home() / ".claude" / "projects").resolve()
@@ -1156,6 +1167,7 @@ def _aggregate_session_cost(data):
     now = time.time()
     cached = _SESSION_COST_CACHE.get(sid)
     if cached and (now - cached[0]) < _SESSION_COST_TTL:
+        _SESSION_COST_CACHE.move_to_end(sid)  # LRU touch
         return cached[1]
 
     tp = data.get("transcript_path")
@@ -1179,7 +1191,7 @@ def _aggregate_session_cost(data):
         size = path.stat().st_size
     except OSError:
         return None
-    if size > 50 * 1024 * 1024:
+    if size > TRANSCRIPT_MAX_BYTES:
         return None
 
     inp = out = cr = cw = 0.0
@@ -1220,6 +1232,9 @@ def _aggregate_session_cost(data):
         "cost_total": ci + co + ccr + ccw,
     }
     _SESSION_COST_CACHE[sid] = (now, result)
+    _SESSION_COST_CACHE.move_to_end(sid)
+    while len(_SESSION_COST_CACHE) > _SESSION_COST_CACHE_MAX:
+        _SESSION_COST_CACHE.popitem(last=False)  # evict LRU
     return result
 
 
@@ -1576,10 +1591,10 @@ _update_lock = threading.Lock()
 
 
 def _git_cmd(args, timeout=15):
-    """Run git command in repo root, return (returncode, stdout, stderr)."""
-    from shared import run_git as _run_git
+    """Run git command in repo root, return (returncode, stdout, stderr).
+    Uses module-level run_git for consistent env whitelist + mockable patch target."""
     try:
-        r = _run_git(args, cwd=_REPO_ROOT, timeout=timeout)
+        r = run_git(args, cwd=_REPO_ROOT, timeout=timeout)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except FileNotFoundError:
         return -1, "", "git not found"
@@ -1676,8 +1691,9 @@ def render_update_modal(cols, rows):
     buf.append(f"{BG_BAR}{C_WHT}{B}UPDATE{R}{BG_BAR}{' ' * up_pad}{R}")
     buf.append(sep(SW))
 
-    rls_s = _rls_cache["status"]
-    remote_ver = _rls_cache.get("remote_ver")
+    rls = _rls_snapshot()  # atomic coherent read
+    rls_s = rls["status"]
+    remote_ver = rls.get("remote_ver")
 
     buf.append(f"{C_GRN}CUR{R} {C_GRN}v{VERSION}{R}")
     if remote_ver:
@@ -1688,8 +1704,8 @@ def render_update_modal(cols, rows):
     # Last check freshness — show only after worker has actually run.
     # Using status gate (not "t > 0") because time.monotonic() may be small on
     # freshly-started processes where tests set t = monotonic() - 125 < 0.
-    if _rls_cache.get("status") is not None:
-        age_s = max(0, int(time.monotonic() - _rls_cache.get("t", 0)))
+    if rls_s is not None:
+        age_s = max(0, int(time.monotonic() - rls.get("t", 0)))
         if age_s < 60:
             age_str = f"{age_s}s ago"
         elif age_s < 3600:

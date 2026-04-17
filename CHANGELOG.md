@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.9.1 — 2026-04-17
+
+**Security hardening:**
+- Hourly background release check now uses the same minimal git env whitelist as update.py (blocks `GIT_SSH_COMMAND` / `LD_PRELOAD` / proxy env injection). Previously this one path inherited the full parent environment, contradicting the project's documented subprocess policy.
+- Session IDs matching Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM0-9`, `LPT0-9`) are now rejected case-insensitively at validation time. Prevents accidentally opening the console/printer device instead of a file on Windows. Valid SIDs like `Conrad`, `console`, `COM10` are unaffected.
+- Added `.gitattributes` to enforce LF line endings for shell/Python/Markdown files and CRLF for PowerShell. Stops cross-platform line-ending pollution when contributors on Windows commit with `core.autocrlf=false`.
+
+**Resource management:**
+- Per-session cost cache is now bounded (LRU cap at 64 entries). Long-running monitor processes that observe many rotating session IDs no longer accumulate memory indefinitely.
+- Release-check cache reads are now atomic across threads — the render loop always sees a coherent snapshot of status + remote version + timestamp, even if the background worker updates mid-read.
+
+**Cross-platform polish:**
+- `statusline.py` and `update.py` now handle SIGPIPE gracefully on Unix — piping output to `head` or `less` exits silently instead of dumping a BrokenPipeError traceback. Windows is unaffected (SIGPIPE doesn't exist there).
+- Pulse module's HTTP User-Agent now tracks the project version automatically instead of staying pinned to `1.0`. Anthropic server-side logs see the real client version.
+
+**Internal cleanup:**
+- Removed deprecated `_RESERVED_FILES` / `_RESERVED_SIDS` aliases — all call sites use the single `RESERVED_SIDS` constant from `shared.py`.
+- Extracted the 50 MiB transcript size cap into a named constant (`TRANSCRIPT_MAX_BYTES`) so the two call sites in `monitor.py` can't drift apart.
+- Release-check and update-apply git calls are now routed through a single entry point (`run_git`), making both the production code and its tests easier to reason about.
+- `.github/SECURITY.md` User-Agent wording synced with actual UA value.
+
+**CI:**
+- Python test matrix on Ubuntu now covers 3.8, 3.10, 3.11, 3.12 (previously only 3.8 + 3.12). Windows and macOS runners stay on 3.12. Catches regressions on intermediate Python versions.
+
+**Tests:**
+- Added regression coverage for every fix above:
+  - Windows reserved-name rejection (uppercase / lowercase / mixed-case / prefixes-still-allowed edge cases)
+  - LRU cache eviction behavior (populates cap+5 entries, asserts oldest evicted, recently-touched keys survive)
+  - SIGPIPE handler installation on Unix (skipped on Windows)
+  - Release-check worker delegation to `run_git` (asserts exactly 2 calls: fetch + show, and no direct `subprocess.run`)
+  - `_rls_snapshot` / `_rls_write` helper correctness
+- Full suite: 477 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
+
 ## v1.9.0 — 2026-04-16
 
 **New feature — Anthropic Pulse modal:**

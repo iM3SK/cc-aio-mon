@@ -216,6 +216,13 @@ def apply_update():
 
 def main():
     global GRN, YEL, RED, CYN, DIM, R
+    # SIGPIPE: silent exit when piped to head/less on Unix (no BrokenPipeError traceback)
+    if sys.platform != "win32":
+        try:
+            import signal
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+        except (AttributeError, ValueError):
+            pass
     _init_terminal()
     if sys.stdout.isatty():
         GRN = "\033[32m"; YEL = "\033[33m"; RED = "\033[31m"

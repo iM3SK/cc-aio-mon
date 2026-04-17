@@ -15,9 +15,16 @@ MIN_EPOCH = 1_577_836_800  # 2020-01-01 — reject implausible timestamps
 RESERVED_SIDS = frozenset({"rls", "stats", "pulse"})
 
 # Shared constants — single source of truth for statusline.py + monitor.py
-_SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+# Session ID: alphanumeric + underscore/hyphen, 1-128 chars.
+# Negative lookahead rejects Windows reserved device names (CON, PRN, AUX, NUL,
+# COM0-9, LPT0-9) case-insensitively. Opening CON.json on Windows opens the
+# console device, not a file — reject cross-platform for consistency.
+_SID_RE = re.compile(
+    r"^(?!(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$)[a-zA-Z0-9_\-]{1,128}$"
+)
 _ANSI_RE = re.compile(r"\033(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*\x07)")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
+TRANSCRIPT_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB — cap on per-transcript reads
 DATA_DIR_NAME = "claude-aio-monitor"
 DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
