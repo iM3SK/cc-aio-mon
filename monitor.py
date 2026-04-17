@@ -1685,10 +1685,11 @@ def render_update_modal(cols, rows):
     else:
         buf.append(f"{C_DIM}REM{R} {C_DIM}unknown{R}")
 
-    # Last check freshness (based on monotonic timestamp)
-    t_last = _rls_cache.get("t", -_RLS_TTL)
-    if t_last > 0:
-        age_s = max(0, int(time.monotonic() - t_last))
+    # Last check freshness — show only after worker has actually run.
+    # Using status gate (not "t > 0") because time.monotonic() may be small on
+    # freshly-started processes where tests set t = monotonic() - 125 < 0.
+    if _rls_cache.get("status") is not None:
+        age_s = max(0, int(time.monotonic() - _rls_cache.get("t", 0)))
         if age_s < 60:
             age_str = f"{age_s}s ago"
         elif age_s < 3600:
