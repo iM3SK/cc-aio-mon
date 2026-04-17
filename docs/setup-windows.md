@@ -141,4 +141,4 @@ py monitor.py
 
 ## CI status
 
-CC AIO MON is CI-tested on Windows with **Python 3.12** (Ubuntu tests both 3.8 and 3.12). Python 3.8 on Windows is not CI-tested.
+CC AIO MON is CI-tested on Windows with **Python 3.12** (Ubuntu tests 3.8, 3.10, 3.11, 3.12). Python 3.8 on Windows is not CI-tested.
