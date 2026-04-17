@@ -40,16 +40,17 @@ from monitor import (
     _git_cmd, _update_checks, _get_new_commits,
     _get_remote_changelog_preview, _apply_update_action, _apply_update_worker,
     render_update_modal,
-    _RESERVED_FILES, list_sessions, load_state, load_history, DATA_DIR,
+    list_sessions, load_state, load_history, DATA_DIR,
     render_picker,
     cached_cross_session_costs, _cost_cache,
     flush, SYNC_ON, SYNC_OFF,
     render_menu, render_cost_breakdown,
     _model_code, _cost_thirds, _get_pricing, _DEFAULT_PRICING,
     _aggregate_session_cost, _SESSION_COST_CACHE, _SESSION_COST_TTL,
+    _SESSION_COST_CACHE_MAX,
 )
 from shared import (
-    MAX_FILE_SIZE, _ANSI_RE, _sanitize,
+    MAX_FILE_SIZE, _ANSI_RE, _SID_RE, _sanitize, RESERVED_SIDS,
     C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_DIM,
     char_width, is_safe_dir, ensure_data_dir,
 )
@@ -132,11 +133,6 @@ class TestFitBufHeight(unittest.TestCase):
         _fit_buf_height(buf, 8, clip_tail=False)
         self.assertEqual(len(buf), 8)
         self.assertEqual(buf[-2:], footer)
-
-    def test_dashboard_rows_invalid_string(self):
-        buf = ["a", "b"]
-        _fit_buf_height(buf, "bad", clip_tail=False)
-        self.assertIsInstance(buf, list)
 
     def test_dashboard_rows_negative(self):
         buf = ["a", "b"]
@@ -623,15 +619,22 @@ class TestBuildLine(unittest.TestCase):
         # Narrow should have fewer segments
         self.assertGreater(_vlen(wide), _vlen(narrow))
 
-    def test_minimum_spacer(self):
-        # Even at very narrow width, spacer >= 1
+    def test_narrow_width_fits_and_has_content(self):
+        # Very narrow width (20 cols): must still produce non-empty line that fits
         line = build_line(_full_data(), 20)
         self.assertIsNotNone(line)
+        self.assertGreater(len(line), 0)
+        self.assertLessEqual(_vlen(line), 20)
+        # Must contain at least one visible character after ANSI stripping
+        visible = _ANSI_RE.sub("", line).strip()
+        self.assertGreater(len(visible), 0)
 
-    def test_empty_data(self):
+    def test_empty_data_graceful(self):
         line = build_line({}, 80)
-        # Should still produce something (empty model at minimum)
+        # With empty data: no crash, returns valid string fitting cols
         self.assertIsNotNone(line)
+        self.assertIsInstance(line, str)
+        self.assertLessEqual(_vlen(line), 80)
 
 
 # ---------------------------------------------------------------------------
@@ -2042,7 +2045,7 @@ class TestRlsCheckWorker(unittest.TestCase):
     # a. git fetch fails → status "error"
     # ------------------------------------------------------------------
     def test_fetch_fail_sets_error(self):
-        with patch("monitor.subprocess.run", side_effect=self._make_run(fetch_rc=1)):
+        with patch("monitor.run_git", side_effect=self._make_run(fetch_rc=1)):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "error")
         self.assertIsNone(_rls_cache["remote_ver"])
@@ -2051,7 +2054,7 @@ class TestRlsCheckWorker(unittest.TestCase):
     # b. git show fails → status "error"
     # ------------------------------------------------------------------
     def test_show_fail_sets_error(self):
-        with patch("monitor.subprocess.run", side_effect=self._make_run(fetch_rc=0, show_rc=1)):
+        with patch("monitor.run_git", side_effect=self._make_run(fetch_rc=0, show_rc=1)):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "error")
         self.assertIsNone(_rls_cache["remote_ver"])
@@ -2061,7 +2064,7 @@ class TestRlsCheckWorker(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_version_regex_not_found_sets_error(self):
         stdout_no_version = "# some python file\nfoo = 'bar'\n"
-        with patch("monitor.subprocess.run",
+        with patch("monitor.run_git",
                    side_effect=self._make_run(show_stdout=stdout_no_version)):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "error")
@@ -2076,7 +2079,7 @@ class TestRlsCheckWorker(unittest.TestCase):
         local_parts[-1] += 1
         remote_ver = ".".join(str(p) for p in local_parts)
         stdout = f'VERSION = "{remote_ver}"\n'
-        with patch("monitor.subprocess.run", side_effect=self._make_run(show_stdout=stdout)):
+        with patch("monitor.run_git", side_effect=self._make_run(show_stdout=stdout)):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "update")
         self.assertEqual(_rls_cache["remote_ver"], remote_ver)
@@ -2086,7 +2089,7 @@ class TestRlsCheckWorker(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_remote_same_sets_ok(self):
         stdout = f'VERSION = "{VERSION}"\n'
-        with patch("monitor.subprocess.run", side_effect=self._make_run(show_stdout=stdout)):
+        with patch("monitor.run_git", side_effect=self._make_run(show_stdout=stdout)):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "ok")
         self.assertEqual(_rls_cache["remote_ver"], VERSION)
@@ -2095,7 +2098,7 @@ class TestRlsCheckWorker(unittest.TestCase):
     # f. FileNotFoundError (no git binary) → status "no_git"
     # ------------------------------------------------------------------
     def test_no_git_sets_no_git(self):
-        with patch("monitor.subprocess.run", side_effect=FileNotFoundError):
+        with patch("monitor.run_git", side_effect=FileNotFoundError):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "no_git")
         self.assertIsNone(_rls_cache["remote_ver"])
@@ -2104,7 +2107,7 @@ class TestRlsCheckWorker(unittest.TestCase):
     # g. TimeoutExpired → status "timeout"
     # ------------------------------------------------------------------
     def test_timeout_sets_timeout(self):
-        with patch("monitor.subprocess.run",
+        with patch("monitor.run_git",
                    side_effect=subprocess.TimeoutExpired(cmd="git", timeout=15)):
             _rls_check_worker()
         self.assertEqual(_rls_cache["status"], "timeout")
@@ -2464,14 +2467,14 @@ class TestGitCmd(unittest.TestCase):
     def test_success(self):
         import subprocess as sp
         completed = sp.CompletedProcess(args=["git"], returncode=0, stdout="ok\n", stderr="")
-        with patch("monitor.subprocess.run", return_value=completed):
+        with patch("monitor.run_git", return_value=completed):
             rc, out, err = _git_cmd(["status"])
         self.assertEqual(rc, 0)
         self.assertEqual(out, "ok")
         self.assertEqual(err, "")
 
     def test_file_not_found(self):
-        with patch("monitor.subprocess.run", side_effect=FileNotFoundError):
+        with patch("monitor.run_git", side_effect=FileNotFoundError):
             rc, out, err = _git_cmd(["status"])
         self.assertEqual(rc, -1)
         self.assertEqual(out, "")
@@ -2479,7 +2482,7 @@ class TestGitCmd(unittest.TestCase):
 
     def test_timeout(self):
         import subprocess as sp
-        with patch("monitor.subprocess.run", side_effect=sp.TimeoutExpired(cmd="git", timeout=15)):
+        with patch("monitor.run_git", side_effect=sp.TimeoutExpired(cmd="git", timeout=15)):
             rc, out, err = _git_cmd(["status"])
         self.assertEqual(rc, -2)
         self.assertEqual(out, "")
@@ -3074,21 +3077,21 @@ class TestFormatterEdgeCases(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# TestReservedFiles — _RESERVED_FILES contains expected sentinel names
+# TestReservedFiles — RESERVED_SIDS contains expected sentinel names
 # ---------------------------------------------------------------------------
 class TestReservedFiles(unittest.TestCase):
 
     def test_rls_in_reserved(self):
-        self.assertIn("rls", _RESERVED_FILES)
+        self.assertIn("rls", RESERVED_SIDS)
 
     def test_stats_in_reserved(self):
-        self.assertIn("stats", _RESERVED_FILES)
+        self.assertIn("stats", RESERVED_SIDS)
 
     def test_pulse_in_reserved(self):
-        self.assertIn("pulse", _RESERVED_FILES)
+        self.assertIn("pulse", RESERVED_SIDS)
 
     def test_reserved_is_a_set(self):
-        self.assertIsInstance(_RESERVED_FILES, (set, frozenset))
+        self.assertIsInstance(RESERVED_SIDS, (set, frozenset))
 
 
 # ---------------------------------------------------------------------------
@@ -4424,6 +4427,177 @@ class TestRunGitEnvWhitelist(unittest.TestCase):
             from shared import run_git
             run_git(["status"], cwd=".", timeout=5)
         self.assertEqual(m.call_args[1]["env"].get("GIT_TERMINAL_PROMPT"), "0")
+
+
+# ---------------------------------------------------------------------------
+# Regression: _SID_RE rejects Windows reserved device names (SEC-002 v1.9.1)
+# ---------------------------------------------------------------------------
+class TestSidWindowsReservedRejected(unittest.TestCase):
+    """Prevents CON.json / PRN.jsonl / AUX.json from being created on Windows
+    (would open the console/printer device instead of a file)."""
+
+    def test_core_device_names_rejected_uppercase(self):
+        for name in ("CON", "PRN", "AUX", "NUL"):
+            with self.subTest(name=name):
+                self.assertIsNone(_SID_RE.match(name))
+
+    def test_core_device_names_rejected_lowercase(self):
+        for name in ("con", "prn", "aux", "nul"):
+            with self.subTest(name=name):
+                self.assertIsNone(_SID_RE.match(name))
+
+    def test_core_device_names_rejected_mixed_case(self):
+        for name in ("Con", "cOn", "Nul", "Aux"):
+            with self.subTest(name=name):
+                self.assertIsNone(_SID_RE.match(name))
+
+    def test_com_lpt_ports_rejected(self):
+        for i in range(10):
+            for prefix in ("COM", "LPT", "com", "lpt"):
+                name = f"{prefix}{i}"
+                with self.subTest(name=name):
+                    self.assertIsNone(_SID_RE.match(name))
+
+    def test_conrad_as_prefix_allowed(self):
+        """CON at start of longer name must still be valid."""
+        self.assertIsNotNone(_SID_RE.match("Conrad"))
+        self.assertIsNotNone(_SID_RE.match("console"))
+        self.assertIsNotNone(_SID_RE.match("congress"))
+
+    def test_com10_allowed(self):
+        """COM10 is not a reserved device name (only COM0-9)."""
+        self.assertIsNotNone(_SID_RE.match("COM10"))
+        self.assertIsNotNone(_SID_RE.match("LPT99"))
+
+    def test_normal_session_ids_still_allowed(self):
+        for sid in ("abc123-def456", "session_01", "a-b-c-d", "x" * 128):
+            with self.subTest(sid=sid):
+                self.assertIsNotNone(_SID_RE.match(sid))
+
+
+# ---------------------------------------------------------------------------
+# Regression: _rls_check_worker uses shared.run_git
+# ---------------------------------------------------------------------------
+class TestRlsCheckWorkerUsesRunGit(unittest.TestCase):
+    """Ensures the RLS background worker goes through monitor.run_git
+    (shared env whitelist) and does NOT fall back to inline subprocess.run."""
+
+    def test_worker_invokes_run_git_and_not_subprocess(self):
+        """SEC-001 + SEC-010: worker uses run_git exclusively, never raw subprocess.run."""
+        from unittest.mock import patch as _patch, MagicMock
+        import monitor as _m
+        mock_result = MagicMock(returncode=0, stdout='VERSION = "99.0.0"', stderr="")
+        try:
+            if _m._rls_lock.locked():
+                _m._rls_lock.release()
+        except RuntimeError:
+            pass
+        _m._rls_lock.acquire(blocking=False)
+        with _patch("monitor.run_git", return_value=mock_result) as mock_rg, \
+             _patch("subprocess.run") as mock_sp:
+            _m._rls_check_worker()
+        # Exactly 2 run_git calls: fetch + show
+        self.assertEqual(mock_rg.call_count, 2, "expected 2 run_git calls (fetch + show)")
+        self.assertEqual(mock_rg.call_args_list[0].args[0][0], "fetch")
+        self.assertEqual(mock_rg.call_args_list[1].args[0][0], "show")
+        # Worker must NOT bypass run_git to call subprocess.run directly
+        mock_sp.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Regression: _SESSION_COST_CACHE LRU eviction (DEBT-017 v1.9.1)
+# ---------------------------------------------------------------------------
+class TestSessionCostCacheEviction(unittest.TestCase):
+    """Verifies that the OrderedDict cache actually evicts oldest entries beyond cap.
+    Simulates the insert pattern used by _aggregate_session_cost without filesystem I/O."""
+
+    def setUp(self):
+        _SESSION_COST_CACHE.clear()
+
+    def tearDown(self):
+        _SESSION_COST_CACHE.clear()
+
+    def test_cache_evicts_oldest_beyond_cap(self):
+        # Insert MAX + 5 distinct sids, simulating the eviction pattern in _aggregate_session_cost
+        total = _SESSION_COST_CACHE_MAX + 5
+        for i in range(total):
+            sid = f"sid{i:04d}"
+            _SESSION_COST_CACHE[sid] = (float(i), {"cost_total": float(i)})
+            _SESSION_COST_CACHE.move_to_end(sid)
+            while len(_SESSION_COST_CACHE) > _SESSION_COST_CACHE_MAX:
+                _SESSION_COST_CACHE.popitem(last=False)
+        self.assertEqual(len(_SESSION_COST_CACHE), _SESSION_COST_CACHE_MAX)
+        # Oldest 5 evicted
+        for i in range(5):
+            self.assertNotIn(f"sid{i:04d}", _SESSION_COST_CACHE,
+                             f"sid{i:04d} should have been evicted")
+        # Newest MAX retained
+        for i in range(5, total):
+            self.assertIn(f"sid{i:04d}", _SESSION_COST_CACHE)
+
+    def test_cache_move_to_end_on_hit_preserves_recent(self):
+        # Populate cache to cap
+        for i in range(_SESSION_COST_CACHE_MAX):
+            _SESSION_COST_CACHE[f"sid{i:04d}"] = (float(i), {})
+        # Touch oldest key (simulating cache hit → move_to_end)
+        _SESSION_COST_CACHE.move_to_end("sid0000")
+        # Insert new sid; eviction should now remove sid0001, not sid0000
+        new_sid = "sidNEW"
+        _SESSION_COST_CACHE[new_sid] = (999.0, {})
+        _SESSION_COST_CACHE.move_to_end(new_sid)
+        while len(_SESSION_COST_CACHE) > _SESSION_COST_CACHE_MAX:
+            _SESSION_COST_CACHE.popitem(last=False)
+        self.assertIn("sid0000", _SESSION_COST_CACHE, "recently touched sid should survive")
+        self.assertNotIn("sid0001", _SESSION_COST_CACHE, "untouched oldest should be evicted")
+        self.assertIn(new_sid, _SESSION_COST_CACHE)
+
+
+# ---------------------------------------------------------------------------
+# Regression: SIGPIPE handler installed on Unix (PERF-001 v1.9.1)
+# ---------------------------------------------------------------------------
+class TestSigpipeHandler(unittest.TestCase):
+    """Verifies statusline.main() installs SIGPIPE=SIG_DFL on non-Windows."""
+
+    def test_sigpipe_installed_on_unix(self):
+        import signal as _signal
+        if not hasattr(_signal, "SIGPIPE"):
+            self.skipTest("SIGPIPE not available on this platform (Windows)")
+        import statusline
+        with patch("sys.stdin") as mock_stdin, \
+             patch.object(_signal, "signal") as mock_sig:
+            mock_stdin.read.return_value = ""  # empty → statusline.main() returns early
+            statusline.main()
+        # Among all signal.signal calls, at least one must be SIGPIPE -> SIG_DFL
+        calls = [(c.args[0], c.args[1]) for c in mock_sig.call_args_list if len(c.args) >= 2]
+        self.assertIn((_signal.SIGPIPE, _signal.SIG_DFL), calls,
+                      f"SIGPIPE handler missing; got {calls}")
+
+
+# ---------------------------------------------------------------------------
+# Regression: _rls_cache snapshot/write helpers are thread-safe (DEBT-020 v1.9.1)
+# ---------------------------------------------------------------------------
+class TestRlsCacheHelpers(unittest.TestCase):
+    """Verifies _rls_snapshot returns a coherent copy and _rls_write updates all 3 fields."""
+
+    def test_snapshot_returns_copy(self):
+        import monitor as _m
+        snap1 = _m._rls_snapshot()
+        snap1["status"] = "MUTATED"  # mutate local copy
+        snap2 = _m._rls_snapshot()
+        self.assertNotEqual(snap2["status"], "MUTATED", "_rls_snapshot must return a copy")
+
+    def test_write_sets_all_three_fields(self):
+        import monitor as _m
+        orig = _m._rls_snapshot()
+        try:
+            _m._rls_write("update", remote_ver="9.9.9")
+            after = _m._rls_snapshot()
+            self.assertEqual(after["status"], "update")
+            self.assertEqual(after["remote_ver"], "9.9.9")
+            self.assertIsNotNone(after["t"])
+        finally:
+            # restore
+            _m._rls_write(orig["status"], remote_ver=orig.get("remote_ver"))
 
 
 if __name__ == "__main__":

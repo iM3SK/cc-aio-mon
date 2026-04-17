@@ -259,6 +259,13 @@ def build_line(data, cols, brn=None):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    # SIGPIPE: silent exit when piped to head/less on Unix (no BrokenPipeError traceback)
+    if sys.platform != "win32":
+        try:
+            import signal
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+        except (AttributeError, ValueError):
+            pass
     # Force UTF-8 on Windows (cp1250/cp1252 can't handle unicode box-drawing)
     try:
         is_utf8 = sys.stdout.encoding and codecs.lookup(sys.stdout.encoding).name == "utf-8"
@@ -321,14 +328,11 @@ def _load_history_for_rates(sid, n=120):
         return []
 
 
-_RESERVED_SIDS = RESERVED_SIDS  # backwards-compat alias
-
-
 def write_shared_state(data: dict):
     sid = str(data.get("session_id") or "default")
     if not _SID_RE.match(sid):
         sid = "default"
-    if sid in _RESERVED_SIDS:
+    if sid in RESERVED_SIDS:
         return
     if not ensure_data_dir(DATA_DIR):
         return

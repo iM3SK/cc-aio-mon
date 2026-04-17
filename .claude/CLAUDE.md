@@ -53,6 +53,10 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
 - `transcript_path` from statusline JSON must be containment-validated (inside ~/.claude/projects/, no symlinks) before open
 - All subprocess calls use `shared.run_git` with minimal env whitelist (blocks GIT_SSH_COMMAND / LD_PRELOAD injection)
 
+## Audit
+
+Audit postupy a audit logs live in `docs/audits/` (local-only, gitignored). Start with `AUDIT-PLAN.md`.
+
 ## Git Commit Policy
 
 **SAFE TO COMMIT** (tracked source + docs):
