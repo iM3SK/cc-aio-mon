@@ -14,12 +14,20 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.8", "3.12"]
+        python-version: ["3.8", "3.10", "3.11", "3.12"]
         exclude:
           - os: windows-latest
             python-version: "3.8"
           - os: macos-latest
             python-version: "3.8"
+          - os: windows-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.11"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -29,4 +37,5 @@ jobs:
         run: python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py','statusline.py','monitor.py','update.py','pulse.py')]"
       - name: Run tests
         run: python tests.py
-    # Ubuntu: 3.8 + 3.12 for compat. Windows + macOS: 3.12 only (3.8 not available on runners)
+    # Ubuntu: 3.8 + 3.10 + 3.11 + 3.12 for full compat coverage.
+    # Windows + macOS: 3.12 only (older versions not reliably available on GitHub runners).

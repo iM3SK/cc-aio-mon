@@ -49,7 +49,7 @@ PROBE_URL = "https://api.anthropic.com/v1/messages"  # expect 401/405 without au
 HTTP_TIMEOUT = 5.0
 PING_TIMEOUT = 4.0  # covers TLS handshake + HTTP round-trip
 FETCH_INTERVAL = 30.0  # seconds between background fetches
-USER_AGENT = "cc-aio-mon-pulse/1.0 (+https://github.com/iM3SK/cc-aio-mon)"
+USER_AGENT = "cc-aio-mon-pulse/1.9.1 (+https://github.com/iM3SK/cc-aio-mon)"  # keep in sync with monitor.VERSION
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB cap on status.json response
 
 # Persistence + cleanup

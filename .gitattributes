@@ -1,0 +1,16 @@
+# Line ending normalization — prevents CRLF pollution across platforms
+* text=auto eol=lf
+
+# Shell scripts must stay LF (run on Linux/macOS/WSL)
+*.sh text eol=lf
+
+# PowerShell prefers CRLF on Windows
+*.ps1 text eol=crlf
+
+# Binary files — no normalization
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pdf binary
+*.zip binary
