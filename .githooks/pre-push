@@ -36,23 +36,23 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
     # Block obvious credential patterns in diff content (heuristic, not exhaustive)
     diff_text=$(git diff "$range" -- '*.py' '*.sh' '*.ps1' '*.md' '*.yml' '*.yaml' '*.json' 2>/dev/null || true)
-    if echo "$diff_text" | grep -qE 'sk-ant-[a-zA-Z0-9_-]{20,}'; then
+    if echo "$diff_text" | grep -qE -- 'sk-ant-[a-zA-Z0-9_-]{20,}'; then
         echo "BLOCKED: Anthropic API key pattern (sk-ant-*) in diff" >&2
         fail=1
     fi
-    if echo "$diff_text" | grep -qE 'sk-proj-[a-zA-Z0-9_-]{20,}'; then
+    if echo "$diff_text" | grep -qE -- 'sk-proj-[a-zA-Z0-9_-]{20,}'; then
         echo "BLOCKED: OpenAI API key pattern (sk-proj-*) in diff" >&2
         fail=1
     fi
-    if echo "$diff_text" | grep -qE 'AKIA[0-9A-Z]{16}'; then
+    if echo "$diff_text" | grep -qE -- 'AKIA[0-9A-Z]{16}'; then
         echo "BLOCKED: AWS Access Key ID pattern in diff" >&2
         fail=1
     fi
-    if echo "$diff_text" | grep -qE 'ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{40,}'; then
+    if echo "$diff_text" | grep -qE -- 'ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{40,}'; then
         echo "BLOCKED: GitHub Personal Access Token pattern in diff" >&2
         fail=1
     fi
-    if echo "$diff_text" | grep -qE '-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'; then
+    if echo "$diff_text" | grep -qE -- '-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'; then
         echo "BLOCKED: Private key block in diff" >&2
         fail=1
     fi
