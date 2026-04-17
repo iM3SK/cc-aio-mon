@@ -107,3 +107,16 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 
 **`python3` not found after brew install**
 - Run `brew link python` or use the full path: `/opt/homebrew/bin/python3`.
+
+## Outbound network
+
+The Anthropic Pulse worker (`p` in the dashboard) performs unauthenticated HTTPS requests every 30 s to:
+
+- `status.claude.com` — public status JSON
+- `api.anthropic.com` — liveness probe (expects 401/405)
+
+No credentials, no user data, no request body is sent. If you are behind a restrictive firewall or prefer zero outbound traffic, disable the worker:
+
+```bash
+CC_AIO_MON_NO_PULSE=1 python3 monitor.py
+```

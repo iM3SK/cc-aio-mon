@@ -3,7 +3,7 @@
 ## Constraints
 
 - **Stdlib only** — no pip installs, no node_modules.
-- **Four runtime files** — `statusline.py`, `monitor.py`, `shared.py`, and `update.py`. No additional runtime modules (test files like `tests.py` are not runtime).
+- **Five runtime files** — `statusline.py`, `monitor.py`, `shared.py`, `update.py`, and `pulse.py`. No additional runtime modules (test files like `tests.py` are not runtime).
 - **Cross-platform** — changes must work on Windows, macOS, and Linux.
 
 ## Before submitting
@@ -17,10 +17,15 @@
 
 2. Verify all files compile cleanly:
    ```bash
-   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py', 'statusline.py', 'monitor.py', 'update.py')]"
+   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py', 'statusline.py', 'monitor.py', 'update.py', 'pulse.py')]"
    ```
 
 3. Test manually on at least one platform with a live Claude Code session.
+
+4. **Activate the pre-push hook (one-time setup per clone)** — scans outgoing commits for obvious secrets (`sk-ant-*`, `sk-proj-*`, `AKIA*`, `ghp_*`, PEM blocks) and sensitive filenames (`*.pem`, `*.env`, `credentials.json`):
+   ```bash
+   git config core.hooksPath .githooks
+   ```
 
 ## What to keep in sync
 

@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-# CC AIO MON — Self-Update Script
-# Usage: python3 update.py           (read-only check)
-#        python3 update.py --apply   (fetch + pull + verify)
-# Cross-platform: Windows (py), macOS/Linux (python3).
-# Stdlib only.
+"""update.py — self-update checker for CC AIO MON.
+
+Usage: python3 update.py           (read-only check)
+       python3 update.py --apply   (fetch + pull + verify)
+
+Safe git pull --ff-only with guard rails: detects uncommitted changes,
+branch divergence, remote version regression. Cross-platform (Windows: py,
+macOS/Linux: python3). Stdlib only.
+"""
 
 import argparse
 import codecs
+import datetime
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
-from shared import VERSION_RE, _sanitize
+from shared import VERSION_RE, _sanitize, run_git as _shared_run_git, extract_changelog_entry
 
 
 # ---------- ANSI colors (Windows VT enable) ----------
@@ -57,18 +61,7 @@ MIN_PYTHON = (3, 8)
 
 def run_git(args, capture=True, timeout=30):
     """Run git command in repo root. Returns CompletedProcess."""
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    return subprocess.run(
-        ["git"] + args,
-        cwd=REPO_ROOT,
-        capture_output=capture,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        env=env,
-    )
+    return _shared_run_git(args, cwd=REPO_ROOT, timeout=timeout)
 
 
 def check_python_version():
@@ -164,16 +157,27 @@ def get_remote_changelog_entry(version):
     r = run_git(["show", "origin/main:CHANGELOG.md"])
     if r.returncode != 0:
         return None
-    pattern = rf"## v{re.escape(version)}\b.*?(?=\n## v|\Z)"
-    m = re.search(pattern, r.stdout, re.DOTALL)
-    return m.group(0).strip() if m else None
+    entry = extract_changelog_entry(r.stdout, version)
+    return entry if entry else None
 
 
 def apply_update():
     hdr("Applying update")
+
+    # Rollback point — created before pull so user can revert via `git reset --hard <tag>`
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    rollback_tag = f"pre-update-{ts}"
+    tr = run_git(["tag", rollback_tag])
+    if tr.returncode == 0:
+        ok(f"Rollback tag: {rollback_tag}")
+        note(f"  Recover with: git reset --hard {rollback_tag}")
+    else:
+        warn(f"Could not create rollback tag (continuing): {_sanitize(tr.stderr.strip())}")
+
     r = run_git(["pull", "--ff-only", "origin", "main"])
     if r.returncode != 0:
         err(f"git pull failed: {_sanitize(r.stderr or r.stdout or 'unknown error')}")
+        note(f"Revert with: git reset --hard {rollback_tag}")
         sys.exit(1)
     if r.stdout.strip():
         for line in r.stdout.strip().split("\n"):
@@ -187,7 +191,7 @@ def apply_update():
         warn(f"Could not verify new VERSION: {e}")
 
     # Syntax check — catch broken updates before user runs monitor
-    py_files = ["monitor.py", "statusline.py", "shared.py", "update.py"]
+    py_files = ["monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py"]
     bad = []
     for f in py_files:
         fp = REPO_ROOT / f
@@ -198,6 +202,7 @@ def apply_update():
                 bad.append(f)
     if bad:
         warn(f"Syntax errors in: {', '.join(bad)} — update may be broken")
+        note(f"Revert with: git reset --hard {rollback_tag}")
     else:
         ok(f"Syntax check passed ({len(py_files)} files)")
 
