@@ -271,7 +271,7 @@ def _fetch_summary():
     """Fetch status.claude.com summary.json. Returns (data, error_tag)."""
     req = urllib.request.Request(SUMMARY_URL, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # nosec B310 — SUMMARY_URL is a hardcoded HTTPS constant, no user input
             # Guard against oversized responses
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
@@ -309,7 +309,7 @@ def _ping_api():
     )
     start = time.monotonic()
     try:
-        resp = urllib.request.urlopen(req, timeout=PING_TIMEOUT)
+        resp = urllib.request.urlopen(req, timeout=PING_TIMEOUT)  # nosec B310 — PROBE_URL is a hardcoded HTTPS constant, no user input
         resp.close()
     except urllib.error.HTTPError:
         # Any HTTP status = endpoint responded (401/405/429 all fine as liveness signal)
