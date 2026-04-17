@@ -126,4 +126,4 @@ CC_AIO_MON_NO_PULSE=1 python3 monitor.py
 
 ## CI status
 
-CC AIO MON is CI-tested on **Ubuntu** with **Python 3.8 and 3.12**.
+CC AIO MON is CI-tested on **Ubuntu** with **Python 3.8, 3.10, 3.11, and 3.12**.
