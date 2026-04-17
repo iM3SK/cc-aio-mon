@@ -12,7 +12,7 @@ What should change and how it should work.
 
 **Constraints to keep in mind**
 - Stdlib only (no pip packages)
-- Four runtime files (`statusline.py`, `monitor.py`, `shared.py`, `update.py`)
+- Five runtime files (`statusline.py`, `monitor.py`, `shared.py`, `update.py`, `pulse.py`)
 - Cross-platform (Windows, macOS, Linux)
 
 **Alternatives considered**

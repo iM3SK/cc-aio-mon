@@ -2,18 +2,24 @@
 """Shared helpers and rate calculation for monitor.py and statusline.py."""
 
 import os
+import pathlib
 import re
 import stat as _stat_mod
 import sys
+import tempfile
 import unicodedata
 
 MIN_EPOCH = 1_577_836_800  # 2020-01-01 — reject implausible timestamps
+
+# Session IDs / file stems reserved for internal use. Never valid session names.
+RESERVED_SIDS = frozenset({"rls", "stats", "pulse"})
 
 # Shared constants — single source of truth for statusline.py + monitor.py
 _SID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 _ANSI_RE = re.compile(r"\033(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*\x07)")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
 DATA_DIR_NAME = "claude-aio-monitor"
+DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # ANSI — Nord truecolor (shared palette for statusline.py + monitor.py)
@@ -27,6 +33,19 @@ C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
 C_CYN = E + "38;2;136;192;208m"
 C_WHT = E + "38;2;216;222;233m"
 C_DIM = E + "38;2;76;86;106m"
+
+
+_CONTEXT_SUFFIX_RE = re.compile(r"\s*\((\d+\w?)\s*context\)")
+
+
+def strip_context_suffix(name):
+    """Remove '(Nk context)' / '(NM context)' entirely. 'Opus 4.7 (1M context)' -> 'Opus 4.7'."""
+    return _CONTEXT_SUFFIX_RE.sub("", name).strip()
+
+
+def compact_context_suffix(name):
+    """Compact to trailing unit. 'Opus 4.7 (1M context)' -> 'Opus 4.7 1M'."""
+    return _CONTEXT_SUFFIX_RE.sub(r" \1", name).strip()
 
 
 def _num(v, default=0):
@@ -121,6 +140,52 @@ def ensure_data_dir(d):
         except OSError:
             pass
     return True
+
+
+_CHANGELOG_ENTRY_RE_TEMPLATE = r"## v{}\b.*?(?=\n## v|\Z)"
+
+
+def extract_changelog_entry(text, version, max_lines=None):
+    """Extract single '## v{version}' section from CHANGELOG text."""
+    pattern = _CHANGELOG_ENTRY_RE_TEMPLATE.format(re.escape(version))
+    m = re.search(pattern, text, re.DOTALL)
+    if not m:
+        return ""
+    entry = m.group(0).strip()
+    if max_lines is not None:
+        lines = entry.splitlines()
+        if len(lines) > max_lines:
+            entry = "\n".join(lines[:max_lines])
+    return entry
+
+
+# Minimal env for git subprocess — drops any injected GIT_SSH_COMMAND, LD_PRELOAD,
+# HTTP(S)_PROXY, GIT_EXEC_PATH etc. Keeps only what git genuinely needs.
+_GIT_ENV_WHITELIST = (
+    "PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "SystemRoot",
+    "TEMP", "TMP", "TMPDIR",
+    "LANG", "LC_ALL", "LC_CTYPE",
+    "APPDATA", "LOCALAPPDATA",  # git-for-windows config lookup
+)
+
+
+def _git_env():
+    src = os.environ
+    env = {k: src[k] for k in _GIT_ENV_WHITELIST if k in src}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def run_git(args, cwd, timeout=15):
+    """Safe git invocation with minimal env whitelist.
+    Returns subprocess.CompletedProcess. Raises FileNotFoundError if git missing."""
+    import subprocess
+    return subprocess.run(
+        ["git"] + list(args),
+        cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        timeout=timeout, env=_git_env(),
+    )
 
 
 def calc_rates(hist):

@@ -125,6 +125,20 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 New-Item -Path "$env:USERPROFILE\.claude\settings.json" -ItemType File -Force
 ```
 
+## Outbound network
+
+The Anthropic Pulse worker (`p` in the dashboard) performs unauthenticated HTTPS requests every 30 s to:
+
+- `status.claude.com` — public status JSON
+- `api.anthropic.com` — liveness probe (expects 401/405)
+
+No credentials, no user data, no request body is sent. If you are behind a restrictive firewall or prefer zero outbound traffic, disable the worker:
+
+```powershell
+$env:CC_AIO_MON_NO_PULSE = "1"
+py monitor.py
+```
+
 ## CI status
 
 CC AIO MON is CI-tested on Windows with **Python 3.12** (Ubuntu tests both 3.8 and 3.12). Python 3.8 on Windows is not CI-tested.
