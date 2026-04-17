@@ -21,16 +21,18 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime
 
 from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur,
-                    char_width, is_safe_dir, ensure_data_dir,
-                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME, VERSION_RE,
+                    char_width, is_safe_dir,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, VERSION_RE,
+                    RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
+                    extract_changelog_entry,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
 
@@ -66,7 +68,7 @@ def _parse_ts(ts_str):
 def scan_transcript_stats(period="all", ttl=30.0):
     """Scan CC session transcripts, return (models, overview) tuple.
 
-    models: {model_id: {"input": int, "output": int, "calls": int}}
+    models: {model_id: {"input": int, "output": int, "cache_read": int, "cache_write": int, "calls": int}}
     overview: {"sessions": int, "active_days": set, "longest_dur_ms": float,
                "first_date": str, "daily_tokens": {date_str: int}}
     """
@@ -151,17 +153,21 @@ def scan_transcript_stats(period="all", ttl=30.0):
                     u = msg["usage"]
                     inp = int(_num(u.get("input_tokens", 0)))
                     out = int(_num(u.get("output_tokens", 0)))
+                    cr = int(_num(u.get("cache_read_input_tokens", 0)))
+                    cw = int(_num(u.get("cache_creation_input_tokens", 0)))
                     if model not in models:
-                        models[model] = {"input": 0, "output": 0, "calls": 0}
+                        models[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
                     models[model]["input"] += inp
                     models[model]["output"] += out
+                    models[model]["cache_read"] += cr
+                    models[model]["cache_write"] += cw
                     models[model]["calls"] += 1
 
                     # Track active days and daily tokens
                     if ts > 0:
                         day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
                         active_days.add(day)
-                        daily_tokens[day] = daily_tokens.get(day, 0) + inp + out
+                        daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
         except (OSError, UnicodeDecodeError):
             continue
 
@@ -302,15 +308,20 @@ VERSION = "1.9.0"
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
-try:
-    WARN_BRN = float(os.environ.get("CLAUDE_WARN_BRN", "1.00"))
-except (ValueError, TypeError):
-    WARN_BRN = 1.00
+def _env_float(name, default):
+    v = os.environ.get(name, "").strip()
+    try:
+        return float(v) if v else default
+    except ValueError:
+        return default
 
 
-def vlen(s):
-    """Visible length of string (ignoring ANSI escape codes). CJK-aware."""
-    return sum(char_width(ch) for ch in _ANSI_RE.sub("", s))
+WARN_BRN = _env_float("CLAUDE_WARN_BRN", 3.0)
+WARN_PCT = _env_float("CLAUDE_STATUS_WARN", 50.0)
+CRIT_PCT = _env_float("CLAUDE_STATUS_CRIT", 80.0)
+
+# Reset-countdown color flip — 50% of window remaining (NOT the warn threshold)
+RESET_HALFWAY_PCT = 50.0
 
 
 def truncate(s, maxw):
@@ -347,7 +358,6 @@ def truncate(s, maxw):
 # ---------------------------------------------------------------------------
 # Characters
 # ---------------------------------------------------------------------------
-H = "\u2500"   # ─
 BF = "\u2588"  # █
 SH = "\u2591"  # ░
 
@@ -381,9 +391,9 @@ def mkbar(pct, color=None, show_pct=True):
     """Returns colored [████░░░░░]  XX.X%"""
     pct = max(0.0, min(100.0, pct))
     if color is None:
-        if pct >= 80:
+        if pct >= CRIT_PCT:
             color = C_RED
-        elif pct >= 50:
+        elif pct >= WARN_PCT:
             color = C_YEL
         else:
             color = C_GRN
@@ -401,8 +411,8 @@ def mkbar(pct, color=None, show_pct=True):
 
 
 def _limit_color(pct):
-    """Dynamic color for rate limit metrics — yellow base, red >= 80%."""
-    if pct >= 80:
+    """Dynamic color for rate limit metrics — yellow base, red >= CRIT_PCT."""
+    if pct >= CRIT_PCT:
         return C_RED
     return C_YEL
 
@@ -415,7 +425,7 @@ def _reset_color(resets_epoch, window_secs):
     if remaining <= 0:
         return C_GRN  # just reset
     pct_remaining = remaining / window_secs * 100
-    if pct_remaining > 50:
+    if pct_remaining > RESET_HALFWAY_PCT:
         return C_RED
     if pct_remaining > 20:
         return C_YEL
@@ -425,9 +435,9 @@ def _reset_color(resets_epoch, window_secs):
 # ---------------------------------------------------------------------------
 # Fixed-range bar for rate/cost metrics
 # ---------------------------------------------------------------------------
-BRN_MAX = 2.0    # $/min ceiling
-CTR_MAX = 5.0    # %/min ceiling
-CST_MAX = 200.0  # $ ceiling
+BRN_MAX = _env_float("CC_MON_BRN_MAX", 10.0)   # $/min ceiling
+CTR_MAX = _env_float("CC_MON_CTR_MAX", 10.0)   # %/min ceiling
+CST_MAX = _env_float("CC_MON_CST_MAX", 1000.0) # $ ceiling
 
 
 # ---------------------------------------------------------------------------
@@ -465,9 +475,6 @@ _rls_cache = {"t": -_RLS_TTL, "status": None, "remote_ver": None}
 _rls_lock = threading.Lock()
 _rls_blink_last = 0.0
 _rls_blink_on = True
-_VERSION_RE = VERSION_RE  # alias from shared.py
-
-
 def _parse_version(ver_str):
     """Parse version string to comparable tuple, ignoring non-numeric suffixes."""
     parts = []
@@ -492,7 +499,7 @@ def _rls_check_worker():
         if r.returncode != 0:
             _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
             return
-        m = _VERSION_RE.search(r.stdout)
+        m = VERSION_RE.search(r.stdout)
         if not m:
             _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
             return
@@ -502,7 +509,7 @@ def _rls_check_worker():
         if remote_t > local_t:
             status = "update"
         else:
-            status = "ok"
+            status = "ok"  # equal or local-ahead — both appear as up to date
         # Atomic swap — safe under GIL
         new = {"t": time.monotonic(), "status": status, "remote_ver": remote_ver}
         _rls_cache.update(new)
@@ -514,26 +521,6 @@ def _rls_check_worker():
         _rls_cache.update({"t": time.monotonic(), "status": "error", "remote_ver": None})
     finally:
         _rls_lock.release()
-        # Write RLS status to temp file for statusline.py
-        fd = None
-        try:
-            if ensure_data_dir(DATA_DIR):
-                rls_file = DATA_DIR / "rls.json"
-                rls_data = {"status": _rls_cache.get("status"), "remote_ver": _rls_cache.get("remote_ver")}
-                fd = tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".tmp", delete=False, mode="w", encoding="utf-8")
-                fd.write(json.dumps(rls_data))
-                fd.close()
-                pathlib.Path(fd.name).replace(rls_file)
-        except OSError:
-            if fd is not None:
-                try:
-                    fd.close()
-                except OSError:
-                    pass
-                try:
-                    os.unlink(fd.name)
-                except OSError:
-                    pass
 
 
 def _rls_maybe_check():
@@ -572,6 +559,8 @@ def calc_cross_session_costs():
     for jl in DATA_DIR.glob("*.jsonl"):
         sid = jl.stem
         if not _SID_RE.match(sid):
+            continue
+        if sid in _RESERVED_FILES:
             continue
         try:
             st = jl.stat()
@@ -629,46 +618,7 @@ def cached_cross_session_costs(ttl=30.0):
         return _cost_cache["today"], _cost_cache["week"]
     today, week = calc_cross_session_costs()
     _cost_cache.update({"t": now, "today": today, "week": week})
-    # Write model stats to temp file for statusline.py (piggyback on cost TTL)
-    _write_shared_stats()
     return today, week
-
-
-def _write_shared_stats():
-    """Write model usage percentages to temp file for statusline.py."""
-    if not is_safe_dir(DATA_DIR):
-        return
-    fd = None
-    try:
-        models, _ = scan_transcript_stats(period="all", ttl=30.0)
-        if not models:
-            return
-        total = sum(m.get("input", 0) + m.get("output", 0) for m in models.values())
-        if total <= 0:
-            return
-        pcts = {}
-        for mid, m in models.items():
-            tokens = m.get("input", 0) + m.get("output", 0)
-            pct = round(tokens / total * 100, 1)
-            label = _model_label(mid)
-            pcts[label] = pct
-        stats_file = DATA_DIR / "stats.json"
-        fd = tempfile.NamedTemporaryFile(
-            dir=DATA_DIR, suffix=".tmp", delete=False, mode="w", encoding="utf-8"
-        )
-        fd.write(json.dumps({"models": pcts}))
-        fd.close()
-        pathlib.Path(fd.name).replace(stats_file)
-    except (OSError, TypeError, ValueError):
-        if fd is not None:
-            try:
-                fd.close()
-            except OSError:
-                pass
-            try:
-                os.unlink(fd.name)
-            except OSError:
-                pass
 
 
 # ---------------------------------------------------------------------------
@@ -681,10 +631,7 @@ def sep(w):
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
-DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
-
-
-_RESERVED_FILES = {"rls", "stats"}  # non-session JSON files written by monitor
+_RESERVED_FILES = RESERVED_SIDS  # backwards-compat alias — non-session files in data dir
 
 
 def list_sessions():
@@ -724,10 +671,21 @@ def list_sessions():
             mt = st.st_mtime
             age = now - mt
             d = json.loads(f.read_text(encoding="utf-8"))
+            # Skip snapshots without usable model info (test artifacts / incomplete writes)
+            display_name = _sanitize(d.get("model", {}).get("display_name", "")).strip()
+            if not display_name:
+                # Cleanup: dead artifact older than 1 hour
+                if (now - mt) > 3600:
+                    try:
+                        f.unlink()
+                        f.with_suffix(".jsonl").unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                continue
             sessions.append({
                 "id": sid, "mtime": mt, "age": age,
                 "stale": age > STALE_THRESHOLD,
-                "model": _sanitize(d.get("model", {}).get("display_name", "?")),
+                "model": display_name,
                 "session_name": _sanitize(d.get("session_name", "")),
                 "cwd": _sanitize(d.get("cwd", "")),
             })
@@ -945,7 +903,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # ── CTX ─────────────────────────────────────────────────
     ctx_used = int(ctx_total * ctx_pct / 100) if ctx_total else 0
     buf.append(f"{c(C_CYN)}{B}CTX{R} {mkbar(ctx_pct, c(C_CYN))}")
-    warn = f" {c(C_RED)}{B}!CTX>80%{R}" if ctx_pct >= 80 else ""
+    warn = f" {c(C_RED)}{B}!CTX>{int(CRIT_PCT)}%{R}" if ctx_pct >= CRIT_PCT else ""
     if any([inp, out]):
         buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn} {C_DIM}INP:{R} {c(C_CYN)}{f_tok(inp)}{R} {C_DIM}OUT:{R} {c(C_CYN)}{f_tok(out)}{R}")
     else:
@@ -1001,15 +959,15 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             age_s = "?"
     else:
         age_s = "?"
-    # ── BRN — burn rate bar (0 — 2.0 $/min) ──────────────────
+    # ── BRN — burn rate bar (scales to BRN_MAX $/min) ──────
     brn_pct = min(100, cpm / BRN_MAX * 100) if cpm and cpm > 0 else 0
     buf.append(f"{c(C_ORN)}{B}BRN{R} {mkbar(brn_pct, c(C_ORN))}")
     buf.append(f"    {C_DIM}RTE:{R} {c(C_ORN)}{brn_val}{R}")
-    # ── CTR — context rate bar (0 — 5.0 %/min) ─────────────
+    # ── CTR — context rate bar (scales to CTR_MAX %/min) ───
     ctr_pct = min(100, xpm / CTR_MAX * 100) if xpm and xpm > 0 else 0
     buf.append(f"{c(C_YEL)}{B}CTR{R} {mkbar(ctr_pct, c(C_YEL))}")
     buf.append(f"    {C_DIM}RTE:{R} {c(C_YEL)}{ctr_val}{R}")
-    # ── CST — session cost bar (0 — $200) ────────────────────
+    # ── CST — session cost bar (scales to CST_MAX $) ───────
     cst_pct = min(100, usd / CST_MAX * 100) if usd > 0 else 0
     buf.append(f"{c(C_ORN)}{B}CST{R} {mkbar(cst_pct, c(C_ORN))}")
     buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{f_cost(usd)}{R}")
@@ -1103,9 +1061,12 @@ def render_legend(cols, rows):
     cp = max(0, SW - 14)
     buf.append(f"{BG_BAR}{C_WHT}{B}COST BREAKDOWN{R}{BG_BAR}{' ' * cp}{R}")
     buf.append(sep(SW))
+    buf.append(f"{C_DIM} LAST REQUEST — current message tokens{R}")
     buf.append(f"{C_ORN}INP{R} {C_DIM}Input Cost{R} {C_ORN}OUT{R} {C_DIM}Output Cost{R}")
     buf.append(f"{C_ORN}CRD{R} {C_DIM}Cache Read Cost{R} {C_ORN}CWR{R} {C_DIM}Cache Write Cost{R}")
     buf.append(f"{C_GRN}SAV{R} {C_DIM}Cache Savings{R}")
+    buf.append(f"{C_DIM} SESSION BREAKDOWN — whole session, aggregated from transcript{R}")
+    buf.append(f"{C_DIM} SUM  Sum of estimates (delta warn if >15% off CST){R}")
     buf.append(f"{C_WHT}TIN{R} {C_DIM}Total Input{R} {C_WHT}TOT{R} {C_DIM}Total Output{R}")
     buf.append(f"{C_ORN}CPM{R} {C_DIM}Cost/Min{R}")
     buf.append(f"{C_ORN}ERL{R} {C_DIM}Early 1/3{R} {C_ORN}MID{R} {C_DIM}Mid 1/3{R} {C_ORN}LAT{R} {C_DIM}Late 1/3{R}")
@@ -1125,19 +1086,141 @@ def render_legend(cols, rows):
 # ---------------------------------------------------------------------------
 # Cost breakdown modal
 # ---------------------------------------------------------------------------
-# Pricing per 1M tokens (USD) — used for cost estimation breakdown
+# Prices per 1M tokens (USD). Sources: official Anthropic pricing page.
+# cache_write = 5-minute TTL price. 1h cache write adds ~60% — documented separately.
 _MODEL_PRICING = {
-    "claude-opus-4-6":          {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
-    "claude-sonnet-4-6":        {"input":  3.0, "output": 15.0, "cache_read": 0.30, "cache_write":  3.75},
-    "claude-haiku-4-5-20251001": {"input":  0.8, "output":  4.0, "cache_read": 0.08, "cache_write":  1.00},
+    "claude-opus-4-7":             {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-6":             {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-5":             {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+    "claude-opus-4-1":             {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
+    "claude-sonnet-4-6":           {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-sonnet-4-5":           {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-haiku-4-5-20251001":   {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25},
+    "claude-haiku-3-5":            {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00},
 }
-_DEFAULT_PRICING = {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}
+_DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}  # Sonnet-tier fallback
 
 
 def _get_pricing(model_id):
     """Get pricing for model, stripping suffixes like [1m]."""
     base = model_id.split("[")[0] if model_id else ""
     return _MODEL_PRICING.get(base, _DEFAULT_PRICING)
+
+
+_SESSION_COST_CACHE = {}  # {session_id: (ts, breakdown_dict)}
+_SESSION_COST_TTL = 5.0   # refresh every 5s
+
+CLAUDE_PROJECTS_DIR = (pathlib.Path.home() / ".claude" / "projects").resolve()
+
+
+def _safe_transcript_path(tp):
+    """Validate that transcript path is a regular file inside ~/.claude/projects/.
+    Rejects symlinks, relative escapes, and absolute paths outside the allowed root."""
+    if not tp or not isinstance(tp, str):
+        return None
+    try:
+        cand = pathlib.Path(tp)
+        try:
+            st = cand.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        try:
+            resolved = cand.resolve(strict=True)
+        except OSError:
+            return None
+        # Python 3.8 compat: is_relative_to not available
+        try:
+            resolved.relative_to(CLAUDE_PROJECTS_DIR)
+        except ValueError:
+            return None
+        return resolved
+    except (OSError, ValueError):
+        return None
+
+
+def _aggregate_session_cost(data):
+    """Walk the current session's transcript JSONL, sum per-category tokens
+    across all assistant records, apply pricing per-record model.
+    Returns dict {input, output, cache_read, cache_write, cost_total,
+                  cost_input, cost_output, cost_cache_read, cost_cache_write}
+    or None if transcript unreachable.
+    """
+    sid = (data.get("session_id") or "").strip()
+    if not sid or not _SID_RE.match(sid):
+        return None
+
+    now = time.time()
+    cached = _SESSION_COST_CACHE.get(sid)
+    if cached and (now - cached[0]) < _SESSION_COST_TTL:
+        return cached[1]
+
+    tp = data.get("transcript_path")
+    path = _safe_transcript_path(tp)
+    if path is None:
+        # Fallback: scan ~/.claude/projects/*/{sid}.jsonl (first match wins)
+        try:
+            home = CLAUDE_PROJECTS_DIR
+            if home.is_dir():
+                for cand in home.glob(f"*/{sid}.jsonl"):
+                    if cand.is_file():
+                        path = _safe_transcript_path(str(cand))
+                        if path:
+                            break
+        except OSError:
+            path = None
+    if path is None:
+        return None
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > 50 * 1024 * 1024:
+        return None
+
+    inp = out = cr = cw = 0.0
+    ci = co = ccr = ccw = 0.0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if rec.get("type") != "assistant":
+                    continue
+                msg = rec.get("message") or {}
+                u = msg.get("usage") or {}
+                mid = msg.get("model") or ""
+                pricing = _get_pricing(mid)
+                i = _num(u.get("input_tokens", 0))
+                o = _num(u.get("output_tokens", 0))
+                r = _num(u.get("cache_read_input_tokens", 0))
+                w = _num(u.get("cache_creation_input_tokens", 0))
+                inp += i; out += o; cr += r; cw += w
+                ci += i * pricing["input"] / 1_000_000
+                co += o * pricing["output"] / 1_000_000
+                ccr += r * pricing["cache_read"] / 1_000_000
+                ccw += w * pricing["cache_write"] / 1_000_000
+    except OSError:
+        return None
+
+    result = {
+        "input": int(inp), "output": int(out),
+        "cache_read": int(cr), "cache_write": int(cw),
+        "cost_input": ci, "cost_output": co,
+        "cost_cache_read": ccr, "cost_cache_write": ccw,
+        "cost_total": ci + co + ccr + ccw,
+    }
+    _SESSION_COST_CACHE[sid] = (now, result)
+    return result
 
 
 def _cost_thirds(hist):
@@ -1198,7 +1281,7 @@ def render_cost_breakdown(data, hist, cols, rows):
 
     model_name = _sanitize(data.get("model", {}).get("display_name", "?"))
     # Strip verbose context suffix: "Opus 4.6 (1M context)" → "Opus 4.6 1M"
-    model_short = re.sub(r"\s*\((\d+\w?)\s*context\)", r" \1", model_name)
+    model_short = compact_context_suffix(model_name)
     buf.append(f"{C_ORN}{B}CST{R} {C_ORN}{B}{f_cost(usd)}{R} {C_DIM}{f_dur(dur)} - {model_short}{R}")
 
     # Cost estimates per token type
@@ -1212,7 +1295,7 @@ def render_cost_breakdown(data, hist, cols, rows):
     cache_savings = cr_full_price - cr_cost
 
     buf.append(sep(SW))
-    tc_title = "TOKEN COSTS (est.)"
+    tc_title = "LAST REQUEST (est.)"
     tc_pad = max(0, SW - len(tc_title))
     buf.append(f"{BG_BAR}{C_WHT}{B}{tc_title}{R}{BG_BAR}{' ' * tc_pad}{R}")
     buf.append(sep(SW))
@@ -1224,6 +1307,26 @@ def render_cost_breakdown(data, hist, cols, rows):
     if cache_savings > 0.001:
         sav_pct = round(cache_savings / (cache_savings + cr_cost) * 100) if (cache_savings + cr_cost) > 0 else 0
         buf.append(f"{C_GRN}SAV{R} {C_GRN}~{f_cost(cache_savings)}{R} {C_DIM}({sav_pct}% vs uncached){R}")
+
+    # Session-wide breakdown (aggregates transcript)
+    sess = _aggregate_session_cost(data)
+    if sess:
+        buf.append(sep(SW))
+        sb_title = "SESSION BREAKDOWN (est.)"
+        sb_pad = max(0, SW - len(sb_title))
+        buf.append(f"{BG_BAR}{C_WHT}{B}{sb_title}{R}{BG_BAR}{' ' * sb_pad}{R}")
+        buf.append(sep(SW))
+        buf.append(f"{C_ORN}INP{R} {C_WHT}{f_tok(sess['input'])}{R} {C_DIM}~{f_cost(sess['cost_input'])}{R}")
+        buf.append(f"{C_ORN}OUT{R} {C_WHT}{f_tok(sess['output'])}{R} {C_DIM}~{f_cost(sess['cost_output'])}{R}")
+        buf.append(f"{C_ORN}CRD{R} {C_WHT}{f_tok(sess['cache_read'])}{R} {C_DIM}~{f_cost(sess['cost_cache_read'])}{R}")
+        buf.append(f"{C_ORN}CWR{R} {C_WHT}{f_tok(sess['cache_write'])}{R} {C_DIM}~{f_cost(sess['cost_cache_write'])}{R}")
+        delta = sess["cost_total"] - usd if usd > 0 else 0
+        if usd > 0:
+            pct_diff = abs(delta) / usd * 100 if usd > 0 else 0
+            if pct_diff > 15:
+                buf.append(f"{C_DIM}SUM ~{f_cost(sess['cost_total'])} vs CST {f_cost(usd)} — {C_YEL}delta {pct_diff:.0f}%{R}")
+            else:
+                buf.append(f"{C_DIM}SUM ~{f_cost(sess['cost_total'])} (~= CST {f_cost(usd)}){R}")
 
     buf.append(sep(SW))
     st_title = "SESSION TOTALS"
@@ -1411,14 +1514,21 @@ def render_pulse_modal(cols, rows):
         ch_pad = max(0, SW - len(ch))
         buf.append(f"{BG_BAR}{C_WHT}{B}{ch}{R}{BG_BAR}{' ' * ch_pad}{R}")
         buf.append(sep(SW))
+        # Longest possible status label ("partial outage" = 14). Reserve sep + label.
+        name_w = max(18, SW - 16)
         for c in components[:10]:
             name = _sanitize(c.get("name") or "?")
+            # Strip parenthetical suffixes (e.g. "Claude API (api.anthropic.com)" → "Claude API")
+            name = re.sub(r"\s*\([^)]*\)?\s*$", "", name).strip() or name
             cstatus = _sanitize(c.get("status") or "unknown")
             cc = _PULSE_COMPONENT_COLOR.get(cstatus, C_DIM)
-            buf.append(f"  {C_WHT}{name[:20]:<20}{R} {cc}{cstatus.replace('_', ' ')}{R}")
+            buf.append(f"{C_WHT}{name[:name_w]:<{name_w}}{R} {cc}{cstatus.replace('_', ' ')}{R}")
 
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}source: status.anthropic.com + api.anthropic.com ping{R}")
+    footer = "source: status.claude.com + api.anthropic.com ping"
+    if len(footer) > SW:
+        footer = "source: status.claude.com + api ping"
+    buf.append(f"{C_DIM}{footer[:SW]}{R}")
     buf.append(f"{C_DIM}press any key to close{R}")
 
     _fit_buf_height(buf, rows, clip_tail=True)
@@ -1467,15 +1577,9 @@ _update_lock = threading.Lock()
 
 def _git_cmd(args, timeout=15):
     """Run git command in repo root, return (returncode, stdout, stderr)."""
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
+    from shared import run_git as _run_git
     try:
-        r = subprocess.run(
-            ["git"] + args, cwd=_REPO_ROOT,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout, env=env,
-        )
+        r = _run_git(args, cwd=_REPO_ROOT, timeout=timeout)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except FileNotFoundError:
         return -1, "", "git not found"
@@ -1515,12 +1619,10 @@ def _get_remote_changelog_preview(version, max_lines=15):
     rc, out, _ = _git_cmd(["show", "origin/main:CHANGELOG.md"])
     if rc != 0:
         return []
-    pattern = rf"## v{re.escape(version)}\b.*?(?=\n## v|\Z)"
-    m = re.search(pattern, out, re.DOTALL)
-    if not m:
+    entry = extract_changelog_entry(out, version, max_lines=max_lines)
+    if not entry:
         return []
-    lines = m.group(0).strip().split("\n")
-    return lines[:max_lines]
+    return entry.split("\n")
 
 
 def _set_update_result(value):
@@ -1581,7 +1683,21 @@ def render_update_modal(cols, rows):
     if remote_ver:
         buf.append(f"{C_WHT}REM{R} {C_WHT}v{remote_ver}{R}")
     else:
-        buf.append(f"{C_DIM}REM  unknown{R}")
+        buf.append(f"{C_DIM}REM{R} {C_DIM}unknown{R}")
+
+    # Last check freshness (based on monotonic timestamp)
+    t_last = _rls_cache.get("t", -_RLS_TTL)
+    if t_last > 0:
+        age_s = max(0, int(time.monotonic() - t_last))
+        if age_s < 60:
+            age_str = f"{age_s}s ago"
+        elif age_s < 3600:
+            age_str = f"{age_s // 60}m ago"
+        else:
+            age_str = f"{age_s // 3600}h ago"
+        buf.append(f"{C_DIM}Checked {age_str}{R}")
+
+    buf.append(f"{C_CYN}github.com/iM3SK/cc-aio-mon{R}")
 
     if rls_s == "update" and remote_ver:
         # Show new commits
@@ -1632,13 +1748,13 @@ def render_update_modal(cols, rows):
     elif rls_s == "ok":
         buf.append(f"{C_GRN}{spin_rls()} Up to date{R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}[a] apply (no update available){R}")
+        buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (no update available){R}")
         buf.append(f"{C_DIM}press any key to close{R}")
 
     elif rls_s is None:
         buf.append(f"{C_DIM}{spin_rls()} Checking for updates...{R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}[a] apply (checking...){R}")
+        buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (checking...){R}")
         buf.append(f"{C_DIM}press any key to close{R}")
 
     else:
@@ -1650,7 +1766,7 @@ def render_update_modal(cols, rows):
         else:
             buf.append(f"{C_DIM}Unknown error during check.{R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}[a] apply (check failed){R}")
+        buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (check failed){R}")
         buf.append(f"{C_DIM}press any key to close{R}")
 
     _fit_buf_height(buf, rows, clip_tail=True)
@@ -1665,9 +1781,14 @@ _PERIOD_CYCLE = ["all", "7d", "30d"]
 
 # Short display names for known model IDs
 _MODEL_NAMES = {
+    "claude-opus-4-7": "Opus 4.7",
     "claude-opus-4-6": "Opus 4.6",
+    "claude-opus-4-5": "Opus 4.5",
+    "claude-opus-4-1": "Opus 4.1",
     "claude-sonnet-4-6": "Sonnet 4.6",
+    "claude-sonnet-4-5": "Sonnet 4.5",
     "claude-haiku-4-5-20251001": "Haiku 4.5",
+    "claude-haiku-3-5": "Haiku 3.5",
     "haiku": "Haiku",
     "sonnet": "Sonnet",
     "opus": "Opus",
@@ -1675,28 +1796,54 @@ _MODEL_NAMES = {
 
 # 3-char codes for stats/legend
 _MODEL_CODES = {
+    "claude-opus-4-7": ("OP", "4.7"),
     "claude-opus-4-6": ("OP", "4.6"),
+    "claude-opus-4-5": ("OP", "4.5"),
+    "claude-opus-4-1": ("OP", "4.1"),
     "claude-sonnet-4-6": ("SO", "4.6"),
+    "claude-sonnet-4-5": ("SO", "4.5"),
     "claude-haiku-4-5-20251001": ("HA", "4.5"),
+    "claude-haiku-3-5": ("HA", "3.5"),
     "haiku": ("HA", ""),
     "sonnet": ("SO", ""),
     "opus": ("OP", ""),
 }
 
+_MODEL_ID_RE = re.compile(r"^claude-(opus|sonnet|haiku)-(\d+)-(\d+)")
+
 
 def _model_label(model_id):
-    base = model_id.split("[")[0] if model_id else model_id
-    return _MODEL_NAMES.get(base, base)
+    base = model_id.split("[")[0] if model_id else ""
+    if base in _MODEL_NAMES:
+        return _MODEL_NAMES[base]
+    m = _MODEL_ID_RE.match(base)
+    if m:
+        fam = m.group(1).capitalize()
+        return f"{fam} {m.group(2)}.{m.group(3)}"
+    return base or "?"
 
 
 def _model_code(model_id):
     """Return (short_code, version) tuple for stats display."""
-    base = model_id.split("[")[0] if model_id else model_id
-    return _MODEL_CODES.get(base, (base[:3].upper(), ""))
+    base = model_id.split("[")[0] if model_id else ""
+    if base in _MODEL_CODES:
+        return _MODEL_CODES[base]
+    m = _MODEL_ID_RE.match(base)
+    if m:
+        short = {"opus": "OP", "sonnet": "SO", "haiku": "HA"}[m.group(1)]
+        return (short, f"{m.group(2)}.{m.group(3)}")
+    # Unknown model — sanitize raw input to prevent ANSI injection via transcript
+    safe = _sanitize(base[:3]).upper() if base else ""
+    return (safe or "?", "")
 
 
 # Bar colors per model (consistent mapping)
 _MODEL_COLORS = [C_CYN, C_GRN, C_YEL, C_ORN, C_RED]
+
+
+def _total_tokens(m):
+    """Total token volume for a model: input + output + cache_read + cache_write."""
+    return m.get("input", 0) + m.get("output", 0) + m.get("cache_read", 0) + m.get("cache_write", 0)
 
 
 def render_stats(cols, rows, period="all"):
@@ -1736,9 +1883,9 @@ def render_stats(cols, rows, period="all"):
     buf.append(f"{C_WHT}LSS{R} {C_WHT}{f_dur(longest_ms)}{R} {C_WHT}TOP{R} {C_WHT}{most_active}{R}")
 
     # -- Models section --
-    total_all = sum(m["input"] + m["output"] for m in models.values())
+    total_all = sum(_total_tokens(m) for m in models.values())
     sorted_models = sorted(
-        models.items(), key=lambda kv: kv[1]["input"] + kv[1]["output"], reverse=True
+        models.items(), key=lambda kv: _total_tokens(kv[1]), reverse=True
     )
 
     buf.append(sep(SW))
@@ -1748,7 +1895,7 @@ def render_stats(cols, rows, period="all"):
     for i, (mid, st) in enumerate(sorted_models):
         color = _MODEL_COLORS[i % len(_MODEL_COLORS)]
         code, ver = _model_code(mid)
-        total_m = st["input"] + st["output"]
+        total_m = _total_tokens(st)
         pct = total_m / total_all * 100 if total_all else 0
         ver_tag = f" {C_DIM}{ver}{R}" if ver else ""
         buf.append(f"{color}{B}{code}{R}{ver_tag} {mkbar(pct, color)}")
@@ -1757,11 +1904,18 @@ def render_stats(cols, rows, period="all"):
             f" {C_DIM}OUT:{R} {color}{f_tok(st['output'])}{R}"
             f" {C_DIM}CLS:{R} {color}{st['calls']:,}{R}"
         )
+        if st.get("cache_read", 0) or st.get("cache_write", 0):
+            buf.append(
+                f"    {C_DIM}CRD:{R} {color}{f_tok(st.get('cache_read', 0))}{R}"
+                f" {C_DIM}CWR:{R} {color}{f_tok(st.get('cache_write', 0))}{R}"
+            )
         buf.append(sep(SW))
 
     # Totals
     total_in = sum(m["input"] for m in models.values())
     total_out = sum(m["output"] for m in models.values())
+    total_cr = sum(m.get("cache_read", 0) for m in models.values())
+    total_cw = sum(m.get("cache_write", 0) for m in models.values())
     total_calls = sum(m["calls"] for m in models.values())
     buf.append(
         f"{C_WHT}{B}ALL{R}"
@@ -1769,6 +1923,11 @@ def render_stats(cols, rows, period="all"):
         f" {C_DIM}OUT:{R} {C_WHT}{f_tok(total_out)}{R}"
         f" {C_DIM}CLS:{R} {C_WHT}{total_calls:,}{R}"
     )
+    if total_cr or total_cw:
+        buf.append(
+            f"    {C_DIM}CRD:{R} {C_WHT}{f_tok(total_cr)}{R}"
+            f" {C_DIM}CWR:{R} {C_WHT}{f_tok(total_cw)}{R}"
+        )
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
     buf.append(f"{C_DIM}press any key to close{R}")
@@ -1801,13 +1960,15 @@ def render_picker(sessions, cols, rows):
             tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
             nm = s["session_name"] or s["id"][:8]
             # Short model: "Opus 4.6 (1M context)" → "OP 4.6"
+            # Note: duplicate of _model_label logic — intentional (operates on display_name not id)
             model_raw = s["model"]
-            model_short = re.sub(r"\s*\(.*?\)", "", model_raw)  # strip (...)
-            for full, (code, ver) in _MODEL_CODES.items():
-                label = _MODEL_NAMES.get(full, "")
-                if label and label in model_short:
-                    model_short = f"{code} {ver}".strip() if ver else code
-                    break
+            mm = re.search(r"(Opus|Sonnet|Haiku)\s+(\d+)\.(\d+)", model_raw)
+            if mm:
+                code = {"Opus": "OP", "Sonnet": "SO", "Haiku": "HA"}[mm.group(1)]
+                model_short = f"{code} {mm.group(2)}.{mm.group(3)}"
+            else:
+                # legacy fallback
+                model_short = re.sub(r"\s*\(.*?\)", "", model_raw).strip()
             line = f"{C_WHT}[{i + 1}]{R} {B}{nm}{R} {C_DIM}{model_short}{R} {tag}"
             buf.append(truncate(line, W))
         if len(sessions) > 9:

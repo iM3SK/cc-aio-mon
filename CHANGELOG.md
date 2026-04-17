@@ -5,9 +5,9 @@
 **New feature — Anthropic Pulse modal:**
 - New `pulse.py` module — real-time Anthropic backend stability monitor. Press `p` to open modal. Stdlib only, zero dependencies, zero token cost, cross-platform.
 - **Stability score (0-100)** with weighted composite: status indicator (50%), active incidents (30%), API latency (20%). Verdict bands: ≥80 `SAFE TO CODE` (green), 50-79 `DEGRADED` (yellow), <50 `NOT SAFE TO CODE` (red), error states render in dim.
-- **Two-tier signal** — (1) passive: `status.anthropic.com/api/v2/summary.json` for indicator + components + incidents; (2) active: HTTPS GET to `api.anthropic.com/v1/messages` measures real TLS handshake + HTTP round-trip (any HTTP status = endpoint alive, only network/TLS errors = down).
+- **Two-tier signal** — (1) passive: `status.claude.com/api/v2/summary.json` for indicator + components + incidents; (2) active: HTTPS GET to `api.anthropic.com/v1/messages` measures real TLS handshake + HTTP round-trip (any HTTP status = endpoint alive, only network/TLS errors = down).
 - **Rolling median smoothing** — `deque(maxlen=10)` keeps last 10 scores; verdict derived from median of last 5. Absorbs single-sample outliers (one slow probe doesn't flip verdict). Warm-up below 3 samples passes raw through.
-- **Latency percentiles** — p50 / p95 over ~30 min window (60 samples) displayed in modal when ≥3 samples available.
+- **Latency percentiles** — p50 / p95 over up to 60 recent successful probes (~30 min window) displayed in modal when ≥3 samples available.
 - **Per-model tagging** — regex word-boundary match (`opus` / `sonnet` / `haiku`) against incident titles + first incident update body. Affected models displayed inline next to incidents (`[opus]`) and as a top-level rollup row (`MODELS  opus / sonnet / haiku` — red when affected, green when clear). Honest limitation: signal only available when Anthropic flag the model publicly.
 - **JSONL persistence** — every probe appended to `$TMPDIR/claude-aio-monitor/pulse.jsonl`. Schema: `{ts, score, level, indicator, incidents, latency_ms, error}`. Stores raw_score (truth), not smoothed.
 - **Hybrid cleanup** — (1) startup: drop entries older than 24h + cap at 2000 records; (2) runtime: check size every 100 appends, trim to last 500 lines if file exceeds 1 MB (aligned with `shared.MAX_FILE_SIZE`). Atomic rewrite via `NamedTemporaryFile` + `os.replace`.
@@ -35,6 +35,52 @@
 
 **Other:**
 - VERSION bumped to `1.9.0`
+
+**Correctness + scaling fixes (post-release follow-up, same release):**
+- **Pricing table rewritten** — `_MODEL_PRICING` aligned with official Anthropic rates (platform.claude.com/pricing, 2026-04). Opus 4.6 corrected from $15/$75 to $5/$25 per 1M tokens (was 3x over-reported). Haiku 4.5 corrected from $0.80/$4 to $1.00/$5. Added entries for Opus 4.7, Opus 4.5, Opus 4.1, Sonnet 4.5, Haiku 3.5. `_DEFAULT_PRICING` changed from Opus-tier to Sonnet-tier (less alarming when unknown model appears).
+- **Model name/code maps extended** — added Opus 4.7 / 4.5 / 4.1, Sonnet 4.5, Haiku 3.5. New `_MODEL_ID_RE` regex enables dynamic family+version extraction for future models (`claude-opus-5-0` → `Opus 5.0` / `OP 5.0`) without code changes. Session picker now uses regex extraction instead of hardcoded map iteration.
+- **Transcript scanner includes cache tokens** — `scan_transcript_stats` now sums `cache_read_input_tokens` + `cache_creation_input_tokens`. Previously under-reported usage by 20-80% depending on cache hit ratio. Token Stats modal now shows `CRD:` (cache read) and `CWR:` (cache write) rows per model and in the ALL totals line when non-zero.
+- **Bar ceilings raised for heavy/API users** — defaults tuned for 24/7 Opus API coding:
+  - `BRN_MAX` 2.0 → 10.0 $/min (env: `CC_MON_BRN_MAX`)
+  - `CST_MAX` 200 → 1000 $ (env: `CC_MON_CST_MAX`)
+  - `CTR_MAX` 5.0 → 10.0 %/min (env: `CC_MON_CTR_MAX`)
+  - `WARN_BRN` 1.0 → 3.0 $/min (env: `CLAUDE_WARN_BRN`, unchanged name)
+  Previously pinned to 100% during normal Opus sessions, destroying signal. All configurable via env vars so power users can tune.
+- **WARN/CRIT thresholds unified across statusline + monitor** — monitor.py hardcoded `50` / `80` literals in `mkbar()`, `_limit_color()`, and CTX warn line replaced with `WARN_PCT` / `CRIT_PCT` constants derived from `CLAUDE_STATUS_WARN` / `CLAUDE_STATUS_CRIT` env vars (single source of truth; previously only statusline honored them).
+- **Session picker "?" artifacts filtered** — snapshots without `model.display_name` skipped (test artifacts / incomplete writes). Orphans older than 1h auto-deleted alongside their `.jsonl` twin.
+- **Pulse source updated** — `SUMMARY_URL` now points at `status.claude.com` (canonical) instead of deprecated `status.anthropic.com` (which served redirects). Incident→model tagging prefers `incidents[].components[]` array (canonical Statuspage schema) with regex-on-title as legacy fallback.
+- **Audit cleanup** — `_RESERVED_FILES` extended to include `pulse` (prevents session-name collision with pulse.jsonl). `DATA_DIR` consolidated into `shared.py` (removed 3x duplication). Dead code removed: `_write_shared_stats`, `rls.json` writer (no consumer). Alias `_VERSION_RE` removed. Dead constant `H = "\u2500"` removed. `statistics.median` used for p50 (was index-based).
+- **Test suite** — 441 tests, all passing (up from 421; +20 new behaviors covered, net +20 after removals).
+
+**Modal UX fixes (post-release follow-up, same release):**
+- **Token Stats bar** — now counts `input + output + cache_read + cache_write` for model percentage (was only input+output). Fixes mis-sized bars for cache-heavy models. `daily_tokens` aggregation in overview also updated — TOP day peak now reflects full token volume. Helper `_total_tokens(m)` added to monitor.py.
+- **Cost Breakdown modal — LAST REQUEST + SESSION BREAKDOWN split:**
+  - Section "TOKEN COSTS (est.)" renamed to **"LAST REQUEST (est.)"** — clarifies it shows last-message tokens only (from `current_usage`).
+  - New **"SESSION BREAKDOWN (est.)"** section — aggregates entire session from transcript JSONL (via `transcript_path` in statusline JSON or `~/.claude/projects/` fallback), applies per-record model pricing, reconciles with server-reported CST (warn tag if estimate delta >15%). Answers "where did my session's $X actually go".
+  - Cache: 5-second TTL (`_SESSION_COST_CACHE`), 50 MB transcript cap, `_SID_RE` validation on path. Helper `_aggregate_session_cost(data)` in monitor.py.
+- **Pulse modal UX** — component names now adaptive-width (`SW - 16` instead of hardcoded 20 chars), parenthetical suffixes stripped (`Claude API (api.anthropic.com)` → `Claude API`), components flush-left aligned with rest of modal, footer falls back to short form (`source: status.claude.com + api ping`) when terminal is narrow.
+- **Update modal** — added "Checked Xm ago" freshness indicator (shows age of last release check in s/m/h, based on monotonic timestamp from `_rls_cache["t"]`), plus a cyan `github.com/iM3SK/cc-aio-mon` link in the info block above the separator. Plain text (OSC 8 hyperlinks removed — caused width truncation issues in narrow modals).
+- **Legend** — new sub-labels explain LAST REQUEST vs SESSION BREAKDOWN scope, plus SUM reconciliation warn tag. Bar-range comments in `mkbar` render block updated from obsolete fixed values to reflect that BRN/CTR/CST scale dynamically to their respective `*_MAX` constants.
+- **Test suite: 462 tests, all passing** (up from 441).
+
+**Consistency sweep (post-release follow-up, same release):**
+- **Dead code pruned** — removed unused `import tempfile` from `monitor.py`, unused `ensure_data_dir` import from `monitor.py`, `DATA_DIR_NAME` import from `monitor.py` / `statusline.py` / `pulse.py`. Dead function `_tag_incident_models` removed from `pulse.py` (superseded by `_tag_models_from_incident` earlier in v1.9.0). Dead helper `vlen` removed from `monitor.py` (never called in production; visible-length logic lives in `truncate`).
+- **Shared helpers consolidated** — `RESERVED_SIDS` (frozenset) moved to `shared.py` (was `_RESERVED_FILES` in monitor + `_RESERVED_SIDS` in statusline; both now alias `shared.RESERVED_SIDS`). `strip_context_suffix` / `compact_context_suffix` helpers introduced in `shared.py` — replace 3 divergent inline regex/replace patterns across monitor + statusline. `run_git` subprocess wrapper lives in `shared.py` (update + monitor both delegate to it). `extract_changelog_entry` single-source in `shared.py` (monitor + update both use it).
+- **Update modal UI polish** — `[a] apply` bracket pattern now consistent across all 4 states (highlighted white key letter, dim brackets). `REM unknown` label aligned with the known-version color pattern.
+- **Named semantic constant** — `RESET_HALFWAY_PCT = 50.0` introduced in `monitor.py` for `_reset_color` (distinct from `WARN_PCT`/`CRIT_PCT`).
+- **Docs accuracy** — README env-var table: `CLAUDE_STATUS_WARN`/`CLAUDE_STATUS_CRIT` scope corrected to "statusline + dashboard". Env-var prefix convention documented. `update.py` module header converted from `#` comments to docstring.
+- **Test suite: 452 tests, all passing** (net -10: removed 3 `TestVlen` + 7 `TestPulseModelTagging._tag_incident_models` tests alongside the dead code).
+
+**Security hardening (post-release follow-up, same release):**
+- **Transcript path containment** — `_aggregate_session_cost()` now validates `transcript_path` from statusline JSON: must be a regular file (not symlink) inside `~/.claude/projects/`. Rejects absolute paths outside root, `..` traversal, symlink redirects. New helper `_safe_transcript_path()`. Prevents hostile JSON payloads from forcing the monitor to read arbitrary files (up to 50 MB every 5 s) for existence probing / DoS.
+- **ANSI injection via unknown model IDs** — `_model_code()` now sanitizes the 3-char fallback for unknown model strings pulled from `~/.claude/projects/**/*.jsonl`. Control characters in a transcript's `message.model` field can no longer reach the terminal.
+- **Subprocess env whitelist** — `shared.run_git()` passes a minimal env (PATH, HOME/USERPROFILE, SYSTEMROOT, TEMP/TMP, LANG/LC_*, APPDATA/LOCALAPPDATA, GIT_TERMINAL_PROMPT=0) instead of the full parent environment. Blocks pre-injected `GIT_SSH_COMMAND`, `LD_PRELOAD`, `HTTP(S)_PROXY`, `GIT_EXEC_PATH` from reaching git during release checks. Defense-in-depth (attacker already owns env), but removes a semi-persistent trigger surface.
+- **Test suite: 459 tests, all passing** (+7 security tests: transcript path traversal, symlink rejection, non-string input, ANSI injection in model code, git env whitelist × 2).
+
+**Update reliability (post-release follow-up, same release):**
+- **Pre-update rollback tag** — `update.py --apply` now creates `pre-update-YYYYMMDD-HHMMSS` git tag before running `git pull`. If the pull or post-pull syntax check fails, the user is shown a `git reset --hard pre-update-*` hint for instant recovery. Tag creation failure is non-fatal (warns, continues).
+- **`pulse.py` added to post-pull syntax check** — was missing from `py_files` list, meaning a syntax error introduced in `pulse.py` by an update wouldn't be caught until monitor crashed at startup. Now verified alongside monitor/statusline/shared/update.
+- **Test suite: 461 tests, all passing** (+2 regression guards for the rollback tag format and pulse.py inclusion).
 
 ## v1.8.4 — 2026-04-15
 

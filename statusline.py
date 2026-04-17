@@ -23,7 +23,8 @@ import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost,
                     is_safe_dir, ensure_data_dir,
-                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR_NAME,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, RESERVED_SIDS,
+                    strip_context_suffix,
                     R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 # ---------------------------------------------------------------------------
@@ -131,7 +132,7 @@ _SEP_VLEN = 3  # " │ "
 # ---------------------------------------------------------------------------
 def seg_model(data):
     name = _sanitize(data.get("model", {}).get("display_name", ""))
-    name = name.replace(" (1M context)", "").replace(" (200k)", "")
+    name = strip_context_suffix(name).replace(" (200k)", "")
     text = f"{B}{C_WHT}{name}{R}"
     return text, len(_ANSI_RE.sub("", text))
 
@@ -296,16 +297,15 @@ def main():
 # IPC — shared state for monitor.py
 # ---------------------------------------------------------------------------
 HISTORY_TRIM_TO = 1000
-# MAX_FILE_SIZE imported from shared.py
-_DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
+# MAX_FILE_SIZE, DATA_DIR imported from shared.py
 
 
 def _load_history_for_rates(sid, n=120):
     """Read last n history entries for BRN/CTR rate computation. Call BEFORE write_shared_state."""
-    if not is_safe_dir(_DATA_DIR):
+    if not is_safe_dir(DATA_DIR):
         return []
     try:
-        p = _DATA_DIR / f"{sid}.jsonl"
+        p = DATA_DIR / f"{sid}.jsonl"
         with open(p, "rb") as fh:
             raw = fh.read(MAX_FILE_SIZE * 2 + 1)
         if len(raw) > MAX_FILE_SIZE * 2:
@@ -321,13 +321,18 @@ def _load_history_for_rates(sid, n=120):
         return []
 
 
+_RESERVED_SIDS = RESERVED_SIDS  # backwards-compat alias
+
+
 def write_shared_state(data: dict):
     sid = str(data.get("session_id") or "default")
     if not _SID_RE.match(sid):
         sid = "default"
-    if not ensure_data_dir(_DATA_DIR):
+    if sid in _RESERVED_SIDS:
         return
-    base = _DATA_DIR
+    if not ensure_data_dir(DATA_DIR):
+        return
+    base = DATA_DIR
 
     # Serialize once — same rules for snapshot and history (avoid TypeError mid-write)
     try:

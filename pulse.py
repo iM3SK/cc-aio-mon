@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Anthropic Pulse — backend stability monitor.
 
-Fetches status.anthropic.com summary.json + pings api.anthropic.com.
+Fetches status.claude.com summary.json + pings api.anthropic.com.
 Computes a 0-100 stability score and verdict. Stdlib only.
 
 Public API:
@@ -39,12 +39,12 @@ import urllib.error
 import urllib.request
 from collections import deque
 
-from shared import DATA_DIR_NAME, ensure_data_dir
+from shared import DATA_DIR, ensure_data_dir
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-SUMMARY_URL = "https://status.anthropic.com/api/v2/summary.json"
+SUMMARY_URL = "https://status.claude.com/api/v2/summary.json"
 PROBE_URL = "https://api.anthropic.com/v1/messages"  # expect 401/405 without auth
 HTTP_TIMEOUT = 5.0
 PING_TIMEOUT = 4.0  # covers TLS handshake + HTTP round-trip
@@ -53,7 +53,6 @@ USER_AGENT = "cc-aio-mon-pulse/1.0 (+https://github.com/iM3SK/cc-aio-mon)"
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB cap on status.json response
 
 # Persistence + cleanup
-DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 LOG_PATH = DATA_DIR / "pulse.jsonl"
 LOG_MAX_BYTES = 1_048_576        # 1 MB — aligned with shared.MAX_FILE_SIZE
 LOG_AGE_CUTOFF = 24 * 3600       # startup: drop entries older than 24h
@@ -186,7 +185,7 @@ def _latency_percentiles():
     if len(samples) < 3:
         return None, None
     samples.sort()
-    p50 = samples[len(samples) // 2]
+    p50 = statistics.median(samples)
     # p95 index clamped within bounds
     p95_idx = min(len(samples) - 1, max(0, int(round(len(samples) * 0.95)) - 1))
     return int(p50), int(samples[p95_idx])
@@ -269,7 +268,7 @@ def compute_score(raw):
 # Network
 # ---------------------------------------------------------------------------
 def _fetch_summary():
-    """Fetch status.anthropic.com summary.json. Returns (data, error_tag)."""
+    """Fetch status.claude.com summary.json. Returns (data, error_tag)."""
     req = urllib.request.Request(SUMMARY_URL, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
@@ -329,15 +328,34 @@ _MODEL_PATTERNS = {
 }
 
 
-def _tag_incident_models(name):
-    """Return sorted list of model tags (opus/sonnet/haiku) found in incident text.
+def _tag_models_from_incident(inc):
+    """Return sorted model tags for an incident.
 
-    Pure fn — safe on None/empty/any string.
+    Prefers incidents[].components[] array (canonical Statuspage schema).
+    Falls back to regex on title + first incident_update body (legacy).
     """
-    if not name:
-        return []
-    text = str(name)
-    return sorted(m for m, pat in _MODEL_PATTERNS.items() if pat.search(text))
+    tags = set()
+    for comp in (inc.get("components") or []):
+        if isinstance(comp, dict):
+            name = (comp.get("name") or "").lower()
+            for fam in ("opus", "sonnet", "haiku"):
+                if re.search(rf"\b{fam}\b", name):
+                    tags.add(fam)
+    if tags:
+        return sorted(tags)
+    # Legacy fallback — regex on title + first update body
+    title = (inc.get("name") or "").lower()
+    body = ""
+    updates = inc.get("incident_updates") or []
+    if isinstance(updates, list) and updates and isinstance(updates[0], dict):
+        body = (updates[0].get("body") or "").lower()
+    impact_override = inc.get("impact_override")
+    impact_override_s = str(impact_override).lower() if isinstance(impact_override, (str, int, float)) else ""
+    text = f"{title} {impact_override_s} {body}"
+    for fam in ("opus", "sonnet", "haiku"):
+        if re.search(rf"\b{fam}\b", text):
+            tags.add(fam)
+    return sorted(tags)
 
 
 def _extract(summary):
@@ -362,23 +380,10 @@ def _extract(summary):
             continue
         name = str(inc.get("name") or "?")[:80]
         impact = str(inc.get("impact") or "minor")[:16]
-        # Also scan impact descriptions / update body for model mentions, not just title.
-        # Be defensive: incident_updates may be malformed (not a list, or first element not a dict).
-        updates = inc.get("incident_updates")
-        first_body = ""
-        if isinstance(updates, list) and updates and isinstance(updates[0], dict):
-            first_body = str(updates[0].get("body") or "")
-        impact_override = inc.get("impact_override")
-        impact_override_s = str(impact_override) if isinstance(impact_override, (str, int, float)) else ""
-        body = " ".join([
-            str(inc.get("name") or ""),
-            impact_override_s,
-            first_body,
-        ])
         incidents.append({
             "name": name,
             "impact": impact,
-            "affected_models": _tag_incident_models(body),
+            "affected_models": _tag_models_from_incident(inc),
         })
     return indicator, components, incidents
 

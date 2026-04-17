@@ -21,3 +21,41 @@ Thumbs.db
 .claude/
 TASKS.md
 PROMO.md
+
+# Python test / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Secrets & credentials (defense-in-depth)
+*.pem
+*.key
+*.crt
+*.p12
+credentials.json
+.env.*
+.envrc
+secrets/
+
+# Backup / merge artifacts
+*.bak
+*.orig
+*.rej
+
+# Logs
+*.log
+logs/
+
+# Local dev / scratch
+scratch/
+tmp/
+debug/
+notes.md

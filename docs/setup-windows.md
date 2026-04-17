@@ -129,7 +129,7 @@ New-Item -Path "$env:USERPROFILE\.claude\settings.json" -ItemType File -Force
 
 The Anthropic Pulse worker (`p` in the dashboard) performs unauthenticated HTTPS requests every 30 s to:
 
-- `status.anthropic.com` — public status JSON
+- `status.claude.com` — public status JSON
 - `api.anthropic.com` — liveness probe (expects 401/405)
 
 No credentials, no user data, no request body is sent. If you are behind a restrictive firewall or prefer zero outbound traffic, disable the worker:
