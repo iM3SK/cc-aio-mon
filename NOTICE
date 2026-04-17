@@ -1,0 +1,86 @@
+CC AIO MON
+Copyright (c) 2026 CC AIO MON Contributors
+
+Licensed under the MIT License. See LICENSE file for terms.
+
+================================================================
+Affiliation Notice
+================================================================
+
+This project is an independent, community-maintained tool. It is NOT
+affiliated with, endorsed by, sponsored by, or officially supported by
+Anthropic, PBC.
+
+"Anthropic", "Claude", and "Claude Code" are trademarks of Anthropic, PBC.
+Their use in this project is nominative fair use — we refer to the products
+by their proper names in order to describe interoperability. No claim of
+ownership, endorsement, partnership, or association is made or implied.
+
+================================================================
+Provenance of Code
+================================================================
+
+All source code in this repository is original work by the project
+contributors. No source code was copied, decompiled, or derived from
+Anthropic's proprietary codebase or any other third-party proprietary
+source.
+
+The project interacts with Anthropic products exclusively through:
+
+1. Publicly documented extension points:
+   - Claude Code `statusLine` command hook — officially designed for
+     custom status bar integrations and documented at code.claude.com.
+   - User's own local transcript files in `~/.claude/projects/` —
+     the user's personal data on the user's own disk, read-only.
+
+2. Public endpoints:
+   - `status.claude.com/api/v2/summary.json` — Anthropic's public
+     Statuspage API (standard Statuspage schema), designed for public
+     consumption by status monitoring tools.
+   - `api.anthropic.com/v1/messages` — HTTPS availability probe only,
+     no authentication, no request body, no billing. Same behavior as
+     any generic network monitoring tool (e.g. Pingdom, UptimeRobot).
+     Fetched at 30-second intervals with bounded timeouts. Opt-out via
+     `CC_AIO_MON_NO_PULSE=1` environment variable.
+
+3. Public documentation:
+   - Model pricing sourced from platform.claude.com/docs/en/about-claude/pricing
+   - API schemas from official Anthropic / Claude developer documentation
+
+No reverse engineering, traffic interception, authentication bypass,
+rate-limit circumvention, or any form of unauthorized access was
+performed during development.
+
+================================================================
+No Modification of Anthropic Products
+================================================================
+
+This tool does not modify, patch, wrap, or alter Claude Code, the
+Anthropic API, or any Anthropic-operated service. It is a read-only
+observer that consumes data voluntarily exposed by the user's local
+Claude Code installation via the officially documented `statusLine`
+extension point.
+
+================================================================
+Dependencies
+================================================================
+
+This project uses only the Python standard library. No third-party
+Python packages (pip dependencies) are required or included. This
+eliminates supply-chain risk and makes every line of behavior auditable
+in the repository itself.
+
+================================================================
+Third-Party References
+================================================================
+
+The project mentions third-party names for interoperability and
+descriptive purposes only:
+
+- Anthropic, PBC — owner of Claude, Claude Code
+- Atlassian, Inc. — Statuspage API schema used by status.claude.com
+- Nord color palette (https://www.nordtheme.com/) — color scheme
+  inspiration, MIT-licensed
+- Python Software Foundation — Python language, PSF License
+
+All trademarks are the property of their respective owners.
