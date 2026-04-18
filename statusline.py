@@ -21,11 +21,11 @@ import sys
 import tempfile
 import time
 
-from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost,
+from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost, f_cd,
                     is_safe_dir, ensure_data_dir,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, RESERVED_SIDS,
                     strip_context_suffix,
-                    R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
+                    R, B, FAINT, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -157,10 +157,12 @@ def seg_5hl(data):
         return None
     pct = round(_num(fh.get("used_percentage")))
     resets = _num(fh.get("resets_at"), 0)
-    if resets > 0 and resets < time.time():
+    now = time.time()
+    if resets > 0 and resets < now:
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}5HL{R} {c}{pct}%{R}"
+    reset_str = f" {FAINT}{c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
+    text = f"{c}{B}5HL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -173,10 +175,12 @@ def seg_7dl(data):
         return None
     pct = round(_num(sd.get("used_percentage")))
     resets = _num(sd.get("resets_at"), 0)
-    if resets > 0 and resets < time.time():
+    now = time.time()
+    if resets > 0 and resets < now:
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}7DL{R} {c}{pct}%{R}"
+    reset_str = f" {FAINT}{c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
+    text = f"{c}{B}7DL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -188,39 +192,10 @@ def seg_cost(data):
     return text, len(_ANSI_RE.sub("", text))
 
 
-def seg_chr(data):
-    usage = data.get("context_window", {}).get("current_usage", {})
-    cr = _num(usage.get("cache_read_input_tokens"))
-    cw = _num(usage.get("cache_creation_input_tokens"))
-    total = cr + cw
-    if total <= 0:
-        return None
-    pct = round(cr / total * 100, 1)
-    if pct >= WARN:
-        c = C_GRN
-    elif pct < (100 - CRIT):
-        c = C_RED
-    else:
-        c = C_YEL
-    text = f"{C_GRN}{B}CHR{R} {c}{pct}%{R}"
-    return text, len(_ANSI_RE.sub("", text))
-
-
 def seg_brn(brn):
     if brn is None or brn <= 0.0001:
         return None
     text = f"{C_ORN}BRN{R} {C_ORN}{B}{brn:.4f} $/min{R}"
-    return text, len(_ANSI_RE.sub("", text))
-
-
-def seg_apr(data):
-    dur_ms = _num(data.get("cost", {}).get("total_duration_ms"))
-    api_ms = _num(data.get("cost", {}).get("total_api_duration_ms"))
-    if dur_ms <= 0:
-        return None
-    pct = min(100.0, round(api_ms / dur_ms * 100, 1))
-    c = cpc_base(pct, C_GRN)
-    text = f"{C_GRN}{B}APR{R} {c}{pct}%{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -239,8 +214,6 @@ def build_line(data, cols, brn=None):
         seg_7dl(data),
         seg_cost(data),
         seg_brn(brn),
-        seg_apr(data),
-        seg_chr(data),
     ] if s is not None]
 
     # Drop trailing segments until it fits

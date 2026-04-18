@@ -7,6 +7,7 @@ import re
 import stat as _stat_mod
 import sys
 import tempfile
+import time
 import unicodedata
 
 MIN_EPOCH = 1_577_836_800  # 2020-01-01 — reject implausible timestamps
@@ -33,6 +34,7 @@ VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 E = "\033["
 R = E + "0m"
 B = E + "1m"
+FAINT = E + "2m"
 C_RED = E + "38;2;191;97;106m"
 C_GRN = E + "38;2;163;190;140m"
 C_YEL = E + "38;2;235;203;139m"
@@ -102,6 +104,24 @@ def f_cost(usd):
     if usd < 0.01:
         return f"{usd:.4f} $"
     return f"{usd:.2f} $"
+
+
+def f_cd(epoch):
+    """Countdown from now to `epoch`. Returns compact form (e.g. '2h 15m', '6d 12h')."""
+    if epoch is None:
+        return "--"
+    epoch = _num(epoch, 0)
+    diff = int(epoch - time.time())
+    if diff <= 0:
+        return "now"
+    d, rem = divmod(diff, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d > 0:
+        return f"{d}d {h:02d}h"
+    if h > 0:
+        return f"{h}h {m:02d}m"
+    return f"{m}m"
 
 
 def char_width(ch):
