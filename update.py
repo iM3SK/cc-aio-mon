@@ -188,7 +188,7 @@ def apply_update():
         new_ver = get_local_version()
         ok(f"New VERSION: {new_ver}")
     except Exception as e:
-        warn(f"Could not verify new VERSION: {e}")
+        warn(f"Could not verify new VERSION: {_sanitize(str(e))}")
 
     # Syntax check — catch broken updates before user runs monitor
     py_files = ["monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py"]

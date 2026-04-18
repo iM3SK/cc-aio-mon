@@ -46,7 +46,7 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
 - All file I/O confined to temp directory ($TMPDIR/claude-aio-monitor/) and ~/.claude/projects/ (read-only, for usage stats)
 - Session IDs validated with regex: `^[a-zA-Z0-9_\-]{1,128}$`
 - Atomic writes via NamedTemporaryFile + os.replace()
-- File size limits: JSON 1MB, JSONL 2MB read / 1MB trim (cross-session cost aggregation: 10MB)
+- File size limits: JSON 1MB (`MAX_FILE_SIZE`), JSONL 2MB read / 1MB trim, cross-session cost aggregation 10MB (`MAX_FILE_SIZE * 10`), per-transcript read cap 50MB (`TRANSCRIPT_MAX_BYTES`)
 - Cross-platform: Windows (py, ctypes, msvcrt) + Unix (python3, termios, select)
 - ANSI 24-bit color — Windows Terminal required on Windows
 - Python 3.8+ compatibility
