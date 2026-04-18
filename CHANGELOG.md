@@ -22,6 +22,7 @@
 **Docs:**
 - README metrics table, statusline description, and architecture notes updated to reflect the new segment list and the dashboard-only status of APR/CHR.
 - `.claude/CLAUDE.md` architecture section updated.
+- `screenshots/cc-aio-mon-statusline.png` regenerated to show the v1.10.0 layout (reset countdown visible, APR/CHR removed).
 
 ## v1.9.1 — 2026-04-17
 
