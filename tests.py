@@ -63,9 +63,7 @@ from statusline import (
     seg_5hl,
     seg_7dl,
     seg_cost,
-    seg_chr,
     seg_brn,
-    seg_apr,
     build_line,
     cpc_base,
 )
@@ -495,7 +493,30 @@ class TestSeg5hl(unittest.TestCase):
         d = _full_data()
         d["rate_limits"]["five_hour"]["resets_at"] = 1000  # far in the past
         text, vl = seg_5hl(d)
-        self.assertIn("0%", _ANSI_RE.sub("", text))
+        plain = _ANSI_RE.sub("", text)
+        self.assertIn("0%", plain)
+        self.assertNotIn("\u2192", plain)  # no arrow when expired
+
+    def test_future_resets_shows_countdown(self):
+        d = _full_data()
+        d["rate_limits"]["five_hour"]["resets_at"] = time.time() + 7260  # ~2h 1m
+        text, vl = seg_5hl(d)
+        plain = _ANSI_RE.sub("", text)
+        self.assertIn("\u2192", plain)
+        self.assertIn("2h", plain)
+        self.assertEqual(vl, _vlen(text))
+
+    def test_absent_resets_at_no_arrow(self):
+        d = _full_data()
+        d["rate_limits"]["five_hour"].pop("resets_at", None)
+        text, _ = seg_5hl(d)
+        self.assertNotIn("\u2192", _ANSI_RE.sub("", text))
+
+    def test_string_resets_at_handled(self):
+        d = _full_data()
+        d["rate_limits"]["five_hour"]["resets_at"] = str(int(time.time()) + 3600)
+        text, _ = seg_5hl(d)
+        self.assertIn("\u2192", _ANSI_RE.sub("", text))
 
 
 class TestSeg7dl(unittest.TestCase):
@@ -514,6 +535,21 @@ class TestSeg7dl(unittest.TestCase):
     def test_none(self):
         self.assertIsNone(seg_7dl({}))
 
+    def test_future_resets_shows_countdown(self):
+        d = _full_data()
+        d["rate_limits"]["seven_day"]["resets_at"] = time.time() + 86400 * 6 + 3600 * 12
+        text, vl = seg_7dl(d)
+        plain = _ANSI_RE.sub("", text)
+        self.assertIn("\u2192", plain)
+        self.assertIn("6d", plain)
+        self.assertEqual(vl, _vlen(text))
+
+    def test_expired_no_arrow(self):
+        d = _full_data()
+        d["rate_limits"]["seven_day"]["resets_at"] = 1000
+        text, _ = seg_7dl(d)
+        self.assertNotIn("\u2192", _ANSI_RE.sub("", text))
+
 
 class TestSegCost(unittest.TestCase):
 
@@ -531,45 +567,6 @@ class TestSegCost(unittest.TestCase):
         d = _full_data()
         d["cost"]["total_cost_usd"] = 0
         self.assertIsNone(seg_cost(d))
-
-
-class TestSegChr(unittest.TestCase):
-
-    def test_basic(self):
-        text, vl = seg_chr(_full_data())
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("CHR", _ANSI_RE.sub("", text))
-
-    def test_label_uses_green(self):
-        text, _ = seg_chr(_full_data())
-        self.assertIn(C_GRN, text)
-
-    def test_no_cache_data(self):
-        d = _full_data()
-        d["context_window"]["current_usage"] = {}
-        self.assertIsNone(seg_chr(d))
-
-    def test_zero_cache(self):
-        d = _full_data()
-        d["context_window"]["current_usage"] = {
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-        }
-        self.assertIsNone(seg_chr(d))
-
-
-class TestSegApr(unittest.TestCase):
-
-    def test_basic(self):
-        text, vl = seg_apr(_full_data())
-        self.assertEqual(vl, _vlen(text))
-        self.assertIn("APR", _ANSI_RE.sub("", text))
-        self.assertIn("75.0%", _ANSI_RE.sub("", text))  # 90000/120000
-
-    def test_zero_duration(self):
-        d = _full_data()
-        d["cost"]["total_duration_ms"] = 0
-        self.assertIsNone(seg_apr(d))
 
 
 class TestSegBrn(unittest.TestCase):
@@ -2981,24 +2978,6 @@ class TestRenderPicker(unittest.TestCase):
         buf = render_picker(sessions, 80, 30)
         plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("live", plain)
-
-
-# ---------------------------------------------------------------------------
-# TestSegAprClamp — seg_apr clamps >100%
-# ---------------------------------------------------------------------------
-class TestSegAprClamp(unittest.TestCase):
-
-    def test_clamp_over_100(self):
-        data = {"cost": {"total_duration_ms": 100, "total_api_duration_ms": 200}}
-        result = seg_apr(data)
-        self.assertIsNotNone(result)
-        text, vl = result
-        self.assertIn("100.0%", _ANSI_RE.sub("", text))
-
-    def test_visible_length_consistent(self):
-        data = {"cost": {"total_duration_ms": 100, "total_api_duration_ms": 200}}
-        text, vl = seg_apr(data)
-        self.assertEqual(vl, len(_ANSI_RE.sub("", text)))
 
 
 # ---------------------------------------------------------------------------

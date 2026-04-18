@@ -18,7 +18,7 @@
 
 <p align="center"><a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></a></p>
 
-<p align="center"><a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — single-line ANSI status bar showing Model, CTX, 5HL, 7DL, CST, BRN, APR, CHR segments"></a></p>
+<p align="center"><a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — single-line ANSI status bar showing Model, CTX, 5HL, 7DL, CST, BRN segments with dimmed reset countdown"></a></p>
 
 ## Why CC AIO MON?
 
@@ -51,7 +51,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin. No log scraping, no file watching, no API polling. Real data, real-time.
 - **Two-tier architecture** — `statusline.py` (single-line status bar, triggered per Claude Code event) + `monitor.py` (fullscreen TUI, polls temp files independently).
 - **Temp file IPC** — atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/`. No sockets, no databases, no shared memory. Works across terminal sessions.
-- **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`).
+- **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/7DL segments also show a dimmed reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
 - **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
 - **Token usage stats** — press `t` for a per-model token breakdown (In/Out/Calls), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (TOP) count all token types: input + output + cache_read + cache_write.
@@ -87,12 +87,12 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 
 | Metric | What it shows | Range | Where |
 |--------|--------------|-------|-------|
-| **APR** | API time / total session time | 0-100% | statusline + dashboard |
+| **APR** | API time / total session time | 0-100% | dashboard |
 | **DUR** | Session duration (sub-stat of APR) | — | dashboard |
-| **CHR** | Cache read tokens / total cache | 0-100% | statusline + dashboard |
+| **CHR** | Cache read tokens / total cache | 0-100% | dashboard |
 | **CTX** | Context window usage | 0-100% | statusline + dashboard |
-| **5HL** | 5-hour rate limit usage | 0-100% | statusline + dashboard |
-| **7DL** | 7-day rate limit usage | 0-100% | statusline + dashboard |
+| **5HL** | 5-hour rate limit usage + dimmed reset countdown (`→ 2h 15m`) | 0-100% | statusline + dashboard |
+| **7DL** | 7-day rate limit usage + dimmed reset countdown (`→ 6d 12h`) | 0-100% | statusline + dashboard |
 | **BRN** | Cost burn rate | 0-10.0 $/min (env: `CC_MON_BRN_MAX`) | statusline + dashboard |
 | **CTR** | Context consumption rate | 0-10.0 %/min (env: `CC_MON_CTR_MAX`) | dashboard |
 | **CST** | Session cost | 0-$1000 (env: `CC_MON_CST_MAX`) | statusline + dashboard |
@@ -112,7 +112,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 
 ### Statusline
 
-Runs automatically on each Claude Code status update via stdin JSON. Outputs a single ANSI-colored line: Model │ CTX │ 5HL │ 7DL │ CST │ BRN │ APR │ CHR. Trailing segments drop when terminal is narrow. No background padding — CC notifications share the right side of the row.
+Runs automatically on each Claude Code status update via stdin JSON. Outputs a single ANSI-colored line: Model │ CTX │ 5HL → countdown │ 7DL → countdown │ CST │ BRN. Trailing segments drop when terminal is narrow. No background padding — CC notifications share the right side of the row. APR and CHR live only in the dashboard where the horizontal space isn't constrained.
 
 ### Dashboard
 
@@ -162,7 +162,7 @@ Both scripts import shared.py for shared BRN/CTR calculation.
 ```
 
 1. **Claude Code** emits JSON telemetry to `statusline.py` via stdin after each assistant message, permission mode change, or vim mode toggle (300ms debounce).
-2. **statusline.py** parses JSON, renders single-line ANSI status bar (model, context, rate limits, cost, burn rate, APR, CHR), writes atomic snapshot (`.json`) + appends to history (`.jsonl`).
+2. **statusline.py** parses JSON, renders single-line ANSI status bar (model, context, rate limits with dimmed reset countdown, cost, burn rate), writes atomic snapshot (`.json`) + appends to history (`.jsonl`).
 3. **monitor.py** polls temp directory (data files refresh every 500 ms; UI tick 50 ms for keyboard responsiveness), reads snapshots + history, renders fullscreen TUI with progress bars and computed metrics.
 4. **shared.py** provides `calc_rates()` — computes BRN ($/min) and CTR (%/min) from JSONL history timestamps.
 
