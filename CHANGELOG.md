@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.10.0 — 2026-04-18
+
+**Statusline rework — reset countdown in rate-limit segments:**
+- 5HL and 7DL segments now show a **dimmed reset countdown** next to the percentage: `5HL 42% → 2h 15m`, `7DL 30% → 6d 12h`. Tells you at a glance not just how much of the window you've used but how long until it resets. The countdown renders via ANSI faint (SGR `\033[2m`) so the percentage stays the primary signal and the reset time reads as supplementary info.
+- Countdown formatter reuses `f_cd()` from `monitor.py`, now promoted to `shared.py` so statusline and dashboard share a single source of truth (same display in both places).
+- ANSI faint attribute (`\033[2m`) via new `FAINT` constant in `shared.py`. Ink (the TUI renderer that Claude Code uses) supports `dimColor` natively, so the attribute reaches the terminal. ANSI blink (`\033[5m`) was evaluated but dropped: Ink's Text component does not list blink in its supported attributes (see [ink docs](https://github.com/vadimdemedes/ink)), and Windows Terminal does not render SGR 5 even when it reaches the terminal ([microsoft/terminal#7388](https://github.com/microsoft/terminal/issues/7388)).
+- Reset arrow is only rendered when `resets_at` is in the future. Expired or absent `resets_at` falls back to the pre-change display (no arrow, no visual noise).
+- Originally proposed by @digizensk in #25 — thanks for the nudge. Closed in favor of this broader rework.
+
+**Removed from statusline — APR and CHR:**
+- `APR` (API-time ratio) and `CHR` (cache-hit ratio) segments dropped from the statusline to free horizontal space for the reset countdown. Both remain fully available in the `monitor.py` dashboard where horizontal space isn't a constraint.
+- Net segment-width change: −20 chars (APR/CHR + separators) +12 chars (reset countdown) = **−8 chars overall**. Statusline fits into 80-col terminals more comfortably than before.
+- Segment priority order is now: Model │ CTX │ 5HL │ 7DL │ CST │ BRN. Trailing segments still drop from the right via existing `build_line` logic when the terminal is narrow.
+
+**Tests:**
+- Added coverage for new reset-countdown branches in `TestSeg5hl` / `TestSeg7dl`: future `resets_at` renders arrow + `f_cd` output; absent / `0` / expired `resets_at` renders no arrow; string-form `resets_at` is accepted via `_num`.
+- Removed `TestSegChr`, `TestSegApr`, `TestSegAprClamp` classes (segments no longer live in statusline).
+- Full suite: 470 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
+
+**Docs:**
+- README metrics table, statusline description, and architecture notes updated to reflect the new segment list and the dashboard-only status of APR/CHR.
+- `.claude/CLAUDE.md` architecture section updated.
+
 ## v1.9.1 — 2026-04-17
 
 **Security hardening:**

@@ -29,7 +29,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime
 
-from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur,
+from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur, f_cd,
                     char_width, is_safe_dir, run_git,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, TRANSCRIPT_MAX_BYTES,
                     DATA_DIR, VERSION_RE,
@@ -306,7 +306,7 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.9.1"
+VERSION = "1.10.0"
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
@@ -369,23 +369,6 @@ BAR_W = 25     # fixed bar width for ALL metrics
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
-def f_cd(epoch):
-    if epoch is None:
-        return "--"
-    epoch = _num(epoch, 0)
-    diff = int(epoch - time.time())
-    if diff <= 0:
-        return "now"
-    d, rem = divmod(diff, 86400)
-    h, rem = divmod(rem, 3600)
-    m = rem // 60
-    if d > 0:
-        return f"{d}d {h:02d}h"
-    if h > 0:
-        return f"{h}h {m:02d}m"
-    return f"{m}m"
-
-
 # ---------------------------------------------------------------------------
 # Progress bar — enclosed [████░░░░], fixed width, color by threshold
 # ---------------------------------------------------------------------------
