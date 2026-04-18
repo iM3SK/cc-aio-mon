@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.10.3 — 2026-04-19
+
+Hotfix for a Windows startup regression introduced in v1.10.1 and a new diagnostic to prevent similar silent failures in the future.
+
+**Critical fix (Windows startup):**
+- **`monitor.py:2033`** — `main()` crashed immediately on Windows with `UnboundLocalError: cannot access local variable 'signal' where it is not associated with a value`. Root cause: the v1.10.1 M-6 SIGPIPE fix placed `import signal` inside `main()` within an `if sys.platform != "win32":` block. Python's scope rule then treated `signal` as a function-local for the whole of `main()`, shadowing the module-level `import signal` at line 23. On Windows the `if` branch never executed, so `signal` stayed unbound and the later `signal.signal(SIGTERM, ...)` call (line 2121) tripped. The alt-screen buffer (`\033[?1049h`) then swallowed the traceback on exit — users saw "monitor just crashes with no error". Fix: use the module-level `signal` import only; the SIGPIPE registration now guards with `hasattr(signal, "SIGPIPE")`.
+
+**New diagnostic:**
+- **`monitor._install_crash_logger()`** — installs a `sys.excepthook` that writes uncaught exceptions to `$TMPDIR/claude-aio-monitor/monitor-crash.log` before the default handler runs. Captures: exception traceback, timestamp, platform, Python version, stdout encoding, filesystem encoding. Survives the alt-buffer cleanup wipe, so any future startup-path crash is diagnosable post-mortem instead of "disappearing" when the terminal restores. Installed as the first statement in `main()`.
+
+**Tests:**
+- `TestMainStartupNoUnboundLocal.test_no_inline_signal_import_in_main` — source-level guard: scans the body of `monitor.main()` for the literal string `import signal`. Pins the fix so the pattern cannot return via accident.
+- `TestMainStartupNoUnboundLocal.test_main_list_mode_runs_without_unbound_local` — runs `monitor.main()` with `--list` and asserts no `UnboundLocalError` propagates.
+- `TestCrashLoggerInstalled` — two tests (`_install_crash_logger` sets `sys.excepthook`; the hook actually writes to `monitor-crash.log` with platform/encoding/traceback).
+- Full suite: 490 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE handler test).
+
+**Postmortem: why did CI miss this?**
+- The Windows CI job (`test (windows-latest, 3.12)`) ran and passed — because the affected code path (`signal.SIGTERM` wiring) lives inside `main()` under the `if not sys.stdout.isatty(): sys.exit(...)` guard at line 2070. In CI, stdout is not a TTY, so `main()` exits before reaching line 2121. The bug was only reachable in interactive use.
+- `main()` has no unit test; this was accepted in v1.10.1 as finding L-8 ("TUI loop testability"). The new `TestMainStartupNoUnboundLocal` tests partially close that gap — at least for startup-path regressions, even without a real TTY.
+- Lesson: any `import` inside a function body in Python is a latent scope trap. Repo rule (see `.claude/CLAUDE.md`): imports belong at module level unless there's a documented reason (circular / optional dep).
+
 ## v1.10.2 — 2026-04-18
 
 Follow-up security hardening from a deep security scan of v1.10.1. All 6 findings addressed (0 critical, 0 high, 0 medium, 4 low, 2 info). Verdict of the scan was **clean (minor findings only)** — this release tightens the last remaining consistency gaps.

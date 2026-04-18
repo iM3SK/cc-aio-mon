@@ -31,7 +31,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.10.2"
+VERSION = "1.10.3"
 
 # Python files that ship with the app — used by syntax-check paths in update flow
 # (monitor.py:_apply_update_worker + update.py:apply_update). Must stay in sync.

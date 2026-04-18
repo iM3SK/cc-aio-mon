@@ -30,7 +30,7 @@ from collections import OrderedDict
 from datetime import datetime
 
 from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
-                    char_width, is_safe_dir, run_git,
+                    char_width, is_safe_dir, ensure_data_dir, run_git,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, TRANSCRIPT_MAX_BYTES,
                     DATA_DIR, VERSION_RE, VERSION, PY_FILES,
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
@@ -2030,12 +2030,44 @@ def flush(buf, cols=None):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main():
-    # SIGPIPE: silent exit when --list output is piped to head/less on Unix
-    # (matches statusline.py + update.py for consistency)
-    if sys.platform != "win32":
+def _install_crash_logger():
+    """Write uncaught exceptions to $TMPDIR/claude-aio-monitor/monitor-crash.log.
+
+    Alt screen buffer (\\033[?1049h) captures any Python traceback and the atexit
+    cleanup (\\033[?1049l) wipes it on exit — so without this hook, a crash looks
+    to the user like 'monitor just quit silently'. The crash log survives outside
+    the alt buffer for post-mortem diagnosis.
+    """
+    import traceback
+
+    def excepthook(exc_type, exc_value, tb):
         try:
-            import signal
+            if ensure_data_dir(DATA_DIR):
+                log_path = DATA_DIR / "monitor-crash.log"
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(f"monitor v{VERSION} crashed at {time.ctime()}\n")
+                    f.write(f"platform: {sys.platform}, python: {sys.version}\n")
+                    f.write(f"encoding: stdout={sys.stdout.encoding}, fs={sys.getfilesystemencoding()}\n")
+                    f.write("\n---\n")
+                    traceback.print_exception(exc_type, exc_value, tb, file=f)
+        except Exception:
+            pass  # never break exit on diag failure
+        # Defer to default handler so traceback also goes to stderr (post-cleanup)
+        sys.__excepthook__(exc_type, exc_value, tb)
+
+    sys.excepthook = excepthook
+
+
+def main():
+    _install_crash_logger()
+
+    # SIGPIPE: silent exit when --list output is piped to head/less on Unix
+    # (matches statusline.py + update.py for consistency).
+    # NOTE: `signal` is imported at module level (line 23); do NOT add a local
+    # `import signal` here — that turns `signal` into a function-scope local
+    # and breaks `signal.signal(SIGTERM, ...)` later in main() on Windows.
+    if sys.platform != "win32" and hasattr(signal, "SIGPIPE"):
+        try:
             signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         except (AttributeError, ValueError):
             pass

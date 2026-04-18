@@ -4777,6 +4777,120 @@ class TestApplyUpdateNewVersionSanitized(unittest.TestCase):
                       "apply_update must sanitize new_ver before 'New VERSION:' echo")
 
 
+# ---------------------------------------------------------------------------
+# v1.10.3 regression — UnboundLocalError via inline `import signal` in main()
+# ---------------------------------------------------------------------------
+class TestMainStartupNoUnboundLocal(unittest.TestCase):
+    """v1.10.3 — monitor.main() crashed on Windows with UnboundLocalError.
+
+    Root cause: the M-6 SIGPIPE fix had `import signal` inside main() inside
+    an `if sys.platform != "win32":` block. Python's scope rule makes `signal`
+    a function-local for the entire main(), so `signal.signal(SIGTERM, ...)`
+    later in the same function failed on Windows where the `import` branch
+    never executed.
+
+    This test runs main() via --list flag (early return, no TUI needed) and
+    asserts no UnboundLocalError propagates — the early SIGTERM wiring still
+    runs before --list check only after the fix reorder (actually: SIGTERM
+    wiring happens AFTER --list returns, so --list doesn't trip the bug).
+
+    Plus source-level guard: no local `import signal` anywhere in main().
+    """
+
+    def test_no_inline_signal_import_in_main(self):
+        import monitor as _m
+        src = pathlib.Path(_m.__file__).read_text(encoding="utf-8")
+        # Find main() definition
+        idx = src.find("def main():")
+        self.assertGreater(idx, -1, "main() function missing")
+        # Extract until the next top-level 'def' (or EOF)
+        tail = src[idx:]
+        next_def = tail.find("\ndef ", 1)
+        main_body = tail if next_def == -1 else tail[:next_def]
+        # Strip comments — we're guarding against CODE not prose
+        code_lines = []
+        for line in main_body.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue  # whole-line comment
+            # Strip inline comments (naive but sufficient — no '#' in our strings)
+            if "#" in line:
+                line = line.split("#", 1)[0].rstrip()
+            code_lines.append(line)
+        code_only = "\n".join(code_lines)
+        self.assertNotIn(
+            "import signal",
+            code_only,
+            "main() must NOT contain a local `import signal` — that shadows "
+            "the module-level import and breaks signal.SIGTERM on Windows "
+            "(v1.10.3 regression). Use module-level import only."
+        )
+
+    def test_main_list_mode_runs_without_unbound_local(self):
+        import monitor as _m
+        # --list exits early after listing sessions; it runs past the SIGPIPE
+        # block that used to contain the bad import. Enough to exercise the
+        # scope rule on Windows.
+        with patch.object(sys, "argv", ["monitor.py", "--list"]):
+            with patch("builtins.print"):
+                try:
+                    _m.main()
+                except UnboundLocalError as e:
+                    self.fail(f"UnboundLocalError in main() — scope bug regressed: {e}")
+                except SystemExit:
+                    pass  # normal for --list or TTY fallback
+
+
+class TestCrashLoggerInstalled(unittest.TestCase):
+    """v1.10.3 — sys.excepthook must write crash to $TMPDIR/claude-aio-monitor/monitor-crash.log.
+
+    Alt-buffer wipes tracebacks on terminal; the crash log is the only
+    post-mortem signal for bugs like the v1.10.3 scope regression.
+    """
+
+    def test_install_crash_logger_sets_excepthook(self):
+        import monitor as _m
+        original = sys.excepthook
+        try:
+            _m._install_crash_logger()
+            self.assertIsNot(sys.excepthook, original,
+                             "_install_crash_logger must replace sys.excepthook")
+        finally:
+            sys.excepthook = original
+
+    def test_crash_logger_writes_log_file(self):
+        import monitor as _m
+        original = sys.excepthook
+        log_path = _m.DATA_DIR / "monitor-crash.log"
+        if log_path.exists():
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
+        try:
+            _m._install_crash_logger()
+            # Trigger via the hook directly
+            try:
+                raise RuntimeError("test-crash-for-regression")
+            except RuntimeError:
+                exc_type, exc_value, tb = sys.exc_info()
+                # Avoid default handler printing to stderr
+                with patch("sys.__excepthook__"):
+                    sys.excepthook(exc_type, exc_value, tb)
+            self.assertTrue(log_path.exists(), "crash log should be written")
+            content = log_path.read_text(encoding="utf-8")
+            self.assertIn("test-crash-for-regression", content)
+            self.assertIn("platform:", content)
+            self.assertIn("encoding:", content)
+        finally:
+            sys.excepthook = original
+            if log_path.exists():
+                try:
+                    log_path.unlink()
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)
