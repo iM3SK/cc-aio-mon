@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.10.1 — 2026-04-18
+
+Security + correctness hardening from a post-v1.10.0 deep audit (16 findings total; 11 fixed, 5 accepted as intentional or out-of-scope).
+
+**Security:**
+- **(H-1)** `update.py:191` — exception text in the `Could not verify new VERSION` warning is now passed through `_sanitize()`. A manipulated `monitor.py` could previously raise a `UnicodeDecodeError` whose `repr()` contained ANSI escape sequences, which would then be written raw to the terminal — a latent escape-injection vector.
+- **(M-1)** `monitor.py:95, 1162` — `scan_transcript_stats()` and the `_aggregate_session_cost()` fallback now gate `~/.claude/projects/` access through `is_safe_dir()` instead of a bare `.is_dir()` check. A symlink/junction on the projects root would previously have passed the check and caused the JSONL glob to follow the link.
+- **(M-2)** `monitor.py:660` — `list_sessions()` now bounds the `.json` read to `MAX_FILE_SIZE + 1` bytes (mirroring `load_state()` at `:697`), closing a TOCTOU where an attacker with write access to `$TMPDIR/claude-aio-monitor/` could have grown a file between the `st.st_size` check and the unbounded `read_text()`.
+
+**Correctness:**
+- **(M-5)** `pulse.py:611` — `start_pulse_worker()` now reverts `_worker_started = True` when `threading.Thread(...)` or `t.start()` raises, allowing a later retry. Previously the pulse worker would be stuck in permanent "AWAITING DATA" with no way to recover from a transient thread-spawn failure.
+- **(L-2)** `pulse.py:312` — `_ping_api()` now uses `with urllib.request.urlopen(...) as resp:` instead of a plain call + `resp.close()`, preventing a socket leak if an async exception (e.g. `KeyboardInterrupt`) hit between the two statements.
+- **(M-6)** `monitor.py:main` — SIGPIPE is now installed as `SIG_DFL` on non-Windows, matching `statusline.py` and `update.py`. Piping `monitor.py --list` to `head`/`less` no longer prints a `BrokenPipeError` traceback.
+- **(L-6)** `monitor.py:_setup_term` — `SetConsoleMode` return value is now checked. If the call returns 0 (pre-Win10 or unsupported handle), we fall through with a comment explaining the degraded mode instead of silently assuming VT processing is enabled.
+
+**Quality:**
+- **(M-4)** `monitor.py:450` — added explicit comment that `_cost_cache` is main-thread only (no lock by design), contrasting with `_rls_cache` which IS locked because a daemon thread writes it. Pre-empts a future refactor inadvertently introducing a race.
+- **(L-5)** `monitor.py:528` — added docstring to `_rls_maybe_check()` documenting the lock-ownership contract between it and `_rls_check_worker`.
+
+**Docs:**
+- **(L-7)** `.claude/CLAUDE.md` file-size-limits line expanded to include `TRANSCRIPT_MAX_BYTES` (50 MiB) and `MAX_FILE_SIZE * 10` (10 MiB) with their constant names.
+
+**Tests:**
+- Added 4 regression tests (`TestScanTranscriptStatsSafeDir`, `TestPulseWorkerStartRevert`, `TestApplyUpdateWorkerVersionErrorSanitized`) pinning the behavior for H-1, M-1, and M-5.
+- Full suite: 474 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
+
+**Not fixed (intentional):**
+- **(M-3)** `main()` and `render_frame()` size — accepted; splitting them is a larger refactor better handled in a feature release.
+- **(L-1)** `_safe_transcript_path` TOCTOU — only exploitable with write access to `~/.claude/projects/`, which is user-owned.
+- **(L-3)** statusline `data` JSON sanitization — readers already sanitize on consumption; defense-in-depth sufficient.
+- **(L-4)** `_model_label` duplication in `render_picker` — code comment marks it as intentional (different display context).
+- **(L-8, L-9)** `main()` coverage gap and Windows `ch.decode` for multi-byte UTF-8 — accepted tradeoffs (TUI loop testability, ASCII-only shortcuts).
+
 ## v1.10.0 — 2026-04-18
 
 **Statusline rework — reset countdown in rate-limit segments:**

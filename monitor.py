@@ -92,7 +92,7 @@ def scan_transcript_stats(period="all", ttl=30.0):
     session_times = {}  # sid -> (first_ts, last_ts)
     session_count = 0
 
-    if not _CLAUDE_DIR.is_dir():
+    if not is_safe_dir(_CLAUDE_DIR):
         empty_ov = {"sessions": 0, "active_days": set(), "longest_dur_ms": 0,
                      "first_date": None, "daily_tokens": {}, "truncated": False}
         return models, empty_ov
@@ -244,7 +244,11 @@ if IS_WIN:
         return None
 
     def _setup_term():
-        """Enable VT/ANSI processing on Windows console."""
+        """Enable VT/ANSI processing on Windows console.
+
+        If SetConsoleMode fails (pre-Win10, or redirected handle), ANSI
+        sequences render as raw text — best-effort, can't recover here.
+        """
         ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
         ENABLE_PROCESSED_OUTPUT = 0x0001
         try:
@@ -256,7 +260,10 @@ if IS_WIN:
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 return
             new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT
-            kernel32.SetConsoleMode(handle, new_mode)
+            if not kernel32.SetConsoleMode(handle, new_mode):
+                # SetConsoleMode returned 0 — likely pre-Win10 or unsupported handle.
+                # Fall through: caller's ANSI output may render as raw escape sequences.
+                return
         except Exception:
             pass
 
@@ -306,7 +313,7 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
@@ -447,6 +454,8 @@ def collect_warnings(data, cpm, xpm):
 # ---------------------------------------------------------------------------
 # Cross-session cost aggregation
 # ---------------------------------------------------------------------------
+# Main-thread only — read/written exclusively from render loop. No lock needed.
+# (Unlike _rls_cache which IS locked because a daemon thread updates it.)
 _cost_cache = {"t": 0.0, "today": 0.0, "week": 0.0}
 
 
@@ -517,7 +526,12 @@ def _rls_check_worker():
 
 
 def _rls_maybe_check():
-    """Trigger background check if TTL expired. Non-blocking."""
+    """Trigger background check if TTL expired. Non-blocking.
+
+    Lock ownership: acquired here, released by _rls_check_worker's `finally`
+    OR here if the Thread spawn itself fails. Worker must not return
+    without releasing. Keep in sync with _rls_check_worker:524.
+    """
     if os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK") == "1":
         return
     if time.monotonic() - _rls_snapshot()["t"] < _RLS_TTL:
@@ -662,7 +676,11 @@ def list_sessions():
                 continue
             mt = st.st_mtime
             age = now - mt
-            d = json.loads(f.read_text(encoding="utf-8"))
+            with open(f, "rb") as fh:
+                raw = fh.read(MAX_FILE_SIZE + 1)
+            if len(raw) > MAX_FILE_SIZE:
+                continue
+            d = json.loads(raw.decode("utf-8"))
             # Skip snapshots without usable model info (test artifacts / incomplete writes)
             display_name = _sanitize(d.get("model", {}).get("display_name", "")).strip()
             if not display_name:
@@ -681,7 +699,7 @@ def list_sessions():
                 "session_name": _sanitize(d.get("session_name", "")),
                 "cwd": _sanitize(d.get("cwd", "")),
             })
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             pass
     sessions.sort(key=lambda s: s["mtime"], reverse=True)
     return sessions
@@ -1159,7 +1177,7 @@ def _aggregate_session_cost(data):
         # Fallback: scan ~/.claude/projects/*/{sid}.jsonl (first match wins)
         try:
             home = CLAUDE_PROJECTS_DIR
-            if home.is_dir():
+            if is_safe_dir(home):
                 for cand in home.glob(f"*/{sid}.jsonl"):
                     if cand.is_file():
                         path = _safe_transcript_path(str(cand))
@@ -2005,6 +2023,15 @@ def flush(buf, cols=None):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    # SIGPIPE: silent exit when --list output is piped to head/less on Unix
+    # (matches statusline.py + update.py for consistency)
+    if sys.platform != "win32":
+        try:
+            import signal
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(description="Claude AIO Monitor")
     parser.add_argument("--session", help="Session ID")
     parser.add_argument("--list", action="store_true", help="List sessions")

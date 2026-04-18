@@ -309,8 +309,8 @@ def _ping_api():
     )
     start = time.monotonic()
     try:
-        resp = urllib.request.urlopen(req, timeout=PING_TIMEOUT)  # nosec B310 — PROBE_URL is a hardcoded HTTPS constant, no user input
-        resp.close()
+        with urllib.request.urlopen(req, timeout=PING_TIMEOUT) as resp:  # nosec B310 — PROBE_URL is a hardcoded HTTPS constant, no user input
+            resp.read(1)  # drain minimally; context manager guarantees close on exit
     except urllib.error.HTTPError:
         # Any HTTP status = endpoint responded (401/405/429 all fine as liveness signal)
         return (time.monotonic() - start) * 1000.0
@@ -608,8 +608,14 @@ def start_pulse_worker():
         cleanup_log_startup()
     except Exception:  # pragma: no cover — never block worker start on cleanup
         pass
-    t = threading.Thread(target=_worker_loop, name="pulse-worker", daemon=True)
-    t.start()
+    try:
+        t = threading.Thread(target=_worker_loop, name="pulse-worker", daemon=True)
+        t.start()
+    except Exception:
+        # Thread() or start() failed — revert the started flag so a later call can retry
+        with _worker_lock:
+            _worker_started = False
+        raise
 
 
 def get_pulse_snapshot():
