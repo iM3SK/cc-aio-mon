@@ -157,10 +157,14 @@ def seg_5hl(data):
         return None
     pct = round(_num(fh.get("used_percentage")))
     resets = _num(fh.get("resets_at"), 0)
-    if resets > 0 and resets < time.time():
+    now = time.time()
+    if resets > 0 and resets < now:
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}5HL{R} {c}{pct}%{R}"
+    reset_str = ""
+    if resets > now:
+        reset_str = f" {C_DIM}→{R}{c}{time.strftime('%H:%M', time.localtime(resets))}{R}"
+    text = f"{c}{B}5HL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 
 
@@ -173,10 +177,14 @@ def seg_7dl(data):
         return None
     pct = round(_num(sd.get("used_percentage")))
     resets = _num(sd.get("resets_at"), 0)
-    if resets > 0 and resets < time.time():
+    now = time.time()
+    if resets > 0 and resets < now:
         pct = 0
     c = cpc_base(pct, C_YEL)
-    text = f"{c}{B}7DL{R} {c}{pct}%{R}"
+    reset_str = ""
+    if resets > now:
+        reset_str = f" {C_DIM}→{R}{c}{time.strftime('%d.%m. %H:%M', time.localtime(resets))}{R}"
+    text = f"{c}{B}7DL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 
 
