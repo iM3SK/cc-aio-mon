@@ -39,7 +39,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 
-from shared import DATA_DIR, ensure_data_dir
+from shared import DATA_DIR, ensure_data_dir, safe_read, VERSION
 
 # ---------------------------------------------------------------------------
 # Config
@@ -49,7 +49,7 @@ PROBE_URL = "https://api.anthropic.com/v1/messages"  # expect 401/405 without au
 HTTP_TIMEOUT = 5.0
 PING_TIMEOUT = 4.0  # covers TLS handshake + HTTP round-trip
 FETCH_INTERVAL = 30.0  # seconds between background fetches
-USER_AGENT = "cc-aio-mon-pulse/1.9.1 (+https://github.com/iM3SK/cc-aio-mon)"  # keep in sync with monitor.VERSION
+USER_AGENT = f"cc-aio-mon-pulse/{VERSION} (+https://github.com/iM3SK/cc-aio-mon)"  # VERSION from shared.py
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB cap on status.json response
 
 # Persistence + cleanup
@@ -431,19 +431,19 @@ def cleanup_log_startup():
     except OSError:
         return
     cutoff = time.time() - LOG_AGE_CUTOFF
-    kept = []
-    try:
-        with open(LOG_PATH, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue  # drop malformed
-                ts = rec.get("ts", 0)
-                if isinstance(ts, (int, float)) and ts >= cutoff:
-                    kept.append(line if line.endswith("\n") else line + "\n")
-    except OSError:
+    # Bounded read — hard ceiling 2× LOG_MAX_BYTES protects against malicious growth
+    raw = safe_read(LOG_PATH, LOG_MAX_BYTES * 2)
+    if raw is None:
         return
+    kept = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue  # drop malformed
+        ts = rec.get("ts", 0)
+        if isinstance(ts, (int, float)) and ts >= cutoff:
+            kept.append(line + "\n")
     if len(kept) > LOG_STARTUP_CAP:
         kept = kept[-LOG_STARTUP_CAP:]
     with _log_lock:
@@ -463,11 +463,11 @@ def _maybe_rotate_log():
     if size <= LOG_MAX_BYTES:
         return
     with _log_lock:
-        try:
-            with open(LOG_PATH, encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError:
+        # Bounded read — hard ceiling 2× LOG_MAX_BYTES, even if file grew between stat and read
+        raw = safe_read(LOG_PATH, LOG_MAX_BYTES * 2)
+        if raw is None:
             return
+        lines = [ln + "\n" for ln in raw.decode("utf-8", errors="replace").splitlines()]
         trimmed = lines[-LOG_TRIM_TARGET:]
         _atomic_replace_log(trimmed)
 

@@ -30,6 +30,13 @@ DATA_DIR_NAME = "claude-aio-monitor"
 DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
+# Single source of truth for app version — imported by monitor.py, pulse.py, update.py
+VERSION = "1.10.2"
+
+# Python files that ship with the app — used by syntax-check paths in update flow
+# (monitor.py:_apply_update_worker + update.py:apply_update). Must stay in sync.
+PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
+
 # ANSI — Nord truecolor (shared palette for statusline.py + monitor.py)
 E = "\033["
 R = E + "0m"
@@ -62,6 +69,23 @@ def _num(v, default=0):
         return float(v) if v is not None else default
     except (TypeError, ValueError):
         return default
+
+
+def safe_read(path, max_bytes):
+    """Bounded read — returns bytes or None. Never reads more than max_bytes + 1.
+
+    Closes TOCTOU gap: caller doesn't have to stat first, and even if they do,
+    an attacker growing the file between stat and read cannot exceed max_bytes.
+    Returns None on OSError, on >max_bytes overflow, or on missing file.
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(raw) > max_bytes:
+        return None
+    return raw
 
 
 def _sanitize(s):
