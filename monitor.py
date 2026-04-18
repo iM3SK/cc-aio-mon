@@ -29,10 +29,10 @@ import time
 from collections import OrderedDict
 from datetime import datetime
 
-from shared import (calc_rates, _num, _sanitize, f_tok, f_cost, f_dur, f_cd,
+from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
                     char_width, is_safe_dir, run_git,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, TRANSCRIPT_MAX_BYTES,
-                    DATA_DIR, VERSION_RE,
+                    DATA_DIR, VERSION_RE, VERSION, PY_FILES,
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     extract_changelog_entry,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
@@ -313,7 +313,7 @@ SYNC_OFF = E + "?2026l"
 C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
 BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
 
-VERSION = "1.10.1"
+# VERSION is imported from shared.py — single source of truth (shared.VERSION)
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
 DEAD_SESSION_TTL = 172800  # 48h — auto-purge dead session files from temp dir
 
@@ -569,12 +569,19 @@ def calc_cross_session_costs():
             continue
         if sid in RESERVED_SIDS:
             continue
+        # Bounded read — stat check + safe_read cap closes TOCTOU window
         try:
             st = jl.stat()
             if st.st_size > MAX_FILE_SIZE * 10:
                 continue
-            raw = jl.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except OSError:
+            continue
+        raw_bytes = safe_read(jl, MAX_FILE_SIZE * 10)
+        if raw_bytes is None:
+            continue
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
             continue
         entries = []
         for ln in raw.splitlines():
@@ -1657,9 +1664,10 @@ def _apply_update_worker():
     try:
         rc, out, err = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
         if rc == 0:
-            # Syntax check via compile() — avoids interpreter version mismatch
+            # Syntax check via compile() — avoids interpreter version mismatch.
+            # Uses shared.PY_FILES so update.py and this worker cover the same set.
             bad = []
-            for f in ["monitor.py", "statusline.py", "shared.py", "update.py"]:
+            for f in PY_FILES:
                 fp = _REPO_ROOT / f
                 if fp.exists():
                     try:
@@ -2084,7 +2092,9 @@ def main():
 
     sid = args.session
     if sid and not _SID_RE.match(sid):
-        print(f"Invalid session ID: {sid}")
+        # sid failed regex — could contain ANSI escapes / control chars.
+        # Sanitize + length-cap before echoing to terminal.
+        print(f"Invalid session ID: {_sanitize(sid)[:64]}")
         return
     show_legend = False
     show_menu = False

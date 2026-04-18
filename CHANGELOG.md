@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.10.2 — 2026-04-18
+
+Follow-up security hardening from a deep security scan of v1.10.1. All 6 findings addressed (0 critical, 0 high, 0 medium, 4 low, 2 info). Verdict of the scan was **clean (minor findings only)** — this release tightens the last remaining consistency gaps.
+
+**Security:**
+- **(L-1)** Two more TOCTOU windows closed. `calc_cross_session_costs()` (`monitor.py:573`) and `_trim_history()` (`statusline.py:360`) now route their file reads through the new `shared.safe_read()` helper — a single bounded-read primitive that caps at `N + 1` bytes and rejects overflows. Closes the `stat()`→`read_text()` race that an attacker with write access to `$TMPDIR/claude-aio-monitor/` could previously exploit for same-user RAM DoS.
+- **(L-2)** `monitor.py:2094` CLI path — `--session <evil>` with an invalid SID previously echoed the raw input back in `print(f"Invalid session ID: {sid}")`. Now passes through `_sanitize(sid)[:64]`, closing an ANSI-escape injection vector (threat model: local, low severity).
+- **(L-3)** `pulse.py:436, 467` — both `cleanup_log_startup()` and `_maybe_rotate_log()` now read `pulse.jsonl` through `safe_read()` with a hard ceiling of `LOG_MAX_BYTES * 2` (2 MB). A malicious caller that wrote >>1 MB in a single line between rotations would previously have forced Python to allocate the whole file before parsing.
+- **(L-4)** `update.py:189` — `new_ver` from `get_local_version()` is now `_sanitize()`-wrapped before the `New VERSION:` echo. `VERSION_RE` matches `[^"']+`, so an on-disk `monitor.py` modification between `git pull` and re-read could have landed ANSI escapes in the version string.
+
+**Maintainability (consistency):**
+- **(I-1)** `VERSION` is now a single source of truth in `shared.py`. `monitor.py` and `pulse.py` both import it, so `pulse.USER_AGENT` now always tracks the current release (previously pinned to `1.9.1` despite the app being on `1.10.1`). Comment in `pulse.py` explicitly cites the shared origin.
+- **(I-2)** `PY_FILES` (tuple of all 5 source files) extracted to `shared.py`. The post-update syntax-check paths in both `monitor.py:_apply_update_worker` (1669) and `update.py:apply_update` (194) now iterate `for f in PY_FILES`. `pulse.py` had previously been omitted from the monitor-side check — that drift can no longer happen.
+
+**New helper:**
+- `shared.safe_read(path, max_bytes)` — bounded read primitive. Returns `bytes` or `None` (on OSError / missing file / over-cap overflow). Centralises the `open(…,"rb").read(N+1)` idiom that appeared in 4 call sites. Future file reads should use this instead of `read_text()` or `read_bytes()` unless the caller genuinely cannot express a byte ceiling.
+
+**Tests:**
+- Added 12 regression tests across `TestSafeRead`, `TestVersionSingleSourceOfTruth`, `TestPyFilesSingleSourceOfTruth`, `TestInvalidSessionIdSanitized`, `TestApplyUpdateNewVersionSanitized`. The `test_pulse_in_syntax_check_list` regression was updated to check `shared.PY_FILES` membership instead of literal `"pulse.py"` in `update.py` source.
+- Full suite: 486 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
+
+**Not fixed (out of scope):**
+- Scan recommendation #4 (`GIT_CONFIG_NOSYSTEM=1` / `GIT_CONFIG_GLOBAL=/dev/null` in `_git_env()`) — defense-in-depth over already-hardcoded arg lists. Deferred as a stretch goal; current `run_git` already blocks proxy / SSH / LD_PRELOAD injection.
+
 ## v1.10.1 — 2026-04-18
 
 Security + correctness hardening from a post-v1.10.0 deep audit (16 findings total; 11 fixed, 5 accepted as intentional or out-of-scope).

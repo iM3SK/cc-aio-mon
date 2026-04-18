@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 
-from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost, f_cd,
+from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_cd,
                     is_safe_dir, ensure_data_dir,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, RESERVED_SIDS,
                     strip_context_suffix,
@@ -359,8 +359,12 @@ def write_shared_state(data: dict):
 
 def _trim_history(path: pathlib.Path):
     fd = None
+    # Bounded read — JSONL trim cap is MAX_FILE_SIZE * 2 (spec line in CLAUDE.md)
+    raw = safe_read(path, MAX_FILE_SIZE * 2)
+    if raw is None:
+        return
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
         if len(lines) > HISTORY_TRIM_TO:
             trimmed = "\n".join(lines[-HISTORY_TRIM_TO:]) + "\n"
             fd = tempfile.NamedTemporaryFile(

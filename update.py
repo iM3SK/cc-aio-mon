@@ -16,7 +16,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from shared import VERSION_RE, _sanitize, run_git as _shared_run_git, extract_changelog_entry
+from shared import VERSION_RE, _sanitize, run_git as _shared_run_git, extract_changelog_entry, PY_FILES
 
 
 # ---------- ANSI colors (Windows VT enable) ----------
@@ -186,14 +186,16 @@ def apply_update():
 
     try:
         new_ver = get_local_version()
-        ok(f"New VERSION: {new_ver}")
+        # VERSION_RE matches [^"']+ — on-disk monitor.py could carry ANSI;
+        # sanitize before echoing to terminal.
+        ok(f"New VERSION: {_sanitize(new_ver)}")
     except Exception as e:
         warn(f"Could not verify new VERSION: {_sanitize(str(e))}")
 
-    # Syntax check — catch broken updates before user runs monitor
-    py_files = ["monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py"]
+    # Syntax check — catch broken updates before user runs monitor.
+    # File list comes from shared.PY_FILES (single source of truth).
     bad = []
-    for f in py_files:
+    for f in PY_FILES:
         fp = REPO_ROOT / f
         if fp.exists():
             try:
@@ -204,7 +206,7 @@ def apply_update():
         warn(f"Syntax errors in: {', '.join(bad)} — update may be broken")
         note(f"Revert with: git reset --hard {rollback_tag}")
     else:
-        ok(f"Syntax check passed ({len(py_files)} files)")
+        ok(f"Syntax check passed ({len(PY_FILES)} files)")
 
     print()
     print(f"{GRN}Update complete.{R}")

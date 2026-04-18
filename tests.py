@@ -2583,9 +2583,10 @@ class TestUpdateApplyRollbackTag(unittest.TestCase):
 
     def test_pulse_in_syntax_check_list(self):
         # Regression: pulse.py was missing from the post-pull compile check.
-        import update as _up
-        src = pathlib.Path(_up.__file__).read_text(encoding="utf-8")
-        self.assertIn('"pulse.py"', src, "pulse.py must be in py_files syntax check list")
+        # As of v1.10.2 the file list lives in shared.PY_FILES (source of truth
+        # shared by update.py and monitor.py:_apply_update_worker).
+        self.assertIn("pulse.py", shared.PY_FILES,
+                      "pulse.py must be in shared.PY_FILES syntax check list")
 
     def test_rollback_tag_format(self):
         # Tag uses pre-update-YYYYMMDD-HHMMSS
@@ -4666,6 +4667,114 @@ class TestApplyUpdateWorkerVersionErrorSanitized(unittest.TestCase):
                                  "ANSI escape must be stripped from exception text")
                 self.assertIn("INJECTED", printed,
                               "Regular text content should pass through _sanitize")
+
+
+# ---------------------------------------------------------------------------
+# v1.10.2 security scan regression tests (L-1..L-4, I-1, I-2)
+# ---------------------------------------------------------------------------
+class TestSafeRead(unittest.TestCase):
+    """shared.safe_read: bounded file read. Core of v1.10.2 TOCTOU hardening."""
+
+    def test_returns_bytes_on_small_file(self):
+        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as f:
+            f.write(b"hello")
+            p = f.name
+        try:
+            self.assertEqual(shared.safe_read(p, 100), b"hello")
+        finally:
+            os.unlink(p)
+
+    def test_returns_none_when_over_cap(self):
+        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as f:
+            f.write(b"x" * 100)
+            p = f.name
+        try:
+            # Cap 50, file has 100 bytes → must return None
+            self.assertIsNone(shared.safe_read(p, 50))
+        finally:
+            os.unlink(p)
+
+    def test_returns_none_on_missing_file(self):
+        self.assertIsNone(shared.safe_read("/nonexistent/path/xyz", 100))
+
+    def test_reads_exactly_at_cap(self):
+        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as f:
+            f.write(b"x" * 100)
+            p = f.name
+        try:
+            # Cap exactly matches size → pass
+            self.assertEqual(shared.safe_read(p, 100), b"x" * 100)
+        finally:
+            os.unlink(p)
+
+
+class TestVersionSingleSourceOfTruth(unittest.TestCase):
+    """I-1: VERSION lives in shared.py; monitor + pulse import from there."""
+
+    def test_shared_version_is_string(self):
+        self.assertIsInstance(shared.VERSION, str)
+        self.assertRegex(shared.VERSION, r"^\d+\.\d+\.\d+$")
+
+    def test_monitor_version_matches_shared(self):
+        import monitor as _m
+        self.assertEqual(_m.VERSION, shared.VERSION)
+
+    def test_pulse_user_agent_uses_shared_version(self):
+        import pulse as _p
+        self.assertIn(shared.VERSION, _p.USER_AGENT,
+                      f"pulse.USER_AGENT must embed shared.VERSION, got {_p.USER_AGENT!r}")
+
+
+class TestPyFilesSingleSourceOfTruth(unittest.TestCase):
+    """I-2: PY_FILES in shared.py is the single source of truth for syntax-check list."""
+
+    def test_shared_py_files_contains_all_modules(self):
+        expected = {"monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py"}
+        self.assertEqual(set(shared.PY_FILES), expected)
+
+    def test_update_uses_shared_py_files(self):
+        import update as _u
+        src = pathlib.Path(_u.__file__).read_text(encoding="utf-8")
+        # Must import PY_FILES from shared and iterate via it — not hardcoded list
+        self.assertIn("PY_FILES", src)
+        self.assertIn("for f in PY_FILES", src)
+
+    def test_monitor_uses_shared_py_files(self):
+        import monitor as _m
+        src = pathlib.Path(_m.__file__).read_text(encoding="utf-8")
+        self.assertIn("PY_FILES", src)
+        self.assertIn("for f in PY_FILES", src)
+
+
+class TestInvalidSessionIdSanitized(unittest.TestCase):
+    """L-2: CLI --session error path must sanitize before echoing to terminal."""
+
+    def test_source_wraps_sid_in_sanitize(self):
+        # Running main() with evil stdin requires full TTY mock; simpler to pin
+        # the shape of the fix: the 'Invalid session ID' print site must call
+        # _sanitize(sid) before interpolating.
+        import monitor as _m
+        src = pathlib.Path(_m.__file__).read_text(encoding="utf-8")
+        # Find the print line and check it sanitizes
+        idx = src.find("Invalid session ID:")
+        self.assertGreater(idx, -1, "Invalid session ID print site missing")
+        snippet = src[idx:idx + 120]
+        self.assertIn("_sanitize(sid)", snippet,
+                      "'Invalid session ID' print must pass sid through _sanitize")
+
+
+class TestApplyUpdateNewVersionSanitized(unittest.TestCase):
+    """L-4: new_ver from get_local_version() must be sanitized before echo."""
+
+    def test_new_version_is_sanitized(self):
+        # VERSION_RE matches [^"']+ — an attacker could land an ANSI-bearing
+        # VERSION value on-disk between git pull and re-read. apply_update
+        # must _sanitize(new_ver) before printing.
+        import update as _u
+        src = pathlib.Path(_u.__file__).read_text(encoding="utf-8")
+        # Look for the sanitize wrapper around new_ver in the success branch
+        self.assertIn('_sanitize(new_ver)', src,
+                      "apply_update must sanitize new_ver before 'New VERSION:' echo")
 
 
 if __name__ == "__main__":
