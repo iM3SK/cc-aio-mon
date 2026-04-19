@@ -64,7 +64,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 </p>
 
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12), macOS (Python 3.12).
-- **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical.
+- **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
 - **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime.
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
@@ -73,7 +73,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, cost breakdown, update manager.
 - **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). Also shows cache savings percentage and burn rate over time bars.
 - **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.claude.com` (indicator + incidents) + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku) — prefers `incidents[].components[]` array, falls back to regex on title. JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
-- **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink rejection on data directory, file size limits (1MB JSON, 2MB JSONL, 10MB cross-session).
+- **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`) with Windows reserved-device-name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink rejection on data directory, file size limits (1MB JSON, 2MB JSONL, 10MB cross-session).
 
 ## Session States
 
@@ -215,7 +215,7 @@ export CLAUDE_STATUS_CRIT=90
 
 | Measure | Protection |
 |---------|------------|
-| Session ID validation | Strict regex `[a-zA-Z0-9_-]{1,128}` prevents path traversal |
+| Session ID validation | Strict regex `[a-zA-Z0-9_-]{1,128}` prevents path traversal; Windows reserved device names (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`) rejected case-insensitively |
 | Input sanitization | C0/C1 control characters + bidi overrides stripped before terminal output |
 | File size limits | JSON capped at 1 MB, JSONL at 2 MB (10 MB for cross-session aggregation) — oversized files skipped |
 | Atomic writes | Unpredictable temp filenames prevent symlink attacks |
@@ -243,6 +243,7 @@ export CLAUDE_STATUS_CRIT=90
 
 - **Delayed refresh after context compaction** — when Claude Code compacts the context window, the dashboard continues showing the pre-compaction CTX value until Claude Code emits the next statusline event (typically the next assistant message). This is a Claude Code protocol limitation — `statusline.py` is only invoked on assistant messages, permission mode changes, or vim mode toggles. There is no external API to trigger a refresh on demand.
 - **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown uses per-model cached-input multipliers (0.1×) and cache-write multipliers (1.25×). Current priced families: Opus (4.1 / 4.5 / 4.6 / 4.7), Sonnet (4.5 / 4.6), Haiku (3.5 / 4.5).
+- **Local timezone everywhere** — all timestamps (header clock, daily aggregation, rollback tags like `pre-update-YYYYMMDD-HHMMSS`, pulse JSONL entries) use the machine's local timezone, not UTC. If you ship temp-dir logs to a maintainer in a different zone, clock labels will not line up — report the date plus your TZ offset when filing an issue.
 
 ## Troubleshooting
 
@@ -300,8 +301,10 @@ Contributions welcome. Keep it stdlib only, ship `shared.py` alongside entry scr
 
 ```bash
 python3 tests.py
-python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py','statusline.py','monitor.py','update.py','pulse.py')]"
+python3 -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
 ```
+
+The file list comes from `shared.PY_FILES` (single source of truth since v1.10.2). `update.py`'s post-pull syntax check uses the same tuple, so a new runtime module added to the project only needs to be appended to `PY_FILES` in one place.
 
 Open an issue first for anything non-trivial so the approach can be discussed before work begins. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
 

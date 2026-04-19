@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: MIT
 """Shared helpers and rate calculation for monitor.py and statusline.py."""
 
+import json
 import os
 import pathlib
 import re
 import stat as _stat_mod
+import subprocess
 import sys
 import tempfile
 import time
@@ -32,7 +34,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.10.4"
+VERSION = "1.10.5"
 
 # Python files that ship with the app — used by syntax-check paths in update flow
 # (monitor.py:_apply_update_worker + update.py:apply_update). Must stay in sync.
@@ -70,6 +72,39 @@ def _num(v, default=0):
         return float(v) if v is not None else default
     except (TypeError, ValueError):
         return default
+
+
+def load_history(sid, n=120, data_dir=None):
+    """Read last n JSONL history entries for session `sid`.
+
+    Single source of truth for both monitor.py (BRN/CTR dashboard rates) and
+    statusline.py (pre-write rate computation). Returns list of parsed dicts
+    (best-effort — malformed lines skipped, not raised).
+    Returns [] on invalid SID, unsafe data dir, or read failure.
+
+    `data_dir` defaults to the shared DATA_DIR constant; callers can pass their
+    own (monitor.py / statusline.py do, so test monkey-patching of their module
+    DATA_DIR continues to work).
+    """
+    dd = data_dir if data_dir is not None else DATA_DIR
+    if not _SID_RE.match(str(sid)):
+        return []
+    if not is_safe_dir(dd):
+        return []
+    raw = safe_read(dd / f"{sid}.jsonl", MAX_FILE_SIZE * 2)
+    if raw is None:
+        return []
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return []
+    out = []
+    for ln in lines[-n:]:
+        try:
+            out.append(json.loads(ln))
+        except json.JSONDecodeError:
+            pass
+    return out
 
 
 def safe_read(path, max_bytes):
@@ -231,7 +266,6 @@ def _git_env():
 def run_git(args, cwd, timeout=15):
     """Safe git invocation with minimal env whitelist.
     Returns subprocess.CompletedProcess. Raises FileNotFoundError if git missing."""
-    import subprocess
     return subprocess.run(
         ["git"] + list(args),
         cwd=cwd, capture_output=True, text=True,

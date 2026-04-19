@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import atexit
+import bisect
 import codecs
 import json
 import os
@@ -27,11 +28,13 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
                     char_width, is_safe_dir, ensure_data_dir, run_git,
+                    load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, TRANSCRIPT_MAX_BYTES,
                     DATA_DIR, VERSION_RE, VERSION, PY_FILES,
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
@@ -43,6 +46,7 @@ import pulse
 # Transcript usage scanner — reads ~/.claude/projects/**/*.jsonl
 # ---------------------------------------------------------------------------
 _CLAUDE_DIR = pathlib.Path.home() / ".claude" / "projects"
+MAX_TRANSCRIPT_FILES = 1000  # hard cap on scan to prevent DoS via oversized projects dir
 _usage_cache = {}
 
 
@@ -98,17 +102,38 @@ def scan_transcript_stats(period="all", ttl=30.0):
                      "first_date": None, "daily_tokens": {}, "truncated": False}
         return models, empty_ov
 
+    # Resolve once to establish a canonical root. Transcripts that resolve
+    # outside this root (symlinks escaping via reparse points) are rejected
+    # per-file below — consistent with _safe_transcript_path hardening.
+    try:
+        claude_root = _CLAUDE_DIR.resolve(strict=True)
+    except (OSError, RuntimeError):
+        empty_ov = {"sessions": 0, "active_days": set(), "longest_dur_ms": 0,
+                     "first_date": None, "daily_tokens": {}, "truncated": False}
+        return models, empty_ov
+
     _file_count = 0
     _truncated = False
     for jl in _CLAUDE_DIR.glob("**/*.jsonl"):
         _file_count += 1
-        if _file_count > 1000:
+        if _file_count > MAX_TRANSCRIPT_FILES:
             _truncated = True
             break
         # Skip subagent transcripts for session counting
         is_subagent = "subagents" in str(jl)
         try:
-            st = jl.stat()
+            st = jl.lstat()
+            # Reject symlinked transcript files: resolve must land inside claude_root,
+            # and the lstat must be a regular file (not a symlink itself).
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            try:
+                resolved = jl.resolve(strict=True)
+                resolved.relative_to(claude_root)
+            except (OSError, ValueError, RuntimeError):
+                continue
             if st.st_size > TRANSCRIPT_MAX_BYTES:
                 continue
             if cutoff and st.st_mtime < cutoff:
@@ -201,7 +226,6 @@ def _calc_streaks(active_days):
     """Calculate current and longest streak from a set of date strings."""
     if not active_days:
         return 0, 0
-    from datetime import timedelta
     days = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in active_days)
     today = datetime.now().date()
 
@@ -680,13 +704,10 @@ def list_sessions():
             continue
         try:
             st = f.stat()
-            if st.st_size > MAX_FILE_SIZE:
-                continue
             mt = st.st_mtime
             age = now - mt
-            with open(f, "rb") as fh:
-                raw = fh.read(MAX_FILE_SIZE + 1)
-            if len(raw) > MAX_FILE_SIZE:
+            raw = safe_read(f, MAX_FILE_SIZE)
+            if raw is None:
                 continue
             d = json.loads(raw.decode("utf-8"))
             # Skip snapshots without usable model info (test artifacts / incomplete writes)
@@ -718,38 +739,19 @@ def load_state(sid):
         return None
     if not is_safe_dir(DATA_DIR):
         return None
+    raw = safe_read(DATA_DIR / f"{sid}.json", MAX_FILE_SIZE)
+    if raw is None:
+        return None
     try:
-        p = DATA_DIR / f"{sid}.json"
-        with open(p, "rb") as fh:
-            raw = fh.read(MAX_FILE_SIZE + 1)
-        if len(raw) > MAX_FILE_SIZE:
-            return None
         return json.loads(raw.decode("utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
+# Thin wrapper — shared.load_history is the single source of truth (v1.10.5+).
+# Passes monitor.DATA_DIR explicitly so tests that monkey-patch it still hit the fixture.
 def load_history(sid, n=120):
-    if not _SID_RE.match(str(sid)):
-        return []
-    if not is_safe_dir(DATA_DIR):
-        return []
-    try:
-        p = DATA_DIR / f"{sid}.jsonl"
-        with open(p, "rb") as fh:
-            raw = fh.read(MAX_FILE_SIZE * 2 + 1)
-        if len(raw) > MAX_FILE_SIZE * 2:
-            return []
-        lines = raw.decode("utf-8").splitlines()
-        out = []
-        for ln in lines[-n:]:
-            try:
-                out.append(json.loads(ln))
-            except json.JSONDecodeError:
-                pass
-        return out
-    except (OSError, UnicodeDecodeError):
-        return []
+    return _shared_load_history(sid, n, data_dir=DATA_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +791,11 @@ def spin_rls():
 
 
 def _fit_buf_height(buf, rows, *, clip_tail=False):
-    """Fit buffer to terminal height. Dashboard (clip_tail=False): protects last 2 lines (footer separator + keys). Legend/picker/stats (clip_tail=True): preserves header, clips from bottom."""
+    """Fit buffer to terminal height.
+
+    Dashboard (clip_tail=False) protects the last 2 lines (footer separator + keys).
+    Legend/picker/stats (clip_tail=True) preserves the header and clips from the bottom.
+    """
     try:
         rows = int(rows)
     except (TypeError, ValueError):
@@ -859,7 +865,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         """Return dim color when stale, normal color otherwise."""
         return _C if _C else normal
 
-    # ── Header ──────────────────────────────────────────────
+    # ── Header ──
     sid_str = str(data.get("session_id") or "default")
     session_label = sname or (sid_str[:16] if _SID_RE.match(sid_str) else "default")
 
@@ -899,7 +905,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     cr = _num(usage.get("cache_read_input_tokens", 0))
     cwt = _num(usage.get("cache_creation_input_tokens", 0))
 
-    # ── APR — API Ratio ─────────────────────────────────────
+    # ── APR — API Ratio ──
     if dur > 0:
         apr_pct = min(100.0, round(api_dur / dur * 100, 1))
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
@@ -908,7 +914,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
     buf.append(sep(SW))
 
-    # ── CHR — Cache Hit Rate ────────────────────────────────
+    # ── CHR — Cache Hit Rate ──
     if any([cr, cwt]):
         total_cache = cr + cwt
         chr_pct = round(cr / total_cache * 100, 1) if total_cache > 0 else 0
@@ -918,17 +924,21 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(0, C_DIM)}")
     buf.append(sep(SW))
 
-    # ── CTX ─────────────────────────────────────────────────
+    # ── CTX ──
     ctx_used = int(ctx_total * ctx_pct / 100) if ctx_total else 0
     buf.append(f"{c(C_CYN)}{B}CTX{R} {mkbar(ctx_pct, c(C_CYN))}")
     warn = f" {c(C_RED)}{B}!CTX>{int(CRIT_PCT)}%{R}" if ctx_pct >= CRIT_PCT else ""
     if any([inp, out]):
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn} {C_DIM}INP:{R} {c(C_CYN)}{f_tok(inp)}{R} {C_DIM}OUT:{R} {c(C_CYN)}{f_tok(out)}{R}")
+        buf.append(
+            f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn} "
+            f"{C_DIM}INP:{R} {c(C_CYN)}{f_tok(inp)}{R} "
+            f"{C_DIM}OUT:{R} {c(C_CYN)}{f_tok(out)}{R}"
+        )
     else:
         buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn}")
     buf.append(sep(SW))
 
-    # ── 5HL ─────────────────────────────────────────────────
+    # ── 5HL ──
     if rl is not None:
         fh = rl.get("five_hour")
         if fh:
@@ -943,7 +953,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             rc = c(_reset_color(resets, 18000))  # 5h window
             buf.append(f"    {C_DIM}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
 
-        # ── 7DL ─────────────────────────────────────────────
+        # ── 7DL ──
         sd = rl.get("seven_day")
         if sd:
             pct = round(_num(sd.get("used_percentage")), 1)
@@ -999,7 +1009,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     if added or removed:
         buf.append(f"{C_DIM}LNS:{R} {c(C_GRN)}{added:,}{R} {c(C_RED)}{removed:,}{R}")
 
-    # ── RLS (release check) ────────────────────────────────
+    # ── RLS (release check) ──
     _rls_maybe_check()
     rls = _rls_snapshot()  # atomic read: status + remote_ver coherent
     rls_s = rls["status"]
@@ -1015,7 +1025,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"{C_DIM}RLS {spin_rls()} Checking...{R}")
     # error/no_git/timeout — ticho, nič nezobrazí
 
-    # ── Footer ──────────────────────────────────────────────
+    # ── Footer ──
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}] menu{R}")
 
@@ -1107,23 +1117,20 @@ def render_legend(cols, rows):
 # ---------------------------------------------------------------------------
 # Prices per 1M tokens (USD). Sources: official Anthropic pricing page.
 # cache_write = 5-minute TTL price. 1h cache write adds ~60% — documented separately.
-_MODEL_PRICING = {
-    "claude-opus-4-7":             {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
-    "claude-opus-4-6":             {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
-    "claude-opus-4-5":             {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
-    "claude-opus-4-1":             {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
-    "claude-sonnet-4-6":           {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
-    "claude-sonnet-4-5":           {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
-    "claude-haiku-4-5-20251001":   {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25},
-    "claude-haiku-3-5":            {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00},
-}
 _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}  # Sonnet-tier fallback
+# Single source of truth for model metadata (display name, short code, pricing).
+# Adding a new model = one entry here, not three. _MODELS is populated after
+# the helpers are defined below (line ~1800) to keep model-related data colocated.
+_MODELS = {}
 
 
 def _get_pricing(model_id):
     """Get pricing for model, stripping suffixes like [1m]."""
     base = model_id.split("[")[0] if model_id else ""
-    return _MODEL_PRICING.get(base, _DEFAULT_PRICING)
+    entry = _MODELS.get(base)
+    if entry and entry.get("pricing"):
+        return entry["pricing"]
+    return _DEFAULT_PRICING
 
 
 _SESSION_COST_CACHE = OrderedDict()  # LRU: {session_id: (ts, breakdown_dict)}
@@ -1262,7 +1269,6 @@ def _cost_thirds(hist):
     span = t_end - t_start
     if span < 30:  # need at least 30s of data
         return []
-    import bisect
     times = [x[0] for x in costs]
     vals = [x[1] for x in costs]
     third = span / 3
@@ -1343,14 +1349,22 @@ def render_cost_breakdown(data, hist, cols, rows):
         buf.append(f"{C_ORN}INP{R} {C_WHT}{f_tok(sess['input'])}{R} {C_DIM}~{f_cost(sess['cost_input'])}{R}")
         buf.append(f"{C_ORN}OUT{R} {C_WHT}{f_tok(sess['output'])}{R} {C_DIM}~{f_cost(sess['cost_output'])}{R}")
         buf.append(f"{C_ORN}CRD{R} {C_WHT}{f_tok(sess['cache_read'])}{R} {C_DIM}~{f_cost(sess['cost_cache_read'])}{R}")
-        buf.append(f"{C_ORN}CWR{R} {C_WHT}{f_tok(sess['cache_write'])}{R} {C_DIM}~{f_cost(sess['cost_cache_write'])}{R}")
+        buf.append(
+            f"{C_ORN}CWR{R} {C_WHT}{f_tok(sess['cache_write'])}{R} "
+            f"{C_DIM}~{f_cost(sess['cost_cache_write'])}{R}"
+        )
         delta = sess["cost_total"] - usd if usd > 0 else 0
         if usd > 0:
             pct_diff = abs(delta) / usd * 100 if usd > 0 else 0
+            sum_cost = f_cost(sess['cost_total'])
+            cst_cost = f_cost(usd)
             if pct_diff > 15:
-                buf.append(f"{C_DIM}SUM ~{f_cost(sess['cost_total'])} vs CST {f_cost(usd)} — {C_YEL}delta {pct_diff:.0f}%{R}")
+                buf.append(
+                    f"{C_DIM}SUM ~{sum_cost} vs CST {cst_cost} — "
+                    f"{C_YEL}delta {pct_diff:.0f}%{R}"
+                )
             else:
-                buf.append(f"{C_DIM}SUM ~{f_cost(sess['cost_total'])} (~= CST {f_cost(usd)}){R}")
+                buf.append(f"{C_DIM}SUM ~{sum_cost} (~= CST {cst_cost}){R}")
 
     buf.append(sep(SW))
     st_title = "SESSION TOTALS"
@@ -1806,43 +1820,55 @@ def render_update_modal(cols, rows):
 _PERIOD_LABELS = {"all": "All Time", "7d": "Last 7 Days", "30d": "Last 30 Days"}
 _PERIOD_CYCLE = ["all", "7d", "30d"]
 
-# Short display names for known model IDs
-_MODEL_NAMES = {
-    "claude-opus-4-7": "Opus 4.7",
-    "claude-opus-4-6": "Opus 4.6",
-    "claude-opus-4-5": "Opus 4.5",
-    "claude-opus-4-1": "Opus 4.1",
-    "claude-sonnet-4-6": "Sonnet 4.6",
-    "claude-sonnet-4-5": "Sonnet 4.5",
-    "claude-haiku-4-5-20251001": "Haiku 4.5",
-    "claude-haiku-3-5": "Haiku 3.5",
-    "haiku": "Haiku",
-    "sonnet": "Sonnet",
-    "opus": "Opus",
-}
-
-# 3-char codes for stats/legend
-_MODEL_CODES = {
-    "claude-opus-4-7": ("OP", "4.7"),
-    "claude-opus-4-6": ("OP", "4.6"),
-    "claude-opus-4-5": ("OP", "4.5"),
-    "claude-opus-4-1": ("OP", "4.1"),
-    "claude-sonnet-4-6": ("SO", "4.6"),
-    "claude-sonnet-4-5": ("SO", "4.5"),
-    "claude-haiku-4-5-20251001": ("HA", "4.5"),
-    "claude-haiku-3-5": ("HA", "3.5"),
-    "haiku": ("HA", ""),
-    "sonnet": ("SO", ""),
-    "opus": ("OP", ""),
-}
+# Single source of truth for model metadata — keyed by Anthropic model ID.
+# Each entry: {"name": "...", "code": ("XX", "V.v"), "pricing": {...} | None}
+# Pricing is per-1M-token USD (input / output / cache_read / cache_write).
+_MODELS.update({
+    "claude-opus-4-7": {"name": "Opus 4.7", "code": ("OP", "4.7"),
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    "claude-opus-4-6": {"name": "Opus 4.6", "code": ("OP", "4.6"),
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"),
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"),
+                        "pricing": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}},
+    "claude-sonnet-4-6": {"name": "Sonnet 4.6", "code": ("SO", "4.6"),
+                          "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
+    "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"),
+                          "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
+    "claude-haiku-4-5-20251001": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
+                                   "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
+    "claude-haiku-3-5": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
+                         "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
+    # Short-ID fallbacks (some transcript entries use abbreviated IDs). No pricing.
+    "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": None},
+    "sonnet": {"name": "Sonnet", "code": ("SO", ""), "pricing": None},
+    "opus":   {"name": "Opus",   "code": ("OP", ""), "pricing": None},
+})
 
 _MODEL_ID_RE = re.compile(r"^claude-(opus|sonnet|haiku)-(\d+)-(\d+)")
+# Match human-readable display names (e.g. "Opus 4.6 (1M context)") — used by render_picker
+_MODEL_LABEL_RE = re.compile(r"(Opus|Sonnet|Haiku)\s+(\d+)\.(\d+)")
+_LABEL_FAMILY_CODES = {"Opus": "OP", "Sonnet": "SO", "Haiku": "HA"}
+
+
+def _model_code_from_label(label):
+    """Parse display_name ('Opus 4.6 (1M context)') into ('OP', '4.6') tuple.
+
+    Mirrors _model_code but operates on human-readable labels rather than
+    model IDs — used by session picker, which sees display_name (not id).
+    """
+    mm = _MODEL_LABEL_RE.search(label or "")
+    if mm:
+        return (_LABEL_FAMILY_CODES[mm.group(1)], f"{mm.group(2)}.{mm.group(3)}")
+    return (strip_context_suffix(label or "").strip(), "")
 
 
 def _model_label(model_id):
     base = model_id.split("[")[0] if model_id else ""
-    if base in _MODEL_NAMES:
-        return _MODEL_NAMES[base]
+    entry = _MODELS.get(base)
+    if entry:
+        return entry["name"]
     m = _MODEL_ID_RE.match(base)
     if m:
         fam = m.group(1).capitalize()
@@ -1853,8 +1879,9 @@ def _model_label(model_id):
 def _model_code(model_id):
     """Return (short_code, version) tuple for stats display."""
     base = model_id.split("[")[0] if model_id else ""
-    if base in _MODEL_CODES:
-        return _MODEL_CODES[base]
+    entry = _MODELS.get(base)
+    if entry:
+        return entry["code"]
     m = _MODEL_ID_RE.match(base)
     if m:
         short = {"opus": "OP", "sonnet": "SO", "haiku": "HA"}[m.group(1)]
@@ -1905,8 +1932,16 @@ def render_stats(cols, rows, period="all"):
         top_day = max(daily, key=daily.get)
         most_active = f"{top_day} ({f_tok(daily[top_day])})"
 
-    trunc_tag = f"  {C_YEL}(1000 file limit){R}" if overview.get("truncated") else ""
-    buf.append(f"{C_WHT}SES{R} {C_WHT}{n_sessions}{R} {C_WHT}DAY{R} {C_WHT}{n_days}{R} {C_WHT}STK{R} {C_WHT}{current_streak}d{R}{C_DIM}/{longest_streak}d{R}{trunc_tag}")
+    trunc_tag = (
+        f"  {C_YEL}({MAX_TRANSCRIPT_FILES} file limit){R}"
+        if overview.get("truncated") else ""
+    )
+    buf.append(
+        f"{C_WHT}SES{R} {C_WHT}{n_sessions}{R} "
+        f"{C_WHT}DAY{R} {C_WHT}{n_days}{R} "
+        f"{C_WHT}STK{R} {C_WHT}{current_streak}d{R}"
+        f"{C_DIM}/{longest_streak}d{R}{trunc_tag}"
+    )
     buf.append(f"{C_WHT}LSS{R} {C_WHT}{f_dur(longest_ms)}{R} {C_WHT}TOP{R} {C_WHT}{most_active}{R}")
 
     # -- Models section --
@@ -1986,16 +2021,9 @@ def render_picker(sessions, cols, rows):
         for i, s in enumerate(shown):
             tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
             nm = s["session_name"] or s["id"][:8]
-            # Short model: "Opus 4.6 (1M context)" → "OP 4.6"
-            # Note: duplicate of _model_label logic — intentional (operates on display_name not id)
-            model_raw = s["model"]
-            mm = re.search(r"(Opus|Sonnet|Haiku)\s+(\d+)\.(\d+)", model_raw)
-            if mm:
-                code = {"Opus": "OP", "Sonnet": "SO", "Haiku": "HA"}[mm.group(1)]
-                model_short = f"{code} {mm.group(2)}.{mm.group(3)}"
-            else:
-                # legacy fallback
-                model_short = re.sub(r"\s*\(.*?\)", "", model_raw).strip()
+            # Short model: "Opus 4.6 (1M context)" → "OP 4.6" via single source of truth
+            code, ver = _model_code_from_label(s["model"])
+            model_short = f"{code} {ver}".strip() if ver else code
             line = f"{C_WHT}[{i + 1}]{R} {B}{nm}{R} {C_DIM}{model_short}{R} {tag}"
             buf.append(truncate(line, W))
         if len(sessions) > 9:
@@ -2039,7 +2067,6 @@ def _install_crash_logger():
     to the user like 'monitor just quit silently'. The crash log survives outside
     the alt buffer for post-mortem diagnosis.
     """
-    import traceback
 
     def excepthook(exc_type, exc_value, tb):
         try:
@@ -2348,7 +2375,13 @@ def main():
                 last_hist_mt = hmt
             is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
             try:
-                flush(render_frame(last_data, last_hist, cols, rows, show_legend, show_menu, show_cost, stale=is_stale), cols)
+                flush(
+                    render_frame(
+                        last_data, last_hist, cols, rows,
+                        show_legend, show_menu, show_cost, stale=is_stale,
+                    ),
+                    cols,
+                )
             except (TypeError, ValueError, KeyError, ZeroDivisionError, OverflowError, OSError) as e:
                 _render_errors += 1
                 if _render_errors <= 3:

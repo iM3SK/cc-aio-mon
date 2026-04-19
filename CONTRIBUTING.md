@@ -17,7 +17,7 @@
 
 2. Verify all files compile cleanly:
    ```bash
-   python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py', 'statusline.py', 'monitor.py', 'update.py', 'pulse.py')]"
+   python3 -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
    ```
 
 3. Test manually on at least one platform with a live Claude Code session.
