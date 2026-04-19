@@ -2,128 +2,71 @@
 
 ## v1.10.5 — 2026-04-19
 
-Documentation sync — follow-up to a doc-consistency audit that found four places where the prose had drifted behind the v1.10.0 → v1.10.4 code changes.
-
-**Fixed:**
-- **`.github/SECURITY.md:41`** — pulse `User-Agent` version string said "currently `1.9.1`" and referenced `monitor.VERSION`. Both stale since v1.10.2 (VERSION is now in `shared.py`, current release is `1.10.5`). Updated to reference `shared.VERSION` and current version.
-- **`CONTRIBUTING.md:32`** — "keep in sync" helpers/constants list omitted additions from v1.10.0–v1.10.2: `VERSION`, `PY_FILES`, `TRANSCRIPT_MAX_BYTES`, `FAINT`, `safe_read`, `f_cd`, `run_git`, `extract_changelog_entry`, `strip_context_suffix`, `compact_context_suffix`, `calc_rates`. Rewrote as an authoritative enumeration of the `shared.py` surface (constants / ANSI palette / helpers) with a rule: "if you add something used by more than one module, put it in `shared.py` from day one".
-- **`.github/PULL_REQUEST_TEMPLATE.md:11`** — checklist item "`MAX_FILE_SIZE` and ANSI palette kept in sync across `statusline.py` and `monitor.py`" was obsolete since v1.10.2 (no duplicate literals across files — everything lives in `shared.py`). Rewritten to reflect the new rule.
-- **`.claude/CLAUDE.md:17`** — shared.py helpers/constants line didn't mention `safe_read`, `VERSION`, `PY_FILES`. Expanded to a full authoritative list with the v1.10.x version annotations (e.g. "safe_read (bounded-read primitive, v1.10.2)").
-
-**No functional change** — metadata / documentation only.
+**Documentation:**
+- `.claude/CLAUDE.md`, `CONTRIBUTING.md`, `.github/SECURITY.md`, and `.github/PULL_REQUEST_TEMPLATE.md` refreshed to reflect the `shared.py` single-source-of-truth pattern introduced in v1.10.2 and the current set of shared helpers and constants.
 
 ## v1.10.4 — 2026-04-19
 
-License hygiene — follow-up to a license compliance audit that flagged missing SPDX headers as a low-severity gap.
-
-**Added `# SPDX-License-Identifier: MIT` header** (line 2, under the shebang) to all 6 Python source files:
-- `monitor.py`, `statusline.py`, `shared.py`, `pulse.py`, `update.py`, `tests.py`
-
-**Why:** The project was already MIT-licensed per `LICENSE` at the repo root, and compliant for general distribution. SPDX in-file headers are best practice per [REUSE](https://reuse.software/) and improve SBOM tooling (Software Bill of Materials), as well as OpenSSF Scorecard score. For single-license projects the headers are optional but recommended.
-
-**No functional change** — metadata-only patch.
+**License hygiene:**
+- Added `# SPDX-License-Identifier: MIT` headers to all six Python source files. Project remains MIT-licensed via `LICENSE` at the repo root; in-file headers follow the [REUSE](https://reuse.software/) specification and improve SBOM tooling.
 
 ## v1.10.3 — 2026-04-19
 
-Hotfix for a Windows startup regression introduced in v1.10.1 and a new diagnostic to prevent similar silent failures in the future.
-
-**Critical fix (Windows startup):**
-- **`monitor.py:2033`** — `main()` crashed immediately on Windows with `UnboundLocalError: cannot access local variable 'signal' where it is not associated with a value`. Root cause: the v1.10.1 M-6 SIGPIPE fix placed `import signal` inside `main()` within an `if sys.platform != "win32":` block. Python's scope rule then treated `signal` as a function-local for the whole of `main()`, shadowing the module-level `import signal` at line 23. On Windows the `if` branch never executed, so `signal` stayed unbound and the later `signal.signal(SIGTERM, ...)` call (line 2121) tripped. The alt-screen buffer (`\033[?1049h`) then swallowed the traceback on exit — users saw "monitor just crashes with no error". Fix: use the module-level `signal` import only; the SIGPIPE registration now guards with `hasattr(signal, "SIGPIPE")`.
+**Windows startup hotfix:**
+- `monitor.py` on Windows crashed immediately at startup with `UnboundLocalError` for the `signal` module. The alt-screen buffer swallowed the traceback, so the failure appeared silent. Fixed by keeping `signal` as a module-level import and guarding SIGPIPE registration with `hasattr(signal, "SIGPIPE")`.
 
 **New diagnostic:**
-- **`monitor._install_crash_logger()`** — installs a `sys.excepthook` that writes uncaught exceptions to `$TMPDIR/claude-aio-monitor/monitor-crash.log` before the default handler runs. Captures: exception traceback, timestamp, platform, Python version, stdout encoding, filesystem encoding. Survives the alt-buffer cleanup wipe, so any future startup-path crash is diagnosable post-mortem instead of "disappearing" when the terminal restores. Installed as the first statement in `main()`.
+- Any uncaught exception in `monitor.main()` is now written to `$TMPDIR/claude-aio-monitor/monitor-crash.log` with full traceback, platform, Python version, and encoding details. Startup crashes no longer vanish when the terminal restores its normal buffer.
 
-**Tests:**
-- `TestMainStartupNoUnboundLocal.test_no_inline_signal_import_in_main` — source-level guard: scans the body of `monitor.main()` for the literal string `import signal`. Pins the fix so the pattern cannot return via accident.
-- `TestMainStartupNoUnboundLocal.test_main_list_mode_runs_without_unbound_local` — runs `monitor.main()` with `--list` and asserts no `UnboundLocalError` propagates.
-- `TestCrashLoggerInstalled` — two tests (`_install_crash_logger` sets `sys.excepthook`; the hook actually writes to `monitor-crash.log` with platform/encoding/traceback).
-- Full suite: 490 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE handler test).
-
-**Postmortem: why did CI miss this?**
-- The Windows CI job (`test (windows-latest, 3.12)`) ran and passed — because the affected code path (`signal.SIGTERM` wiring) lives inside `main()` under the `if not sys.stdout.isatty(): sys.exit(...)` guard at line 2070. In CI, stdout is not a TTY, so `main()` exits before reaching line 2121. The bug was only reachable in interactive use.
-- `main()` has no unit test; this was accepted in v1.10.1 as finding L-8 ("TUI loop testability"). The new `TestMainStartupNoUnboundLocal` tests partially close that gap — at least for startup-path regressions, even without a real TTY.
-- Lesson: any `import` inside a function body in Python is a latent scope trap. Repo rule (see `.claude/CLAUDE.md`): imports belong at module level unless there's a documented reason (circular / optional dep).
+**Tests:** 490 passing.
 
 ## v1.10.2 — 2026-04-18
 
-Follow-up security hardening from a deep security scan of v1.10.1. All 6 findings addressed (0 critical, 0 high, 0 medium, 4 low, 2 info). Verdict of the scan was **clean (minor findings only)** — this release tightens the last remaining consistency gaps.
-
 **Security:**
-- **(L-1)** Two more TOCTOU windows closed. `calc_cross_session_costs()` (`monitor.py:573`) and `_trim_history()` (`statusline.py:360`) now route their file reads through the new `shared.safe_read()` helper — a single bounded-read primitive that caps at `N + 1` bytes and rejects overflows. Closes the `stat()`→`read_text()` race that an attacker with write access to `$TMPDIR/claude-aio-monitor/` could previously exploit for same-user RAM DoS.
-- **(L-2)** `monitor.py:2094` CLI path — `--session <evil>` with an invalid SID previously echoed the raw input back in `print(f"Invalid session ID: {sid}")`. Now passes through `_sanitize(sid)[:64]`, closing an ANSI-escape injection vector (threat model: local, low severity).
-- **(L-3)** `pulse.py:436, 467` — both `cleanup_log_startup()` and `_maybe_rotate_log()` now read `pulse.jsonl` through `safe_read()` with a hard ceiling of `LOG_MAX_BYTES * 2` (2 MB). A malicious caller that wrote >>1 MB in a single line between rotations would previously have forced Python to allocate the whole file before parsing.
-- **(L-4)** `update.py:189` — `new_ver` from `get_local_version()` is now `_sanitize()`-wrapped before the `New VERSION:` echo. `VERSION_RE` matches `[^"']+`, so an on-disk `monitor.py` modification between `git pull` and re-read could have landed ANSI escapes in the version string.
+- New `shared.safe_read(path, max_bytes)` primitive — bounded read returning `bytes` or `None` on error or overflow. Used across cross-session cost aggregation, history trim, and pulse log cleanup, closing several `stat()`→`read()` race windows.
+- `monitor.py --session <value>` now sanitizes the value before echoing it in an "Invalid session ID" error (ANSI-escape hardening).
+- `update.py` sanitizes the post-pull `VERSION` string before displaying it.
 
-**Maintainability (consistency):**
-- **(I-1)** `VERSION` is now a single source of truth in `shared.py`. `monitor.py` and `pulse.py` both import it, so `pulse.USER_AGENT` now always tracks the current release (previously pinned to `1.9.1` despite the app being on `1.10.1`). Comment in `pulse.py` explicitly cites the shared origin.
-- **(I-2)** `PY_FILES` (tuple of all 5 source files) extracted to `shared.py`. The post-update syntax-check paths in both `monitor.py:_apply_update_worker` (1669) and `update.py:apply_update` (194) now iterate `for f in PY_FILES`. `pulse.py` had previously been omitted from the monitor-side check — that drift can no longer happen.
+**Consistency:**
+- `VERSION` is now declared once in `shared.py`. `monitor.py` and `pulse.py` both import it — `pulse.USER_AGENT` always tracks the current release.
+- `PY_FILES` tuple (all source files) lives in `shared.py`. The in-app post-update syntax check and `update.py --apply` both iterate the shared constant, so modules can't be omitted from one side.
 
-**New helper:**
-- `shared.safe_read(path, max_bytes)` — bounded read primitive. Returns `bytes` or `None` (on OSError / missing file / over-cap overflow). Centralises the `open(…,"rb").read(N+1)` idiom that appeared in 4 call sites. Future file reads should use this instead of `read_text()` or `read_bytes()` unless the caller genuinely cannot express a byte ceiling.
-
-**Tests:**
-- Added 12 regression tests across `TestSafeRead`, `TestVersionSingleSourceOfTruth`, `TestPyFilesSingleSourceOfTruth`, `TestInvalidSessionIdSanitized`, `TestApplyUpdateNewVersionSanitized`. The `test_pulse_in_syntax_check_list` regression was updated to check `shared.PY_FILES` membership instead of literal `"pulse.py"` in `update.py` source.
-- Full suite: 486 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
-
-**Not fixed (out of scope):**
-- Scan recommendation #4 (`GIT_CONFIG_NOSYSTEM=1` / `GIT_CONFIG_GLOBAL=/dev/null` in `_git_env()`) — defense-in-depth over already-hardcoded arg lists. Deferred as a stretch goal; current `run_git` already blocks proxy / SSH / LD_PRELOAD injection.
+**Tests:** 486 passing.
 
 ## v1.10.1 — 2026-04-18
 
-Security + correctness hardening from a post-v1.10.0 deep audit (16 findings total; 11 fixed, 5 accepted as intentional or out-of-scope).
-
 **Security:**
-- **(H-1)** `update.py:191` — exception text in the `Could not verify new VERSION` warning is now passed through `_sanitize()`. A manipulated `monitor.py` could previously raise a `UnicodeDecodeError` whose `repr()` contained ANSI escape sequences, which would then be written raw to the terminal — a latent escape-injection vector.
-- **(M-1)** `monitor.py:95, 1162` — `scan_transcript_stats()` and the `_aggregate_session_cost()` fallback now gate `~/.claude/projects/` access through `is_safe_dir()` instead of a bare `.is_dir()` check. A symlink/junction on the projects root would previously have passed the check and caused the JSONL glob to follow the link.
-- **(M-2)** `monitor.py:660` — `list_sessions()` now bounds the `.json` read to `MAX_FILE_SIZE + 1` bytes (mirroring `load_state()` at `:697`), closing a TOCTOU where an attacker with write access to `$TMPDIR/claude-aio-monitor/` could have grown a file between the `st.st_size` check and the unbounded `read_text()`.
+- `update.py` sanitizes exception text in the "Could not verify new VERSION" warning before writing to the terminal.
+- `scan_transcript_stats()` and session cost aggregation validate `~/.claude/projects/` through `is_safe_dir()` — symlinks and Windows junction points are now rejected.
+- `list_sessions()` uses a bounded read for session snapshots, aligning with `load_state()`.
 
 **Correctness:**
-- **(M-5)** `pulse.py:611` — `start_pulse_worker()` now reverts `_worker_started = True` when `threading.Thread(...)` or `t.start()` raises, allowing a later retry. Previously the pulse worker would be stuck in permanent "AWAITING DATA" with no way to recover from a transient thread-spawn failure.
-- **(L-2)** `pulse.py:312` — `_ping_api()` now uses `with urllib.request.urlopen(...) as resp:` instead of a plain call + `resp.close()`, preventing a socket leak if an async exception (e.g. `KeyboardInterrupt`) hit between the two statements.
-- **(M-6)** `monitor.py:main` — SIGPIPE is now installed as `SIG_DFL` on non-Windows, matching `statusline.py` and `update.py`. Piping `monitor.py --list` to `head`/`less` no longer prints a `BrokenPipeError` traceback.
-- **(L-6)** `monitor.py:_setup_term` — `SetConsoleMode` return value is now checked. If the call returns 0 (pre-Win10 or unsupported handle), we fall through with a comment explaining the degraded mode instead of silently assuming VT processing is enabled.
+- Pulse worker reverts its startup flag if thread creation fails, so a subsequent call can retry instead of being stuck in permanent "AWAITING DATA".
+- `_ping_api()` wraps `urlopen()` in a `with`-block to prevent socket leaks on async exceptions.
+- `monitor.py --list` installs a SIGPIPE handler on non-Windows, matching `statusline.py` and `update.py`. Piping `--list` to `head` or `less` no longer prints a `BrokenPipeError` traceback.
+- `_setup_term()` checks the `SetConsoleMode` return value and falls through cleanly on pre-Win10 or unsupported handles.
 
-**Quality:**
-- **(M-4)** `monitor.py:450` — added explicit comment that `_cost_cache` is main-thread only (no lock by design), contrasting with `_rls_cache` which IS locked because a daemon thread writes it. Pre-empts a future refactor inadvertently introducing a race.
-- **(L-5)** `monitor.py:528` — added docstring to `_rls_maybe_check()` documenting the lock-ownership contract between it and `_rls_check_worker`.
+**Documentation:**
+- `.claude/CLAUDE.md` file-size-limits line expanded with constant names (`MAX_FILE_SIZE`, `TRANSCRIPT_MAX_BYTES`, `MAX_FILE_SIZE * 10`).
 
-**Docs:**
-- **(L-7)** `.claude/CLAUDE.md` file-size-limits line expanded to include `TRANSCRIPT_MAX_BYTES` (50 MiB) and `MAX_FILE_SIZE * 10` (10 MiB) with their constant names.
-
-**Tests:**
-- Added 4 regression tests (`TestScanTranscriptStatsSafeDir`, `TestPulseWorkerStartRevert`, `TestApplyUpdateWorkerVersionErrorSanitized`) pinning the behavior for H-1, M-1, and M-5.
-- Full suite: 474 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
-
-**Not fixed (intentional):**
-- **(M-3)** `main()` and `render_frame()` size — accepted; splitting them is a larger refactor better handled in a feature release.
-- **(L-1)** `_safe_transcript_path` TOCTOU — only exploitable with write access to `~/.claude/projects/`, which is user-owned.
-- **(L-3)** statusline `data` JSON sanitization — readers already sanitize on consumption; defense-in-depth sufficient.
-- **(L-4)** `_model_label` duplication in `render_picker` — code comment marks it as intentional (different display context).
-- **(L-8, L-9)** `main()` coverage gap and Windows `ch.decode` for multi-byte UTF-8 — accepted tradeoffs (TUI loop testability, ASCII-only shortcuts).
+**Tests:** 474 passing.
 
 ## v1.10.0 — 2026-04-18
 
-**Statusline rework — reset countdown in rate-limit segments:**
-- 5HL and 7DL segments now show a **dimmed reset countdown** next to the percentage: `5HL 42% → 2h 15m`, `7DL 30% → 6d 12h`. Tells you at a glance not just how much of the window you've used but how long until it resets. The countdown renders via ANSI faint (SGR `\033[2m`) so the percentage stays the primary signal and the reset time reads as supplementary info.
-- Countdown formatter reuses `f_cd()` from `monitor.py`, now promoted to `shared.py` so statusline and dashboard share a single source of truth (same display in both places).
-- ANSI faint attribute (`\033[2m`) via new `FAINT` constant in `shared.py`. Ink (the TUI renderer that Claude Code uses) supports `dimColor` natively, so the attribute reaches the terminal. ANSI blink (`\033[5m`) was evaluated but dropped: Ink's Text component does not list blink in its supported attributes (see [ink docs](https://github.com/vadimdemedes/ink)), and Windows Terminal does not render SGR 5 even when it reaches the terminal ([microsoft/terminal#7388](https://github.com/microsoft/terminal/issues/7388)).
-- Reset arrow is only rendered when `resets_at` is in the future. Expired or absent `resets_at` falls back to the pre-change display (no arrow, no visual noise).
-- Originally proposed by @digizensk in #25 — thanks for the nudge. Closed in favor of this broader rework.
+**Statusline — reset countdown in rate-limit segments:**
+- 5HL and 7DL segments now show a dimmed reset countdown next to the percentage: `5HL 42% → 2h 15m`, `7DL 30% → 6d 12h`. Tells you at a glance how long until the rate-limit window resets.
+- Countdown renders via ANSI faint (SGR `\033[2m`) so the percentage remains the primary signal and the reset time reads as supplementary information.
+- The `f_cd()` formatter is shared between the statusline and the dashboard, so both surfaces display reset countdowns in the same format.
+- The arrow is only rendered when `resets_at` is in the future. Expired or absent values fall back to the previous display (no arrow).
 
-**Removed from statusline — APR and CHR:**
-- `APR` (API-time ratio) and `CHR` (cache-hit ratio) segments dropped from the statusline to free horizontal space for the reset countdown. Both remain fully available in the `monitor.py` dashboard where horizontal space isn't a constraint.
-- Net segment-width change: −20 chars (APR/CHR + separators) +12 chars (reset countdown) = **−8 chars overall**. Statusline fits into 80-col terminals more comfortably than before.
-- Segment priority order is now: Model │ CTX │ 5HL │ 7DL │ CST │ BRN. Trailing segments still drop from the right via existing `build_line` logic when the terminal is narrow.
+**Statusline — layout change:**
+- The `APR` (API-time ratio) and `CHR` (cache-hit ratio) segments are removed from the statusline to free horizontal space for the reset countdown. Both metrics remain fully available in the fullscreen dashboard (`py monitor.py`).
+- Segment order (left → right): Model │ CTX │ 5HL │ 7DL │ CST │ BRN. Trailing segments still drop from the right when the terminal is too narrow.
+- Net width change: roughly −8 chars overall. The statusline fits into 80-column terminals more comfortably than before.
 
-**Tests:**
-- Added coverage for new reset-countdown branches in `TestSeg5hl` / `TestSeg7dl`: future `resets_at` renders arrow + `f_cd` output; absent / `0` / expired `resets_at` renders no arrow; string-form `resets_at` is accepted via `_num`.
-- Removed `TestSegChr`, `TestSegApr`, `TestSegAprClamp` classes (segments no longer live in statusline).
-- Full suite: 470 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
+**Tests:** 470 passing.
 
-**Docs:**
-- README metrics table, statusline description, and architecture notes updated to reflect the new segment list and the dashboard-only status of APR/CHR.
-- `.claude/CLAUDE.md` architecture section updated.
-- `screenshots/cc-aio-mon-statusline.png` regenerated to show the v1.10.0 layout (reset countdown visible, APR/CHR removed).
+**Credit:** reset countdown idea originally proposed by @digizensk.
 
 ## v1.9.1 — 2026-04-17
 
