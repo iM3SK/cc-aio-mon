@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Claude AIO Monitor — fullscreen TUI dashboard for Claude Code.
 
 Terminal dashboard (monitor.py + shared.py). Stdlib only.

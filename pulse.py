@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Anthropic Pulse — backend stability monitor.
 
 Fetches status.claude.com summary.json + pings api.anthropic.com.

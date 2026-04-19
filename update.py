@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """update.py — self-update checker for CC AIO MON.
 
 Usage: python3 update.py           (read-only check)

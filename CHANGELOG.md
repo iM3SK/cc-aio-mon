@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.10.4 — 2026-04-19
+
+License hygiene — follow-up to a license compliance audit that flagged missing SPDX headers as a low-severity gap.
+
+**Added `# SPDX-License-Identifier: MIT` header** (line 2, under the shebang) to all 6 Python source files:
+- `monitor.py`, `statusline.py`, `shared.py`, `pulse.py`, `update.py`, `tests.py`
+
+**Why:** The project was already MIT-licensed per `LICENSE` at the repo root, and compliant for general distribution. SPDX in-file headers are best practice per [REUSE](https://reuse.software/) and improve SBOM tooling (Software Bill of Materials), as well as OpenSSF Scorecard score. For single-license projects the headers are optional but recommended.
+
+**No functional change** — metadata-only patch.
+
 ## v1.10.3 — 2026-04-19
 
 Hotfix for a Windows startup regression introduced in v1.10.1 and a new diagnostic to prevent similar silent failures in the future.
