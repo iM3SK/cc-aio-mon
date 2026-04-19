@@ -53,6 +53,8 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
 - `transcript_path` from statusline JSON must be containment-validated (inside ~/.claude/projects/, no symlinks) before open
 - All subprocess calls use `shared.run_git` with minimal env whitelist (blocks GIT_SSH_COMMAND / LD_PRELOAD injection)
 - **No `import` statements inside function bodies** — Python's scope rule treats any in-function `import X` as making `X` a function-local for the entire function, even if the import is guarded by a conditional that never runs. This caused the v1.10.3 Windows startup regression (local `import signal` shadowed module-level import → `UnboundLocalError` when Windows branch skipped the import). Always import at module level. Guarded platform-specific attributes use `hasattr(module, "ATTR")` instead.
+- **Live-run before release claim** — before tagging any release or claiming "done" on a user-facing change, actually run `py monitor.py` for ~30 s on the target platform. `py_compile` + `tests.py` passing **is not sufficient**: the interactive TUI loop runs code that unit tests don't reach (alt-buffer entry, `_setup_term`, signal wiring, daemon thread start). The v1.10.3 Windows `UnboundLocalError` hit exactly there — CI was green, tests all passed, but `main()` crashed on the first keystroke because the relevant branch never ran in CI. If the change touches `main()`, platform imports, TTY setup, or daemon threads, live-run is mandatory.
+- **Precedence** — this project-level CLAUDE.md prevails over the global `~/.claude/CLAUDE.md` when content conflicts (commit scopes, file conventions, architecture). Global CLAUDE.md remains the source for user identity, language preference, and agent dispatch policy.
 
 ## Audit
 
