@@ -1,10 +1,5 @@
 # Changelog
 
-## v1.10.5 — 2026-04-19
-
-**Documentation:**
-- `.claude/CLAUDE.md`, `CONTRIBUTING.md`, `.github/SECURITY.md`, and `.github/PULL_REQUEST_TEMPLATE.md` refreshed to reflect the `shared.py` single-source-of-truth pattern introduced in v1.10.2 and the current set of shared helpers and constants.
-
 ## v1.10.4 — 2026-04-19
 
 **License hygiene:**
@@ -45,9 +40,6 @@
 - `_ping_api()` wraps `urlopen()` in a `with`-block to prevent socket leaks on async exceptions.
 - `monitor.py --list` installs a SIGPIPE handler on non-Windows, matching `statusline.py` and `update.py`. Piping `--list` to `head` or `less` no longer prints a `BrokenPipeError` traceback.
 - `_setup_term()` checks the `SetConsoleMode` return value and falls through cleanly on pre-Win10 or unsupported handles.
-
-**Documentation:**
-- `.claude/CLAUDE.md` file-size-limits line expanded with constant names (`MAX_FILE_SIZE`, `TRANSCRIPT_MAX_BYTES`, `MAX_FILE_SIZE * 10`).
 
 **Tests:** 474 passing.
 
