@@ -17,13 +17,14 @@ import json
 import os
 import pathlib
 import platform
+import signal
 import struct
 import sys
 import tempfile
 import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_cd,
-                    is_safe_dir, ensure_data_dir,
+                    is_safe_dir, ensure_data_dir, load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, RESERVED_SIDS,
                     strip_context_suffix,
                     R, B, FAINT, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
@@ -234,9 +235,8 @@ def build_line(data, cols, brn=None):
 # ---------------------------------------------------------------------------
 def main():
     # SIGPIPE: silent exit when piped to head/less on Unix (no BrokenPipeError traceback)
-    if sys.platform != "win32":
+    if hasattr(signal, "SIGPIPE"):
         try:
-            import signal
             signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         except (AttributeError, ValueError):
             pass
@@ -282,24 +282,13 @@ HISTORY_TRIM_TO = 1000
 
 
 def _load_history_for_rates(sid, n=120):
-    """Read last n history entries for BRN/CTR rate computation. Call BEFORE write_shared_state."""
-    if not is_safe_dir(DATA_DIR):
-        return []
-    try:
-        p = DATA_DIR / f"{sid}.jsonl"
-        with open(p, "rb") as fh:
-            raw = fh.read(MAX_FILE_SIZE * 2 + 1)
-        if len(raw) > MAX_FILE_SIZE * 2:
-            return []
-        out = []
-        for ln in raw.decode("utf-8").splitlines()[-n:]:
-            try:
-                out.append(json.loads(ln))
-            except json.JSONDecodeError:
-                pass
-        return out
-    except (OSError, UnicodeDecodeError):
-        return []
+    """Read last n history entries for BRN/CTR rate computation. Call BEFORE write_shared_state.
+
+    Thin wrapper around shared.load_history — both modules share the same reader
+    (single source of truth since v1.10.5). DATA_DIR is forwarded explicitly so
+    test monkey-patching of statusline.DATA_DIR continues to work.
+    """
+    return _shared_load_history(sid, n, data_dir=DATA_DIR)
 
 
 def write_shared_state(data: dict):

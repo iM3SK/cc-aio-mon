@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile check
-        run: python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py','statusline.py','monitor.py','update.py','pulse.py')]"
+        run: python -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
       - name: Run tests
         run: python tests.py
     # Ubuntu: 3.8 + 3.10 + 3.11 + 3.12 for full compat coverage.
