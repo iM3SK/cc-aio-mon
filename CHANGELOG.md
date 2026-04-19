@@ -101,7 +101,7 @@
   - `_rls_snapshot` / `_rls_write` helper correctness
 - Full suite: 477 tests, all passing (one skipped on Windows — the Unix-only SIGPIPE test).
 
-## v1.9.0 — 2026-04-16
+## v1.9.0 — 2026-04-17
 
 **New feature — Anthropic Pulse modal:**
 - New `pulse.py` module — real-time Anthropic backend stability monitor. Press `p` to open modal. Stdlib only, zero dependencies, zero token cost, cross-platform.
@@ -237,7 +237,6 @@
 - Untracked `PROMO.md` from git — was tracked despite `.gitignore` rule (added before ignore took effect).
 - `.claude/CLAUDE.md`: updated JSONL file size limits, shared.py description updated with new helpers.
 - `docs/setup-macos.md`: removed stale "not included in CI" note (macOS CI added in v1.8.1).
-- `docs/ROADMAP.md`: cost breakdown marked as Done (v1.8.0), multi-session keybinding changed from `m` to `v` (conflict with menu modal).
 - `README.md`: added menu modal and cost breakdown features, `m`/`c` keyboard shortcuts, updated security table (NTFS junction, lstat TOCTOU, CJK truncation), updated file size limits.
 
 **Tests:**
