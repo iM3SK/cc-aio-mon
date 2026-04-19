@@ -60,6 +60,14 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
   - Audit logs, internal rule revisions, workflow conventions
   - If a commit touches **only** contributor/internal files: use a plain `docs(...)` or `chore(...)` commit, do **not** bump `VERSION`, do **not** create a tag, do **not** publish a release. The test is simple: would a user running `py monitor.py` notice anything different? If no → no CHANGELOG entry, no release.
 
+## Known deferred items
+
+Tracked debt explicitly deferred out of past audits. Re-surface in next audit session, or address individually when scope allows. Not release blockers.
+
+- **[refactor] `monitor.render_frame` split** (~200 LOC, 15+ branches over header/session/warnings/APR/CHR/CTX/5HL/7DL/BRN/CTR/CST/TDY/RLS/footer) — deferred from v1.10.5 audit to keep blast radius small.
+- **[refactor] `monitor.main()` event loop → state machine** (~300 LOC, 30+ elif chains mutating 7 modal flags; new modals currently need ~10 edits) — deferred from v1.10.5 audit.
+- **[bug] `update.get_local_version()` targets `monitor.py`** but `VERSION` moved to `shared.py` in v1.10.2 — `update.py --apply` raises "VERSION constant not found" on fresh clones. Low-impact (clear error, not silent corruption). Surfaced during v1.10.5 SEC-009 fix, outside original audit scope.
+
 ## Audit
 
 Audit postupy a audit logs live in `docs/audits/` (local-only, gitignored). Start with `AUDIT-PLAN.md`.
