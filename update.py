@@ -15,9 +15,13 @@ import codecs
 import datetime
 import os
 import re
+import signal
 import sys
 from pathlib import Path
-from shared import VERSION_RE, _sanitize, run_git as _shared_run_git, extract_changelog_entry, PY_FILES
+from shared import (
+    VERSION_RE, MAX_FILE_SIZE, _sanitize, run_git as _shared_run_git,
+    extract_changelog_entry, PY_FILES, safe_read,
+)
 
 
 # ---------- ANSI colors (Windows VT enable) ----------
@@ -117,7 +121,10 @@ def get_local_version():
     monitor = REPO_ROOT / "monitor.py"
     if not monitor.exists():
         raise RuntimeError("monitor.py not found")
-    content = monitor.read_text(encoding="utf-8")
+    raw = safe_read(monitor, MAX_FILE_SIZE)
+    if raw is None:
+        raise RuntimeError(f"monitor.py: unreadable or too large (>{MAX_FILE_SIZE} bytes)")
+    content = raw.decode("utf-8", errors="replace")
     m = VERSION_RE.search(content)
     if not m:
         raise RuntimeError("VERSION constant not found in monitor.py")
@@ -199,8 +206,12 @@ def apply_update():
     for f in PY_FILES:
         fp = REPO_ROOT / f
         if fp.exists():
+            raw = safe_read(fp, MAX_FILE_SIZE)
+            if raw is None:
+                bad.append(f)
+                continue
             try:
-                compile(fp.read_text(encoding="utf-8"), str(fp), "exec")
+                compile(raw.decode("utf-8", errors="replace"), str(fp), "exec")
             except SyntaxError:
                 bad.append(f)
     if bad:
@@ -220,9 +231,8 @@ def apply_update():
 def main():
     global GRN, YEL, RED, CYN, DIM, R
     # SIGPIPE: silent exit when piped to head/less on Unix (no BrokenPipeError traceback)
-    if sys.platform != "win32":
+    if hasattr(signal, "SIGPIPE"):
         try:
-            import signal
             signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         except (AttributeError, ValueError):
             pass

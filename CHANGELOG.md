@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.10.5 — 2026-04-19
+
+**Security hardening:**
+- Transcript scanner (`scan_transcript_stats`) now resolves `~/.claude/projects/` to a canonical root once per scan and rejects symlinked `.jsonl` files that escape it. Aligns with the existing hardening on `transcript_path` from statusline JSON.
+- `update.py` enforces a 1 MB size cap on every local file it reads (version lookup + post-pull syntax check) via `shared.safe_read`. A malformed or oversized `PY_FILES` member now raises a clear "too large" error instead of triggering unbounded memory reads during the update flow.
+- `pulse.py` scrubs `HTTP_PROXY` / `HTTPS_PROXY` env vars at import time — Anthropic Pulse fetches (`status.claude.com`, `api.anthropic.com`) can no longer be silently routed through an attacker-controlled intermediary. Mirrors the env-whitelist rationale already applied to `shared.run_git`.
+
+**Documentation:**
+- README security table now documents Windows reserved device name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive) — the protection has been present since v1.9.1 but was undocumented on the user-facing side.
+- README Known Limitations: added a **color accessibility caveat** (Nord red/green pair is not colorblind-safe; every metric carries redundant text labels + numeric values so color is supplementary signal) and a **local-timezone contract note** (rollback tags, daily aggregation, pulse JSONL timestamps all use machine local time, not UTC).
+- Contributor docs (README compile example + `.github/workflows/tests.yml` CI step) now import `shared.PY_FILES` instead of hardcoding the file tuple — single source of truth since v1.10.2 is now actually the single source in contributor docs too.
+
+**Consistency (no user-visible behavior change):**
+- `shared.load_history(sid, n, data_dir=None)` is the single-source-of-truth reader for session JSONL history. `monitor.load_history` and `statusline._load_history_for_rates` are now thin wrappers that delegate to it. Closes a 15-line duplication window between the two entry points.
+- Model metadata (display name, short code, pricing) consolidated into a single `_MODELS` dict in `monitor.py`. Adding a new Claude model requires one entry, not three parallel dicts.
+- `MAX_TRANSCRIPT_FILES = 1000` named constant replaces the previous inline magic literal in `scan_transcript_stats`. The "file limit" truncation tag in the stats modal now renders the constant too, so the two sides can't drift.
+- `_model_code_from_label(display_name)` extracted from an inline regex duplicate in `render_picker`, sharing the family→code mapping table with the new module-level `_MODEL_LABEL_RE`.
+- All in-function `import` statements moved to module level across `shared.py` (`subprocess`), `statusline.py`/`update.py` (`signal`), and `monitor.py` (`bisect`, `traceback`, `timedelta`). A regression guard locks in module-level bindings so the pattern that caused the v1.10.3 Windows `UnboundLocalError` cannot re-appear.
+- `monitor.load_state` and `list_sessions` now read files through `shared.safe_read` instead of the older `stat()` → `read(max+1)` pattern, bringing them in line with the rest of the codebase.
+
+**Internal:**
+- 16 source lines over 120 columns refactored to wrapped form across `monitor.py` and `pulse.py`.
+
+**Tests:** 501 passing (was 490; +11 regression guards in new `TestAuditRegressionV1105` class).
+
 ## v1.10.4 — 2026-04-19
 
 **License hygiene:**

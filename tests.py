@@ -4892,6 +4892,198 @@ class TestCrashLoggerInstalled(unittest.TestCase):
                     pass
 
 
+# ---------------------------------------------------------------------------
+# v1.10.5 audit regression tests — SEC-008/009/010 + DEBT-014/018/022
+# ---------------------------------------------------------------------------
+class TestAuditRegressionV1105(unittest.TestCase):
+    """Regression guards for the v1.10.5 audit fixes.
+
+    Each test locks in a specific behavior introduced or restored by the audit
+    so future refactors cannot silently undo the fix.
+    """
+
+    def test_debt014_signal_imported_at_module_level(self):
+        """DEBT-014: statusline/update/monitor import `signal` at module level,
+        not inside main() — the v1.10.3 Windows UnboundLocalError was caused
+        by an in-function `import signal` shadowing the module-level name."""
+        import statusline, update, monitor
+        import signal as sig_mod
+        # Module-level signal binding must be the real signal module on all three
+        self.assertIs(statusline.signal, sig_mod)
+        self.assertIs(update.signal, sig_mod)
+        self.assertIs(monitor.signal, sig_mod)
+
+    def test_debt014_shared_subprocess_module_level(self):
+        """DEBT-014: shared.run_git uses module-level subprocess (not in-function import)."""
+        import subprocess
+        self.assertIs(shared.subprocess, subprocess)
+
+    def test_debt014_monitor_bisect_traceback_module_level(self):
+        """DEBT-014: monitor.py exposes bisect and traceback at module scope."""
+        import bisect, traceback
+        import monitor
+        self.assertIs(monitor.bisect, bisect)
+        self.assertIs(monitor.traceback, traceback)
+
+    def test_debt015_monitor_load_history_delegates_to_shared(self):
+        """DEBT-015: monitor.load_history is a thin wrapper over shared.load_history.
+
+        Patch monitor's local reference (via `from shared import load_history
+        as _shared_load_history`) — patching shared.load_history would not
+        intercept the already-bound name inside monitor.
+        """
+        import monitor
+        sentinel = object()
+        with patch("monitor._shared_load_history", return_value=sentinel) as m:
+            result = monitor.load_history("abc", 7)
+            self.assertIs(result, sentinel)
+            m.assert_called_once()
+            args, kwargs = m.call_args
+            self.assertEqual(args[0], "abc")
+            self.assertEqual(args[1], 7)
+            self.assertEqual(kwargs.get("data_dir"), monitor.DATA_DIR)
+
+    def test_debt015_statusline_delegates_to_shared(self):
+        """DEBT-015: statusline._load_history_for_rates is a thin wrapper too."""
+        import statusline
+        sentinel = object()
+        with patch("statusline._shared_load_history", return_value=sentinel) as m:
+            result = statusline._load_history_for_rates("xyz", 42)
+            self.assertIs(result, sentinel)
+            args, kwargs = m.call_args
+            self.assertEqual(args[0], "xyz")
+            self.assertEqual(args[1], 42)
+            self.assertEqual(kwargs.get("data_dir"), statusline.DATA_DIR)
+
+    def test_debt018_max_transcript_files_constant(self):
+        """DEBT-018: monitor.MAX_TRANSCRIPT_FILES is the named constant
+        (was magic literal 1000 inline before v1.10.5)."""
+        import monitor
+        self.assertTrue(hasattr(monitor, "MAX_TRANSCRIPT_FILES"))
+        self.assertIsInstance(monitor.MAX_TRANSCRIPT_FILES, int)
+        self.assertGreaterEqual(monitor.MAX_TRANSCRIPT_FILES, 100)  # sanity
+
+    def test_debt021_models_dict_has_all_known_families(self):
+        """DEBT-021: _MODELS dict consolidates name + code + pricing."""
+        import monitor
+        for known_id in ("claude-opus-4-7", "claude-sonnet-4-6",
+                         "claude-haiku-4-5-20251001", "claude-opus-4-1"):
+            self.assertIn(known_id, monitor._MODELS, f"missing {known_id}")
+            entry = monitor._MODELS[known_id]
+            self.assertIn("name", entry)
+            self.assertIn("code", entry)
+            self.assertIn("pricing", entry)
+            # Each code is a 2-tuple (short, version)
+            self.assertEqual(len(entry["code"]), 2)
+
+    def test_debt022_model_code_from_label(self):
+        """DEBT-022: render_picker uses _model_code_from_label, not an
+        inline regex duplicate of _model_code's logic."""
+        import monitor
+        self.assertEqual(monitor._model_code_from_label("Opus 4.6"), ("OP", "4.6"))
+        self.assertEqual(monitor._model_code_from_label("Sonnet 4.5 (1M context)"),
+                         ("SO", "4.5"))
+        self.assertEqual(monitor._model_code_from_label("Haiku 3.5"), ("HA", "3.5"))
+        # Unknown label — fallback path, no crash
+        code, ver = monitor._model_code_from_label("Unknown Model")
+        self.assertEqual(ver, "")
+        # Empty input — returns ("", "")
+        self.assertEqual(monitor._model_code_from_label(""), ("", ""))
+        self.assertEqual(monitor._model_code_from_label(None), ("", ""))
+
+    def test_sec008_claude_dir_resolved_and_symlink_reject(self):
+        """SEC-008: scan_transcript_stats resolves _CLAUDE_DIR and rejects
+        symlinked transcript files (mirrors _safe_transcript_path hardening)."""
+        import monitor
+        # Build a fake _CLAUDE_DIR with one real transcript and one symlink to /etc/passwd-like.
+        tmpdir = tempfile.mkdtemp()
+        try:
+            fake_claude = pathlib.Path(tmpdir) / "projects"
+            fake_claude.mkdir()
+            # Real transcript (1 assistant message with usage)
+            (fake_claude / "real.jsonl").write_text(
+                '{"type":"assistant","timestamp":"2026-04-19T10:00:00Z",'
+                '"message":{"model":"claude-opus-4-6","usage":{"input_tokens":100}}}\n',
+                encoding="utf-8",
+            )
+            # Symlinked transcript — point at outside-root file
+            outside = pathlib.Path(tmpdir) / "outside.jsonl"
+            outside.write_text(
+                '{"type":"assistant","timestamp":"2026-04-19T10:00:00Z",'
+                '"message":{"model":"claude-opus-4-1","usage":{"input_tokens":999999}}}\n',
+                encoding="utf-8",
+            )
+            try:
+                (fake_claude / "link.jsonl").symlink_to(outside)
+                symlinks_supported = True
+            except (OSError, NotImplementedError):
+                symlinks_supported = False
+
+            orig = monitor._CLAUDE_DIR
+            monitor._CLAUDE_DIR = fake_claude
+            monitor._usage_cache.clear()
+            try:
+                models, _ov = monitor.scan_transcript_stats(period="all", ttl=0.0)
+                # The real transcript was scanned
+                self.assertIn("claude-opus-4-6", models)
+                # The symlink was NOT scanned (Opus 4.1 token count didn't leak in)
+                if symlinks_supported:
+                    self.assertNotIn("claude-opus-4-1", models)
+            finally:
+                monitor._CLAUDE_DIR = orig
+                monitor._usage_cache.clear()
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_sec009_update_get_local_version_uses_safe_read(self):
+        """SEC-009: get_local_version enforces a size cap via safe_read,
+        returning a clear error on oversized monitor.py rather than OOM."""
+        import update
+        # Monkey-patch REPO_ROOT to a tempdir with an oversized monitor.py
+        tmpdir = tempfile.mkdtemp()
+        try:
+            mpath = pathlib.Path(tmpdir) / "monitor.py"
+            # Write slightly over MAX_FILE_SIZE (1 MB) — safe_read rejects it
+            mpath.write_bytes(b'VERSION = "9.9.9"\n' + b"x" * (shared.MAX_FILE_SIZE + 10))
+            orig = update.REPO_ROOT
+            update.REPO_ROOT = pathlib.Path(tmpdir)
+            try:
+                with self.assertRaises(RuntimeError) as ctx:
+                    update.get_local_version()
+                # Error message mentions the size cap (not a generic read error)
+                self.assertIn("too large", str(ctx.exception).lower())
+            finally:
+                update.REPO_ROOT = orig
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_sec010_pulse_proxy_env_scrubbed(self):
+        """SEC-010: pulse.py installs a proxy-scrubbed opener at import time
+        so HTTP(S)_PROXY env vars do not silently route Anthropic Pulse
+        fetches through an attacker-controlled intermediary.
+
+        `build_opener(ProxyHandler({}))` creates an opener where no
+        ProxyHandler remains in `.handlers` (CPython filters handlers that
+        register no open-methods — an empty ProxyHandler has none). The
+        invariant we lock in: after `import pulse`, `urllib.request._opener`
+        is installed AND contains no ProxyHandler — so urlopen never consults
+        HTTP(S)_PROXY env vars.
+        """
+        import pulse  # noqa: F401 — import triggers install_opener
+        import urllib.request
+        self.assertIsNotNone(
+            urllib.request._opener,
+            "urllib.request._opener should be set by pulse.py import",
+        )
+        self.assertFalse(
+            any(isinstance(h, urllib.request.ProxyHandler)
+                for h in urllib.request._opener.handlers),
+            "pulse.py opener must contain NO ProxyHandler (env-proxy scrub)",
+        )
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

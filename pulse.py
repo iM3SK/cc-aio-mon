@@ -50,8 +50,18 @@ PROBE_URL = "https://api.anthropic.com/v1/messages"  # expect 401/405 without au
 HTTP_TIMEOUT = 5.0
 PING_TIMEOUT = 4.0  # covers TLS handshake + HTTP round-trip
 FETCH_INTERVAL = 30.0  # seconds between background fetches
-USER_AGENT = f"cc-aio-mon-pulse/{VERSION} (+https://github.com/iM3SK/cc-aio-mon)"  # VERSION from shared.py
+# VERSION from shared.py
+USER_AGENT = f"cc-aio-mon-pulse/{VERSION} (+https://github.com/iM3SK/cc-aio-mon)"
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB cap on status.json response
+
+# Scrub proxy env vars for urllib.request.urlopen calls. Mirrors the env-scrub
+# rationale in shared._GIT_ENV_WHITELIST: a pre-injected HTTP(S)_PROXY should
+# not silently route Pulse fetches through an attacker-controlled intermediary.
+# install_opener is process-global, but urlopen is only used by pulse.py in this
+# codebase (verified by grep).
+urllib.request.install_opener(
+    urllib.request.build_opener(urllib.request.ProxyHandler({}))
+)
 
 # Persistence + cleanup
 LOG_PATH = DATA_DIR / "pulse.jsonl"
@@ -272,7 +282,8 @@ def _fetch_summary():
     """Fetch status.claude.com summary.json. Returns (data, error_tag)."""
     req = urllib.request.Request(SUMMARY_URL, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # nosec B310 — SUMMARY_URL is a hardcoded HTTPS constant, no user input
+        # SUMMARY_URL is a hardcoded HTTPS constant; proxy env scrubbed via install_opener
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # nosec B310
             # Guard against oversized responses
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
@@ -310,7 +321,8 @@ def _ping_api():
     )
     start = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=PING_TIMEOUT) as resp:  # nosec B310 — PROBE_URL is a hardcoded HTTPS constant, no user input
+        # PROBE_URL is a hardcoded HTTPS constant; proxy env scrubbed via install_opener
+        with urllib.request.urlopen(req, timeout=PING_TIMEOUT) as resp:  # nosec B310
             resp.read(1)  # drain minimally; context manager guarantees close on exit
     except urllib.error.HTTPError:
         # Any HTTP status = endpoint responded (401/405/429 all fine as liveness signal)
