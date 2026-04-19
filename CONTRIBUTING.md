@@ -42,7 +42,8 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 - One logical change per PR.
 - Include a description of what changed and why.
 - Reference any related issues.
-- Commit/PR title format: `<type>(<scope>): <short description>` — see `.claude/CLAUDE.md` Git Commit Policy.
+- Commit/PR title format: `<type>(<scope>): <short description>`.
+  Allowed scopes: `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`.
 
 ## See also
 
