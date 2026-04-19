@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Unit tests for CC AIO MON — stdlib only, no pytest required.
 
 Run:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Claude AIO Monitor — statusline for Claude Code.
 
 Stdlib-only status line script (uses shared.py for helpers).
