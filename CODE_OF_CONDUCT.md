@@ -11,3 +11,5 @@ This project follows the [Contributor Covenant](https://www.contributor-covenant
 ## Enforcement
 
 Violations can be reported by opening a [private security advisory](../../security/advisories/new) (which supports confidential communication with the maintainer) or by opening a standard GitHub issue for non-sensitive matters. Reports will be reviewed and addressed promptly.
+
+See [.github/SECURITY.md](.github/SECURITY.md) for the same private reporting channel used for security vulnerabilities.

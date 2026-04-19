@@ -90,6 +90,12 @@ Audit postupy a audit logs live in `docs/audits/` (local-only, gitignored). Star
 3. `py -m py_compile monitor.py statusline.py shared.py update.py pulse.py`
 4. Stage explicitly by filename — **never** `git add .` or `git add -A`
 5. `git diff --cached` — final visual review
-6. Commit message format: `feat/fix/chore(scope): short description`
+6. Commit message format: `<type>(<scope>): <short description>`
+   - **Types:** `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `style`, `revert`
+   - **Scopes (established set):** `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`
+   - **Release commits** use the same format — e.g. `feat(statusline): reset countdown + drop APR/CHR segments (v1.10.0)` or `fix(monitor): v1.10.3 — Windows UnboundLocalError on startup`. No special casing.
+   - **PR titles** match the squash-merge commit title exactly.
+   - **GitHub release titles** follow `vX.Y.Z — short human description` (em-dash `—`, not hyphen).
+   - **Git tags** are annotated, format `vX.Y.Z` (with `v` prefix).
 7. **Forbidden flags**: `--no-verify`, `--force`, `--no-gpg-sign`, `-c commit.gpgsign=false`
 8. Never amend already-pushed commits; create new commit instead

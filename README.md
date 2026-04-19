@@ -54,7 +54,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/7DL segments also show a dimmed reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
 - **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
-- **Token usage stats** — press `t` for a per-model token breakdown (In/Out/Calls), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (TOP) count all token types: input + output + cache_read + cache_write.
+- **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (TOP) count all token types: input + output + cache_read + cache_write.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
 <p align="center">
 <a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal with per-model breakdown using 3-char codes, includes cache tokens in bar"></a>
@@ -127,19 +127,20 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Keyboard Shortcuts
 
-| Key | Action |
-|-----|--------|
-| `q` | Quit |
-| `m` | Menu (navigation hub) |
-| `r` | Force refresh (resets stale timer) |
-| `s` | Switch session (picker) |
-| `t` | Token usage stats (per-model breakdown) |
-| `c` | Cost breakdown (token costs, cache savings, burn rate over time) |
-| `u` | Update manager (version check, changelog, apply) |
-| `p` | Anthropic Pulse (backend stability modal) |
-| `l` | Toggle legend overlay |
-| `1-9` | Select session (picker) |
-| `1/2/3` | Switch period in token usage stats (all/7d/30d) |
+| Key | Action | Context |
+|-----|--------|---------|
+| `q` | Quit | dashboard |
+| `m` | Menu (navigation hub) | dashboard |
+| `r` | Force refresh (resets stale timer) | dashboard |
+| `s` | Switch session (picker) | dashboard |
+| `t` | Token usage stats (per-model breakdown) | dashboard |
+| `c` | Cost breakdown (token costs, cache savings, burn rate over time) | dashboard |
+| `u` | Update manager (version check, changelog) | dashboard |
+| `a` | Apply update (fetches + runs `git pull --ff-only`) | inside update modal only |
+| `p` | Anthropic Pulse (backend stability modal) | dashboard |
+| `l` | Toggle legend overlay | dashboard |
+| `1`–`9` | Select session from picker | session picker only |
+| `1` / `2` / `3` | Switch period (all / 7d / 30d) | inside token-stats modal only |
 
 ### Session Picker
 
@@ -241,7 +242,7 @@ export CLAUDE_STATUS_CRIT=90
 ## Known Limitations
 
 - **Delayed refresh after context compaction** — when Claude Code compacts the context window, the dashboard continues showing the pre-compaction CTX value until Claude Code emits the next statusline event (typically the next assistant message). This is a Claude Code protocol limitation — `statusline.py` is only invoked on assistant messages, permission mode changes, or vim mode toggles. There is no external API to trigger a refresh on demand.
-- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Pricing reflects Anthropic's published rates as of release date. Cost breakdown uses per-model cached-input multipliers (0.1×) and cache-write multipliers (1.25×). Current model family: Opus 4.7 / Sonnet 4.6 / Haiku 4.5.
+- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown uses per-model cached-input multipliers (0.1×) and cache-write multipliers (1.25×). Current priced families: Opus (4.1 / 4.5 / 4.6 / 4.7), Sonnet (4.5 / 4.6), Haiku (3.5 / 4.5).
 
 ## Troubleshooting
 

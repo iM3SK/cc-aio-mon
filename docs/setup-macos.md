@@ -1,7 +1,5 @@
 # Setup — macOS
 
-> macOS is tested in CI (`macos-latest`, Python 3.12). Report issues if something breaks.
-
 > **Python command:** This guide uses `python3`. If your system only has `python` (no `python3`), replace every `python3` in the commands below with `python`. Run `check-requirements.sh` to see which command is detected on your machine.
 
 ## Requirements
@@ -120,3 +118,7 @@ No credentials, no user data, no request body is sent. If you are behind a restr
 ```bash
 CC_AIO_MON_NO_PULSE=1 python3 monitor.py
 ```
+
+## CI status
+
+CC AIO MON is CI-tested on macOS with **Python 3.12** only. Ubuntu covers 3.8, 3.10, 3.11, and 3.12. Python 3.8/3.10/3.11 on macOS are not CI-tested — the project targets Python 3.8+ but relies on the Ubuntu matrix to catch older-version regressions.
