@@ -54,7 +54,6 @@ Claude Code statusLine command MUST be wrapped in `bash -c '...'` — externé b
 - All subprocess calls use `shared.run_git` with minimal env whitelist (blocks GIT_SSH_COMMAND / LD_PRELOAD injection)
 - **No `import` statements inside function bodies** — Python's scope rule treats any in-function `import X` as making `X` a function-local for the entire function, even if the import is guarded by a conditional that never runs. This caused the v1.10.3 Windows startup regression (local `import signal` shadowed module-level import → `UnboundLocalError` when Windows branch skipped the import). Always import at module level. Guarded platform-specific attributes use `hasattr(module, "ATTR")` instead.
 - **Live-run before release claim** — before tagging any release or claiming "done" on a user-facing change, actually run `py monitor.py` for ~30 s on the target platform. `py_compile` + `tests.py` passing **is not sufficient**: the interactive TUI loop runs code that unit tests don't reach (alt-buffer entry, `_setup_term`, signal wiring, daemon thread start). The v1.10.3 Windows `UnboundLocalError` hit exactly there — CI was green, tests all passed, but `main()` crashed on the first keystroke because the relevant branch never ran in CI. If the change touches `main()`, platform imports, TTY setup, or daemon threads, live-run is mandatory.
-- **Precedence** — this project-level CLAUDE.md prevails over the global `~/.claude/CLAUDE.md` when content conflicts (commit scopes, file conventions, architecture). Global CLAUDE.md remains the source for user identity, language preference, and agent dispatch policy.
 
 ## Audit
 
@@ -86,18 +85,13 @@ Audit postupy a audit logs live in `docs/audits/` (local-only, gitignored). Star
 - Personal identifiers (emails except `help@digitalcoach.sk` owner, GitHub handles)
 - Binaries > 500 KB (screenshots are OK up to ~200 KB)
 
-**PRE-COMMIT CHECKLIST (run every time):**
-1. `git status --short` — review all changes
-2. `py tests.py` — all pass
-3. `py -m py_compile monitor.py statusline.py shared.py update.py pulse.py`
-4. Stage explicitly by filename — **never** `git add .` or `git add -A`
-5. `git diff --cached` — final visual review
-6. Commit message format: `<type>(<scope>): <short description>`
-   - **Types:** `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `style`, `revert`
-   - **Scopes (established set):** `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`
-   - **Release commits** use the same format — e.g. `feat(statusline): reset countdown + drop APR/CHR segments (v1.10.0)` or `fix(monitor): v1.10.3 — Windows UnboundLocalError on startup`. No special casing.
-   - **PR titles** match the squash-merge commit title exactly.
-   - **GitHub release titles** follow `vX.Y.Z — short human description` (em-dash `—`, not hyphen).
-   - **Git tags** are annotated, format `vX.Y.Z` (with `v` prefix).
-7. **Forbidden flags**: `--no-verify`, `--force`, `--no-gpg-sign`, `-c commit.gpgsign=false`
-8. Never amend already-pushed commits; create new commit instead
+**PROJECT-SPECIFIC PRE-COMMIT STEPS** (generic git rules live in `~/.claude/CLAUDE.md`):
+1. `py tests.py` — all tests pass
+2. `py -m py_compile monitor.py statusline.py shared.py update.py pulse.py`
+
+**PROJECT-SPECIFIC CONVENTIONS** (extend the generic format rule from `~/.claude/CLAUDE.md`):
+- **Scope set:** `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`
+- **Release commits** use the same format as any other commit — e.g. `feat(statusline): reset countdown + drop APR/CHR segments (v1.10.0)` or `fix(monitor): v1.10.3 — Windows UnboundLocalError on startup`. No special casing.
+- **PR titles** match the squash-merge commit title exactly.
+- **GitHub release titles** follow `vX.Y.Z — short human description` (em-dash `—`, not hyphen).
+- **Git tags** are annotated, format `vX.Y.Z` (with `v` prefix).
