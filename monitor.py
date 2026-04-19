@@ -1023,7 +1023,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"{c(C_GRN)}RLS{R} {c(C_GRN)}{spin_rls()} Up to date{R}")
     elif rls_s is None:
         buf.append(f"{C_DIM}RLS {spin_rls()} Checking...{R}")
-    # error/no_git/timeout — ticho, nič nezobrazí
+    # error/no_git/timeout — silent, render nothing
 
     # ── Footer ──
     buf.append(sep(SW))

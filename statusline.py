@@ -45,6 +45,12 @@ except (ValueError, TypeError):
 
 _IS_WIN = platform.system() == "Windows"
 
+if _IS_WIN:
+    import ctypes
+else:
+    import fcntl
+    import termios
+
 
 def _get_terminal_width(fallback: int = 80) -> int:
     """Reliable terminal width even when stdout/stdin/stderr are piped.
@@ -73,7 +79,6 @@ def _get_terminal_width(fallback: int = 80) -> int:
     # 3. Open controlling terminal directly — bypasses pipe redirection
     if _IS_WIN:
         try:
-            import ctypes
             kernel32 = ctypes.windll.kernel32
             # CONOUT$ is the Windows console output device — works even when
             # stdout/stderr are piped (Claude Code subprocess context)
@@ -100,8 +105,6 @@ def _get_terminal_width(fallback: int = 80) -> int:
             pass
     else:
         try:
-            import fcntl
-            import termios
             with open("/dev/tty") as tty:
                 packed = fcntl.ioctl(tty, termios.TIOCGWINSZ, b"\x00" * 8)
                 _, cols, _, _ = struct.unpack("HHHH", packed)
@@ -349,7 +352,7 @@ def write_shared_state(data: dict):
 
 def _trim_history(path: pathlib.Path):
     fd = None
-    # Bounded read — JSONL trim cap is MAX_FILE_SIZE * 2 (spec line in CLAUDE.md)
+    # Bounded read — JSONL trim cap is MAX_FILE_SIZE * 2
     raw = safe_read(path, MAX_FILE_SIZE * 2)
     if raw is None:
         return
