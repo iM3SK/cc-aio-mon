@@ -22,6 +22,17 @@ Thumbs.db
 TASKS.md
 PROMO.md
 
+# AI agent memory / instruction files — LOCAL ONLY, must never reach GitHub
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.cursorrules
+.cursor/
+.continue/
+.aider*
+.windsurfrules
+.codeium/
+
 # Python test / coverage
 .coverage
 htmlcov/
