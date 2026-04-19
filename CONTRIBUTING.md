@@ -29,7 +29,11 @@
 
 ## What to keep in sync
 
-- `shared.py` is the single source of truth for shared constants (`_SID_RE`, `_ANSI_RE`, `MAX_FILE_SIZE`, `DATA_DIR_NAME`), ANSI colors (`C_RED`, `C_GRN`, etc.), helpers (`_num`, `_sanitize`, `f_tok`, `f_cost`, `f_dur`, `char_width`, `is_safe_dir`, `ensure_data_dir`), and `calc_rates`. Both `statusline.py` and `monitor.py` import from it.
+- **`shared.py` is the single source of truth** — all cross-file constants, helpers, ANSI palette, and regexes live there. Never duplicate a literal or a helper in `statusline.py` / `monitor.py` / `pulse.py` / `update.py`. The shared surface includes:
+  - **Constants:** `VERSION`, `PY_FILES`, `_SID_RE`, `_ANSI_RE`, `MAX_FILE_SIZE`, `TRANSCRIPT_MAX_BYTES`, `DATA_DIR_NAME`, `DATA_DIR`, `VERSION_RE`, `RESERVED_SIDS`.
+  - **ANSI palette:** `E`, `R`, `B`, `FAINT`, `C_RED`, `C_GRN`, `C_YEL`, `C_ORN`, `C_CYN`, `C_WHT`, `C_DIM`.
+  - **Helpers:** `_num`, `_sanitize`, `safe_read`, `f_tok`, `f_cost`, `f_dur`, `f_cd`, `char_width`, `is_safe_dir`, `ensure_data_dir`, `strip_context_suffix`, `compact_context_suffix`, `extract_changelog_entry`, `run_git`, `calc_rates`.
+  - If you add a helper or constant that is (or could be) used by more than one module, put it in `shared.py` from day one.
 
 ## Pull requests
 

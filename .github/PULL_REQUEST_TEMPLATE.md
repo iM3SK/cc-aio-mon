@@ -8,7 +8,7 @@
 - [ ] All files compile: `python3 -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ('shared.py','statusline.py','monitor.py','update.py','pulse.py')]"` (use `py` on Windows)
 - [ ] Tested manually with a live Claude Code session
 - [ ] Zero new dependencies introduced
-- [ ] `MAX_FILE_SIZE` and ANSI palette kept in sync across `statusline.py` and `monitor.py` (if changed)
+- [ ] Any new shared constant / helper / ANSI attribute lives in `shared.py` (not duplicated in `statusline.py` / `monitor.py` / `pulse.py` / `update.py`)
 - [ ] CHANGELOG.md updated
 
 ## Related issues

@@ -38,7 +38,7 @@ CC AIO MON reads session data from Claude Code via stdin and writes snapshots to
 
 - `GET https://status.claude.com/api/v2/summary.json` — public status page JSON (every 30 s)
 - `GET https://api.anthropic.com/v1/messages` — unauthenticated liveness probe; expects 401/405 (every 30 s)
-- Request body: none. Headers: `User-Agent: cc-aio-mon-pulse/<version>` only (tracks `monitor.VERSION`; currently `1.9.1`).
+- Request body: none. Headers: `User-Agent: cc-aio-mon-pulse/<version>` only (version string reads from `shared.VERSION` — single source of truth since v1.10.2; currently `1.10.5`).
 - Response size capped at 512 KB; socket timeouts 4–5 s.
 - Opt-out: set `CC_AIO_MON_NO_PULSE=1` to disable the background worker entirely.
 

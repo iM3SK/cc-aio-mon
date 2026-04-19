@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.10.5 — 2026-04-19
+
+Documentation sync — follow-up to a doc-consistency audit that found four places where the prose had drifted behind the v1.10.0 → v1.10.4 code changes.
+
+**Fixed:**
+- **`.github/SECURITY.md:41`** — pulse `User-Agent` version string said "currently `1.9.1`" and referenced `monitor.VERSION`. Both stale since v1.10.2 (VERSION is now in `shared.py`, current release is `1.10.5`). Updated to reference `shared.VERSION` and current version.
+- **`CONTRIBUTING.md:32`** — "keep in sync" helpers/constants list omitted additions from v1.10.0–v1.10.2: `VERSION`, `PY_FILES`, `TRANSCRIPT_MAX_BYTES`, `FAINT`, `safe_read`, `f_cd`, `run_git`, `extract_changelog_entry`, `strip_context_suffix`, `compact_context_suffix`, `calc_rates`. Rewrote as an authoritative enumeration of the `shared.py` surface (constants / ANSI palette / helpers) with a rule: "if you add something used by more than one module, put it in `shared.py` from day one".
+- **`.github/PULL_REQUEST_TEMPLATE.md:11`** — checklist item "`MAX_FILE_SIZE` and ANSI palette kept in sync across `statusline.py` and `monitor.py`" was obsolete since v1.10.2 (no duplicate literals across files — everything lives in `shared.py`). Rewritten to reflect the new rule.
+- **`.claude/CLAUDE.md:17`** — shared.py helpers/constants line didn't mention `safe_read`, `VERSION`, `PY_FILES`. Expanded to a full authoritative list with the v1.10.x version annotations (e.g. "safe_read (bounded-read primitive, v1.10.2)").
+
+**No functional change** — metadata / documentation only.
+
 ## v1.10.4 — 2026-04-19
 
 License hygiene — follow-up to a license compliance audit that flagged missing SPDX headers as a low-severity gap.
