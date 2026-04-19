@@ -53,6 +53,7 @@ from shared import (
     MAX_FILE_SIZE, _ANSI_RE, _SID_RE, _sanitize, RESERVED_SIDS,
     C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_DIM,
     char_width, is_safe_dir, ensure_data_dir,
+    f_remaining,
 )
 
 from statusline import (
@@ -326,6 +327,27 @@ class TestFormatters(unittest.TestCase):
         import time
         result = f_cd(str(int(time.time()) + 7260))
         self.assertIn("h", result)
+
+    def test_f_remaining_zero(self):
+        self.assertEqual(f_remaining(0), "--")
+
+    def test_f_remaining_seconds(self):
+        self.assertEqual(f_remaining(45), "45s")
+
+    def test_f_remaining_minutes(self):
+        self.assertEqual(f_remaining(90), "1m 30s")
+
+    def test_f_remaining_minutes_exact(self):
+        self.assertEqual(f_remaining(120), "2m")
+
+    def test_f_remaining_hours(self):
+        self.assertEqual(f_remaining(3600 + 900), "1h 15m")
+
+    def test_f_remaining_days(self):
+        self.assertEqual(f_remaining(6 * 86400 + 15 * 3600), "6d 15h")
+
+    def test_f_remaining_negative(self):
+        self.assertEqual(f_remaining(-10), "--")
 
 
 # ===========================================================================

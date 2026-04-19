@@ -82,6 +82,25 @@ def f_dur(ms):
     return f"{h}h {m:02d}m"
 
 
+def f_remaining(s):
+    """Human-readable countdown: 6d 15h / 4h 32m / 12m / 45s."""
+    s = int(_num(s, 0))
+    if s <= 0:
+        return "--"
+    if s >= 86400:
+        d, rem = divmod(s, 86400)
+        h = rem // 3600
+        return f"{d}d {h}h"
+    if s >= 3600:
+        h, rem = divmod(s, 3600)
+        m = rem // 60
+        return f"{h}h {m:02d}m"
+    if s >= 60:
+        m, sec = divmod(s, 60)
+        return f"{m}m" if sec == 0 else f"{m}m {sec:02d}s"
+    return f"{s}s"
+
+
 def f_tok(n):
     n = _num(n, 0)
     if n <= 0:

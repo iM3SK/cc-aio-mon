@@ -9,6 +9,7 @@ CC notifications share the status line row — no full-width padding.
 Config env vars:
     CLAUDE_STATUS_WARN  — yellow threshold % (default 50)
     CLAUDE_STATUS_CRIT  — red threshold % (default 80)
+    CC_MON_LIMIT_FMT    — 5HL/7DL time format: "remaining" (default) or "reset"
 """
 
 import codecs
@@ -22,6 +23,7 @@ import tempfile
 import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, f_tok, f_cost,
+                    f_remaining,
                     is_safe_dir, ensure_data_dir,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, RESERVED_SIDS,
                     strip_context_suffix,
@@ -38,7 +40,9 @@ try:
     CRIT = int(os.environ.get("CLAUDE_STATUS_CRIT", "80"))
 except (ValueError, TypeError):
     CRIT = 80
-
+LIMIT_FMT = os.environ.get("CC_MON_LIMIT_FMT", "remaining").lower()
+if LIMIT_FMT not in ("remaining", "reset"):
+    LIMIT_FMT = "remaining"
 
 
 _IS_WIN = platform.system() == "Windows"
@@ -163,7 +167,11 @@ def seg_5hl(data):
     c = cpc_base(pct, C_YEL)
     reset_str = ""
     if resets > now:
-        reset_str = f" {C_DIM}→{R}{c}{time.strftime('%H:%M', time.localtime(resets))}{R}"
+        if LIMIT_FMT == "reset":
+            val = time.strftime('%H:%M', time.localtime(resets))
+        else:
+            val = f_remaining(resets - now)
+        reset_str = f" {C_DIM}→{R}{c}{val}{R}"
     text = f"{c}{B}5HL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 
@@ -183,7 +191,11 @@ def seg_7dl(data):
     c = cpc_base(pct, C_YEL)
     reset_str = ""
     if resets > now:
-        reset_str = f" {C_DIM}→{R}{c}{time.strftime('%d.%m. %H:%M', time.localtime(resets))}{R}"
+        if LIMIT_FMT == "reset":
+            val = time.strftime('%d.%m. %H:%M', time.localtime(resets))
+        else:
+            val = f_remaining(resets - now)
+        reset_str = f" {C_DIM}→{R}{c}{val}{R}"
     text = f"{c}{B}7DL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 

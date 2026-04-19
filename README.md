@@ -186,6 +186,7 @@ Exception: 5HL/7DL labels use yellow as base color (even below 50%) to visually 
 | `CC_MON_BRN_MAX` | `10.0` | dashboard | Burn rate bar ceiling ($/min). Set higher if your bar pins (24/7 Opus API). |
 | `CC_MON_CST_MAX` | `1000.0` | dashboard | Cost bar ceiling ($ per session). Raise for long-running API sessions. |
 | `CC_MON_CTR_MAX` | `10.0` | dashboard | Context change rate ceiling (%/min). |
+| `CC_MON_LIMIT_FMT` | `remaining` | statusline | 5HL/7DL time display: `remaining` (e.g. `→3h 46m`) or `reset` (absolute timestamp, e.g. `→07:00`). |
 | `CC_AIO_MON_NO_UPDATE_CHECK` | *(unset)* | dashboard | Set to `1` to disable background release check |
 | `CC_AIO_MON_NO_PULSE` | *(unset)* | dashboard | Set to `1` to disable background Anthropic Pulse worker (no outbound network) |
 

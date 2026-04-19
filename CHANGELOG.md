@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.9.2 — 2026-04-19
+
+**5HL/7DL: remaining time display (default)**
+- `5HL` and `7DL` statusline segments now show **remaining time** until reset by default (e.g. `→3h 46m`, `→5d 21h`) instead of the absolute reset timestamp. No more mental arithmetic.
+- The original absolute-timestamp format is still available via `CC_MON_LIMIT_FMT=reset`.
+- Added `f_remaining(seconds)` helper to `shared.py` (days/hours/minutes/seconds, no external deps).
+- README: documented `CC_MON_LIMIT_FMT` in the env-vars table.
+- 7 new tests for `f_remaining`.
+
 ## v1.9.1 — 2026-04-17
 
 **Security hardening:**
