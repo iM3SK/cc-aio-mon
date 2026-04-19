@@ -252,7 +252,6 @@
 **Docs:**
 - Removed duplicate root `SECURITY.md` — `.github/SECURITY.md` (more detailed) is the canonical version displayed by GitHub.
 - Untracked `PROMO.md` from git — was tracked despite `.gitignore` rule (added before ignore took effect).
-- `.claude/CLAUDE.md`: updated JSONL file size limits, shared.py description updated with new helpers.
 - `docs/setup-macos.md`: removed stale "not included in CI" note (macOS CI added in v1.8.1).
 - `README.md`: added menu modal and cost breakdown features, `m`/`c` keyboard shortcuts, updated security table (NTFS junction, lstat TOCTOU, CJK truncation), updated file size limits.
 
@@ -377,7 +376,6 @@
 - README: fixed 4 broken screenshot references, added DUR to Metrics at a Glance table, fixed smart warnings text, fixed session picker auto-connect description
 - README: screenshots renamed to descriptive English names, clickable for fullsize view, added statusline screenshot
 - CHANGELOG: fixed test count
-- CLAUDE.md: updated `shared.py` description to reflect new shared constants and regexes
 
 **Other:**
 - VERSION bumped to `1.8.0`
