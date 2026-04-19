@@ -23,12 +23,14 @@ from shared import (
     extract_changelog_entry, PY_FILES, safe_read,
 )
 
+if sys.platform == "win32":
+    import ctypes
+
 
 # ---------- ANSI colors (Windows VT enable) ----------
 def _enable_vt_on_windows():
     if sys.platform == "win32":
         try:
-            import ctypes
             h = ctypes.windll.kernel32.GetStdHandle(-11)
             ctypes.windll.kernel32.SetConsoleMode(h, 7)
         except Exception:
