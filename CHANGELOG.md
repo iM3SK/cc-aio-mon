@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.10.6 — 2026-04-22
+
+**Statusline — reset countdown color:**
+- Removed ANSI faint (`\033[2m`) from the 5HL and 7DL reset countdown. The reset time (`→ 2h 58m`, `→ 1d 22h`) now renders in the same color as the percentage — yellow below the warn threshold, red at or above the critical threshold. Previously the countdown was intentionally dimmed to signal supplementary information; the effect rendered inconsistently across terminals and made the countdown harder to read.
+
+**Bug fixes:**
+- **Release check / self-update.** Since v1.10.2 the `VERSION` constant moved into `shared.py`, but the release-check worker in `monitor.py` and `update.py --apply` both still greped `monitor.py` for it. Result: the dashboard permanently showed `error` in the release indicator, and every `py update.py --apply` invocation raised `RuntimeError: VERSION constant not found in monitor.py` before doing anything. Both paths now read from `shared.py`.
+- **Dashboard crash on null payload fields.** A Claude Code status JSON with `"model": null`, `"context_window": null`, or `"cost": null` (rare but syntactically valid) raised `AttributeError` inside `render_frame` / `scan_transcript_stats`. `AttributeError` was not in the render loop's except allow-list, so the dashboard crashed via the excepthook and `monitor-crash.log`. Sixteen call sites switched from the `data.get("k", {})` default to the `data.get("k") or {}` pattern, which treats explicit `null` the same as a missing key.
+
 ## v1.10.5 — 2026-04-19
 
 **Security hardening:**
