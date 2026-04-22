@@ -12,7 +12,6 @@ Config env vars:
     CLAUDE_STATUS_CRIT  — red threshold % (default 80)
 """
 
-import codecs
 import json
 import os
 import pathlib
@@ -24,22 +23,10 @@ import tempfile
 import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_cd,
-                    is_safe_dir, ensure_data_dir, load_history as _shared_load_history,
-                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, DATA_DIR, RESERVED_SIDS,
-                    strip_context_suffix,
-                    R, B, FAINT, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-try:
-    WARN = int(os.environ.get("CLAUDE_STATUS_WARN", "50"))
-except (ValueError, TypeError):
-    WARN = 50
-try:
-    CRIT = int(os.environ.get("CLAUDE_STATUS_CRIT", "80"))
-except (ValueError, TypeError):
-    CRIT = 80
+                    ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, DATA_DIR, RESERVED_SIDS,
+                    strip_context_suffix, WARN_PCT, CRIT_PCT,
+                    R, B, C_RED, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 
 
@@ -118,9 +105,9 @@ def _get_terminal_width(fallback: int = 80) -> int:
 
 def cpc_base(pct, base):
     """Threshold color — uses metric's own base color below WARN (matches monitor mkbar behavior)."""
-    if pct >= CRIT:
+    if pct >= CRIT_PCT:
         return C_RED
-    if pct >= WARN:
+    if pct >= WARN_PCT:
         return C_YEL
     return base
 
@@ -136,14 +123,14 @@ _SEP_VLEN = 3  # " │ "
 # Segment builders — each returns (text, visible_length) or None
 # ---------------------------------------------------------------------------
 def seg_model(data):
-    name = _sanitize(data.get("model", {}).get("display_name", ""))
+    name = _sanitize((data.get("model") or {}).get("display_name", ""))
     name = strip_context_suffix(name).replace(" (200k)", "")
     text = f"{B}{C_WHT}{name}{R}"
     return text, len(_ANSI_RE.sub("", text))
 
 
 def seg_ctx(data):
-    cw = data.get("context_window", {})
+    cw = data.get("context_window") or {}
     pct = round(_num(cw.get("used_percentage")))
     total = _num(cw.get("context_window_size"), 0)
     used = int(total * pct / 100) if total else 0
@@ -166,7 +153,7 @@ def seg_5hl(data):
     if resets > 0 and resets < now:
         pct = 0
     c = cpc_base(pct, C_YEL)
-    reset_str = f" {FAINT}{c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
+    reset_str = f" {c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
     text = f"{c}{B}5HL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 
@@ -184,13 +171,13 @@ def seg_7dl(data):
     if resets > 0 and resets < now:
         pct = 0
     c = cpc_base(pct, C_YEL)
-    reset_str = f" {FAINT}{c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
+    reset_str = f" {c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
     text = f"{c}{B}7DL{R} {c}{pct}%{R}{reset_str}"
     return text, len(_ANSI_RE.sub("", text))
 
 
 def seg_cost(data):
-    usd = _num(data.get("cost", {}).get("total_cost_usd"))
+    usd = _num((data.get("cost") or {}).get("total_cost_usd"))
     if usd <= 0:
         return None
     text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost(usd)}{R}"
@@ -243,17 +230,10 @@ def main():
             signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         except (AttributeError, ValueError):
             pass
-    # Force UTF-8 on Windows (cp1250/cp1252 can't handle unicode box-drawing)
-    try:
-        is_utf8 = sys.stdout.encoding and codecs.lookup(sys.stdout.encoding).name == "utf-8"
-    except LookupError:
-        is_utf8 = False
-    if not is_utf8:
-        sys.stdout.flush()
-        sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", errors="replace", closefd=False)
+    ensure_utf8_stdout()
 
     try:
-        raw = sys.stdin.read(1_048_576)  # 1 MB limit
+        raw = sys.stdin.read(MAX_FILE_SIZE)
         if not raw.strip():
             return
         data = json.loads(raw)
@@ -352,8 +332,7 @@ def write_shared_state(data: dict):
 
 def _trim_history(path: pathlib.Path):
     fd = None
-    # Bounded read — JSONL trim cap is MAX_FILE_SIZE * 2
-    raw = safe_read(path, MAX_FILE_SIZE * 2)
+    raw = safe_read(path, HISTORY_READ_MAX)
     if raw is None:
         return
     try:
