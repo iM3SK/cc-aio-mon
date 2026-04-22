@@ -2195,7 +2195,7 @@ class TestUpdate(unittest.TestCase):
             import update
             old_root = update.REPO_ROOT
             update.REPO_ROOT = Path(td)
-            (Path(td) / "monitor.py").write_text('VERSION = "1.2.3"\n', encoding="utf-8")
+            (Path(td) / "shared.py").write_text('VERSION = "1.2.3"\n', encoding="utf-8")
             try:
                 result = update.get_local_version()
                 self.assertEqual(result, "1.2.3")
@@ -2208,7 +2208,7 @@ class TestUpdate(unittest.TestCase):
             import update
             old_root = update.REPO_ROOT
             update.REPO_ROOT = Path(td)
-            (Path(td) / "monitor.py").write_text("VERSION = '2.0.0'\n", encoding="utf-8")
+            (Path(td) / "shared.py").write_text("VERSION = '2.0.0'\n", encoding="utf-8")
             try:
                 result = update.get_local_version()
                 self.assertEqual(result, "2.0.0")
@@ -2233,7 +2233,7 @@ class TestUpdate(unittest.TestCase):
             import update
             old_root = update.REPO_ROOT
             update.REPO_ROOT = Path(td)
-            (Path(td) / "monitor.py").write_text("# no version here\n", encoding="utf-8")
+            (Path(td) / "shared.py").write_text("# no version here\n", encoding="utf-8")
             try:
                 with self.assertRaises(RuntimeError):
                     update.get_local_version()
@@ -5038,12 +5038,12 @@ class TestAuditRegressionV1105(unittest.TestCase):
 
     def test_sec009_update_get_local_version_uses_safe_read(self):
         """SEC-009: get_local_version enforces a size cap via safe_read,
-        returning a clear error on oversized monitor.py rather than OOM."""
+        returning a clear error on oversized shared.py rather than OOM."""
         import update
-        # Monkey-patch REPO_ROOT to a tempdir with an oversized monitor.py
+        # Monkey-patch REPO_ROOT to a tempdir with an oversized shared.py
         tmpdir = tempfile.mkdtemp()
         try:
-            mpath = pathlib.Path(tmpdir) / "monitor.py"
+            mpath = pathlib.Path(tmpdir) / "shared.py"
             # Write slightly over MAX_FILE_SIZE (1 MB) — safe_read rejects it
             mpath.write_bytes(b'VERSION = "9.9.9"\n' + b"x" * (shared.MAX_FILE_SIZE + 10))
             orig = update.REPO_ROOT

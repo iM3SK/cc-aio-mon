@@ -11,7 +11,6 @@ macOS/Linux: python3). Stdlib only.
 """
 
 import argparse
-import codecs
 import datetime
 import os
 import re
@@ -20,7 +19,7 @@ import sys
 from pathlib import Path
 from shared import (
     VERSION_RE, MAX_FILE_SIZE, _sanitize, run_git as _shared_run_git,
-    extract_changelog_entry, PY_FILES, safe_read,
+    ensure_utf8_stdout, extract_changelog_entry, PY_FILES, safe_read,
 )
 
 if sys.platform == "win32":
@@ -39,15 +38,7 @@ def _enable_vt_on_windows():
 
 def _init_terminal():
     """Set up UTF-8 stdout and VT processing. Called from main() only."""
-    # Force UTF-8 on Windows (cp1250/cp1252 can't handle em-dash, box chars)
-    try:
-        is_utf8 = sys.stdout.encoding and codecs.lookup(sys.stdout.encoding).name == "utf-8"
-    except LookupError:
-        is_utf8 = False
-    if not is_utf8:
-        sys.stdout.flush()
-        sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8",
-                          errors="replace", closefd=False)
+    ensure_utf8_stdout()
     _enable_vt_on_windows()
 
 
@@ -120,26 +111,26 @@ def fetch_remote():
 
 
 def get_local_version():
-    monitor = REPO_ROOT / "monitor.py"
-    if not monitor.exists():
-        raise RuntimeError("monitor.py not found")
-    raw = safe_read(monitor, MAX_FILE_SIZE)
+    source = REPO_ROOT / "shared.py"
+    if not source.exists():
+        raise RuntimeError("shared.py not found")
+    raw = safe_read(source, MAX_FILE_SIZE)
     if raw is None:
-        raise RuntimeError(f"monitor.py: unreadable or too large (>{MAX_FILE_SIZE} bytes)")
+        raise RuntimeError(f"shared.py: unreadable or too large (>{MAX_FILE_SIZE} bytes)")
     content = raw.decode("utf-8", errors="replace")
     m = VERSION_RE.search(content)
     if not m:
-        raise RuntimeError("VERSION constant not found in monitor.py")
+        raise RuntimeError("VERSION constant not found in shared.py")
     return m.group(1)
 
 
 def get_remote_version():
-    r = run_git(["show", "origin/main:monitor.py"])
+    r = run_git(["show", "origin/main:shared.py"])
     if r.returncode != 0:
-        raise RuntimeError("Failed to read remote monitor.py")
+        raise RuntimeError("Failed to read remote shared.py")
     m = VERSION_RE.search(r.stdout)
     if not m:
-        raise RuntimeError("VERSION constant not found in remote monitor.py")
+        raise RuntimeError("VERSION constant not found in remote shared.py")
     return m.group(1)
 
 
@@ -196,7 +187,7 @@ def apply_update():
 
     try:
         new_ver = get_local_version()
-        # VERSION_RE matches [^"']+ — on-disk monitor.py could carry ANSI;
+        # VERSION_RE matches [^"']+ — on-disk shared.py could carry ANSI;
         # sanitize before echoing to terminal.
         ok(f"New VERSION: {_sanitize(new_ver)}")
     except Exception as e:

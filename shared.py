@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Shared helpers and rate calculation for monitor.py and statusline.py."""
 
+import codecs
 import json
 import os
 import pathlib
@@ -28,13 +29,51 @@ _SID_RE = re.compile(
 )
 _ANSI_RE = re.compile(r"\033(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*\x07)")
 MAX_FILE_SIZE = 1_048_576  # 1 MB
+HISTORY_READ_MAX = MAX_FILE_SIZE * 2   # 2 MB — per-session JSONL read cap (headroom over 1 MB trim target)
+HISTORY_AGGREGATE_MAX = MAX_FILE_SIZE * 10  # 10 MB — cross-session cost aggregation cap
 TRANSCRIPT_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB — cap on per-transcript reads
 DATA_DIR_NAME = "claude-aio-monitor"
 DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.10.5"
+VERSION = "1.10.6"
+
+
+def ensure_utf8_stdout():
+    """Force sys.stdout to UTF-8 when the current encoding can't render app glyphs.
+
+    Windows default console encodings (cp1250/cp1252) can't handle em-dashes,
+    box-drawing, or CJK. Each entry point (statusline/monitor/update) calls
+    this at the top of main() before any write.
+    """
+    try:
+        is_utf8 = sys.stdout.encoding and codecs.lookup(sys.stdout.encoding).name == "utf-8"
+    except LookupError:
+        is_utf8 = False
+    if is_utf8:
+        return
+    sys.stdout.flush()
+    sys.stdout = open(
+        sys.stdout.fileno(), mode="w", encoding="utf-8",
+        errors="replace", closefd=False,
+    )
+
+
+def _env_pct(name, default):
+    """Parse a percentage env var as float, fall back on empty/invalid input."""
+    try:
+        v = os.environ.get(name, "")
+        if v:
+            return float(v)
+    except (ValueError, TypeError):
+        pass
+    return default
+
+
+# Percentage thresholds shared by statusline + monitor (SSoT, previously parsed twice).
+WARN_PCT = _env_pct("CLAUDE_STATUS_WARN", 50.0)
+CRIT_PCT = _env_pct("CLAUDE_STATUS_CRIT", 80.0)
 
 # Python files that ship with the app — used by syntax-check paths in update flow
 # (monitor.py:_apply_update_worker + update.py:apply_update). Must stay in sync.
@@ -44,7 +83,6 @@ PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
 E = "\033["
 R = E + "0m"
 B = E + "1m"
-FAINT = E + "2m"
 C_RED = E + "38;2;191;97;106m"
 C_GRN = E + "38;2;163;190;140m"
 C_YEL = E + "38;2;235;203;139m"
@@ -87,11 +125,12 @@ def load_history(sid, n=120, data_dir=None):
     DATA_DIR continues to work).
     """
     dd = data_dir if data_dir is not None else DATA_DIR
-    if not _SID_RE.match(str(sid)):
+    sid_s = str(sid)
+    if not _SID_RE.match(sid_s) or sid_s in RESERVED_SIDS:
         return []
     if not is_safe_dir(dd):
         return []
-    raw = safe_read(dd / f"{sid}.jsonl", MAX_FILE_SIZE * 2)
+    raw = safe_read(dd / f"{sid_s}.jsonl", HISTORY_READ_MAX)
     if raw is None:
         return []
     try:
@@ -110,8 +149,11 @@ def load_history(sid, n=120, data_dir=None):
 def safe_read(path, max_bytes):
     """Bounded read — returns bytes or None. Never reads more than max_bytes + 1.
 
-    Closes TOCTOU gap: caller doesn't have to stat first, and even if they do,
-    an attacker growing the file between stat and read cannot exceed max_bytes.
+    Closes the size TOCTOU gap: caller doesn't have to stat first, and even if
+    they do, an attacker growing the file between stat and read cannot exceed
+    max_bytes. Does NOT validate containment — symlinks and junctions are
+    followed as Python's default open() does. Callers must pre-validate paths
+    (e.g. via is_safe_dir / _safe_transcript_path) when that matters.
     Returns None on OSError, on >max_bytes overflow, or on missing file.
     """
     try:

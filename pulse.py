@@ -454,6 +454,8 @@ def cleanup_log_startup():
             rec = json.loads(line)
         except ValueError:
             continue  # drop malformed
+        if not isinstance(rec, dict):
+            continue  # drop bare JSON values (e.g. '123\n', '"x"\n')
         ts = rec.get("ts", 0)
         if isinstance(ts, (int, float)) and ts >= cutoff:
             kept.append(line + "\n")

@@ -15,7 +15,6 @@ Usage:
 import argparse
 import atexit
 import bisect
-import codecs
 import json
 import os
 import pathlib
@@ -33,9 +32,10 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 
 from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
-                    char_width, is_safe_dir, ensure_data_dir, run_git,
+                    char_width, is_safe_dir, ensure_data_dir, ensure_utf8_stdout, run_git,
                     load_history as _shared_load_history,
-                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, TRANSCRIPT_MAX_BYTES,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
+                    WARN_PCT, CRIT_PCT,
                     DATA_DIR, VERSION_RE, VERSION, PY_FILES,
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     extract_changelog_entry,
@@ -175,8 +175,8 @@ def scan_transcript_stats(period="all", ttl=30.0):
                     if not msg or "usage" not in msg:
                         continue
 
-                    model = msg.get("model", "unknown")
-                    if model.startswith("<") or not model:
+                    model = msg.get("model") or "unknown"
+                    if model.startswith("<"):
                         continue  # skip synthetic/internal entries
                     u = msg["usage"]
                     inp = int(_num(u.get("input_tokens", 0)))
@@ -351,8 +351,7 @@ def _env_float(name, default):
 
 
 WARN_BRN = _env_float("CLAUDE_WARN_BRN", 3.0)
-WARN_PCT = _env_float("CLAUDE_STATUS_WARN", 50.0)
-CRIT_PCT = _env_float("CLAUDE_STATUS_CRIT", 80.0)
+# WARN_PCT/CRIT_PCT imported from shared.py (SSoT; previously parsed per module)
 
 # Reset-countdown color flip — 50% of window remaining (NOT the warn threshold)
 RESET_HALFWAY_PCT = 50.0
@@ -465,7 +464,7 @@ def collect_warnings(data, cpm, xpm):
     warnings = []
     # CTF — context filling fast
     if xpm and xpm > 0:
-        ctx_pct = _num(data.get("context_window", {}).get("used_percentage"))
+        ctx_pct = _num((data.get("context_window") or {}).get("used_percentage"))
         if ctx_pct < 100:
             eta_mins = (100 - ctx_pct) / xpm
             if eta_mins < 30:
@@ -527,7 +526,7 @@ def _rls_check_worker():
         if r.returncode != 0:
             _rls_write("error")
             return
-        r = run_git(["show", "origin/main:monitor.py"], cwd=_REPO_ROOT, timeout=15)
+        r = run_git(["show", "origin/main:shared.py"], cwd=_REPO_ROOT, timeout=15)
         if r.returncode != 0:
             _rls_write("error")
             return
@@ -597,11 +596,11 @@ def calc_cross_session_costs():
         # Bounded read — stat check + safe_read cap closes TOCTOU window
         try:
             st = jl.stat()
-            if st.st_size > MAX_FILE_SIZE * 10:
+            if st.st_size > HISTORY_AGGREGATE_MAX:
                 continue
         except OSError:
             continue
-        raw_bytes = safe_read(jl, MAX_FILE_SIZE * 10)
+        raw_bytes = safe_read(jl, HISTORY_AGGREGATE_MAX)
         if raw_bytes is None:
             continue
         try:
@@ -622,7 +621,7 @@ def calc_cross_session_costs():
         final_today = 0.0
         first_today = None
         for e in entries:
-            cost = _num(e.get("cost", {}).get("total_cost_usd"))
+            cost = _num((e.get("cost") or {}).get("total_cost_usd"))
             if _num(e.get("t"), 0) < today_start:
                 baseline_today = cost
             else:
@@ -637,7 +636,7 @@ def calc_cross_session_costs():
         final_week = 0.0
         first_week = None
         for e in entries:
-            cost = _num(e.get("cost", {}).get("total_cost_usd"))
+            cost = _num((e.get("cost") or {}).get("total_cost_usd"))
             if _num(e.get("t"), 0) < week_start:
                 baseline_week = cost
             else:
@@ -711,7 +710,7 @@ def list_sessions():
                 continue
             d = json.loads(raw.decode("utf-8"))
             # Skip snapshots without usable model info (test artifacts / incomplete writes)
-            display_name = _sanitize(d.get("model", {}).get("display_name", "")).strip()
+            display_name = _sanitize((d.get("model") or {}).get("display_name", "")).strip()
             if not display_name:
                 # Cleanup: dead artifact older than 1 hour
                 if (now - mt) > 3600:
@@ -840,17 +839,18 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     buf = []
 
     # -- Extract data (sanitize to prevent terminal escape injection) --
-    m = data.get("model", {})
+    # `or {}` pattern guards against explicit JSON `null` values (not just missing keys).
+    m = data.get("model") or {}
     model_str = _sanitize(m.get("display_name", "?")).replace("(1M context)", "(1M CTX)")
     sname = _sanitize(data.get("session_name", ""))
 
-    cw = data.get("context_window", {})
+    cw = data.get("context_window") or {}
     ctx_pct = round(_num(cw.get("used_percentage")), 1)
     ctx_total = _num(cw.get("context_window_size"), 0)
     usage = cw.get("current_usage") or {}
 
     rl = data.get("rate_limits")
-    cost_d = data.get("cost", {})
+    cost_d = data.get("cost") or {}
     usd = _num(cost_d.get("total_cost_usd"))
     dur = _num(cost_d.get("total_duration_ms"))
     api_dur = _num(cost_d.get("total_api_duration_ms"))
@@ -1137,7 +1137,7 @@ _SESSION_COST_CACHE = OrderedDict()  # LRU: {session_id: (ts, breakdown_dict)}
 _SESSION_COST_CACHE_MAX = 64  # cap — prevents unbounded growth across rotating session IDs
 _SESSION_COST_TTL = 5.0   # refresh every 5s
 
-CLAUDE_PROJECTS_DIR = (pathlib.Path.home() / ".claude" / "projects").resolve()
+CLAUDE_PROJECTS_DIR = _CLAUDE_DIR.resolve()
 
 
 def _safe_transcript_path(tp):
@@ -1259,7 +1259,7 @@ def _cost_thirds(hist):
     costs = []
     for entry in hist:
         t = _num(entry.get("t", 0))
-        c = _num(entry.get("cost", {}).get("total_cost_usd", 0))
+        c = _num((entry.get("cost") or {}).get("total_cost_usd", 0))
         if t > 0:
             costs.append((t, c))
     if len(costs) < 2:
@@ -1293,12 +1293,12 @@ def render_cost_breakdown(data, hist, cols, rows):
     buf.append(f"{BG_BAR}{C_WHT}{B}COST BREAKDOWN{R}{BG_BAR}{' ' * cb_pad}{R}")
     buf.append(sep(SW))
 
-    cost_d = data.get("cost", {})
+    cost_d = data.get("cost") or {}
     usd = _num(cost_d.get("total_cost_usd"))
     dur = _num(cost_d.get("total_duration_ms"))
-    cw = data.get("context_window", {})
+    cw = data.get("context_window") or {}
     usage = cw.get("current_usage") or {}
-    model_id = data.get("model", {}).get("id", "")
+    model_id = (data.get("model") or {}).get("id", "")
     pricing = _get_pricing(model_id)
 
     # Token counts
@@ -1309,7 +1309,7 @@ def render_cost_breakdown(data, hist, cols, rows):
     total_in = _num(cw.get("total_input_tokens", 0))
     total_out = _num(cw.get("total_output_tokens", 0))
 
-    model_name = _sanitize(data.get("model", {}).get("display_name", "?"))
+    model_name = _sanitize((data.get("model") or {}).get("display_name", "?"))
     # Strip verbose context suffix: "Opus 4.6 (1M context)" → "Opus 4.6 1M"
     model_short = compact_context_suffix(model_name)
     buf.append(f"{C_ORN}{B}CST{R} {C_ORN}{B}{f_cost(usd)}{R} {C_DIM}{f_dur(dur)} - {model_short}{R}")
@@ -2108,16 +2108,7 @@ def main():
 
     args.refresh = max(100, min(60000, args.refresh))
 
-    try:
-        is_utf8 = sys.stdout.encoding and codecs.lookup(sys.stdout.encoding).name == "utf-8"
-    except LookupError:
-        is_utf8 = False
-    if not is_utf8:
-        sys.stdout.flush()
-        sys.stdout = open(
-            sys.stdout.fileno(), mode="w", encoding="utf-8",
-            errors="replace", closefd=False,
-        )
+    ensure_utf8_stdout()
 
     if args.list:
         for s in list_sessions():
