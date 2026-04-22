@@ -134,6 +134,54 @@ _SEP_VLEN = 3  # " │ "
 # ---------------------------------------------------------------------------
 # Segment builders — each returns (text, visible_length) or None
 # ---------------------------------------------------------------------------
+def seg_title(data):
+    """Show custom-title from session JSONL if set (via claude --name or auto-rename hook)."""
+    sid = data.get("session_id")
+    if not sid or not _SID_RE.match(str(sid)):
+        return None
+    projects = pathlib.Path.home() / ".claude" / "projects"
+    if not projects.is_dir():
+        return None
+    jsonl = None
+    try:
+        for sub in projects.iterdir():
+            if not sub.is_dir():
+                continue
+            cand = sub / f"{sid}.jsonl"
+            # containment check — no symlinks, must be inside ~/.claude/projects/
+            if cand.is_file() and not cand.is_symlink() and is_safe_dir(cand.parent):
+                jsonl = cand
+                break
+    except OSError:
+        return None
+    if not jsonl:
+        return None
+    title = None
+    try:
+        with open(jsonl, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 262144))
+            tail = fh.read().decode("utf-8", errors="replace")
+        for line in reversed(tail.splitlines()):
+            if '"custom-title"' not in line:
+                continue
+            try:
+                r = json.loads(line)
+                if r.get("type") == "custom-title":
+                    title = r.get("customTitle", "")
+                    break
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return None
+    if not title:
+        return None
+    short = title if len(title) <= 40 else title[:39] + "…"
+    text = f"{C_DIM}{short}{R}"
+    return text, len(_ANSI_RE.sub("", text))
+
+
 def seg_model(data):
     name = _sanitize(data.get("model", {}).get("display_name", ""))
     name = strip_context_suffix(name).replace(" (200k)", "")
@@ -253,6 +301,7 @@ def build_line(data, cols, brn=None):
 
     # All segments in priority order — dropped from the end when too wide
     all_segs = [s for s in [
+        seg_title(data),
         seg_model(data),
         seg_ctx(data),
         seg_5hl(data),
