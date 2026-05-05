@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.11.0 — 2026-05-05
+
+**New features — surface fresh data from Claude Code:**
+- **AI-generated session titles in the picker and dashboard header.** Claude Code writes auto-generated titles into transcript JSONL (`{"type":"ai-title","aiTitle":"..."}`). The session picker (`s`) and dashboard session label now show that title instead of the bare UUID when no `session_name` is set. CLI `--list` also benefits. Fallback chain: `session_name` → `ai_title` → `id[:N]`.
+- **Lifetime activity panel in the token-stats modal (`t`).** A new section reads `~/.claude/stats-cache.json` (CC's pre-aggregated lifetime stats) and renders: total sessions / messages / tool-call count, first session date, longest session duration, a 24-hour heatmap of activity (UTC), and the last 5 daily activity rows. The panel auto-collapses on small terminals (DAILY first, then the whole block) so it never clips the rest of the modal. Stale cache (older than 24 h) is tagged.
+- **Server-side tool calls and 1h/5m cache split in the cost-breakdown modal (`c`).** The session aggregator now counts `web_search_requests`, `web_fetch_requests` (`server_tool_use`) and `ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens` (`cache_creation`). The cost modal shows new `WSR/WFR` and `TIE/T5M` rows in `SESSION TOTALS` only when the values are non-zero — old transcripts and zero-tool sessions render unchanged.
+
+**Tests:** 540 passing (+39).
+
 ## v1.10.6 — 2026-04-22
 
 **Statusline — reset countdown color:**
