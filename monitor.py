@@ -725,6 +725,7 @@ def list_sessions():
                 "stale": age > STALE_THRESHOLD,
                 "model": display_name,
                 "session_name": _sanitize(d.get("session_name", "")),
+                "ai_title": _scan_ai_title(d.get("transcript_path")) or "",
                 "cwd": _sanitize(d.get("cwd", "")),
             })
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -867,7 +868,12 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
 
     # ── Header ──
     sid_str = str(data.get("session_id") or "default")
-    session_label = sname or (sid_str[:16] if _SID_RE.match(sid_str) else "default")
+    ai_title = _scan_ai_title(data.get("transcript_path")) or ""
+    # Cap dashboard label so the header line doesn't force a wider terminal floor.
+    # Picker (s) renders the full title.
+    if ai_title and len(ai_title) > 24:
+        ai_title = ai_title[:23] + "…"
+    session_label = sname or ai_title or (sid_str[:16] if _SID_RE.match(sid_str) else "default")
 
     buf.append(sep(SW))
     hp_plain = f"CC AIO MON {VERSION}  {model_str}"
@@ -1085,6 +1091,11 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}STK{R} {C_DIM}Streak{R} {C_WHT}LSS{R} {C_DIM}Longest Session{R}")
     buf.append(f"{C_WHT}TOP{R} {C_DIM}Most Active Day{R}")
     buf.append(f"{C_DIM} INP  Input - OUT  Output - CLS  Calls{R}")
+    buf.append(f"{C_DIM} LIFETIME — pre-aggregated stats from CC cache{R}")
+    buf.append(f"{C_WHT}MSG{R} {C_DIM}Total Messages{R} {C_WHT}TLC{R} {C_DIM}Tool Calls{R}")
+    buf.append(f"{C_WHT}1ST{R} {C_DIM}First Session Date{R}")
+    buf.append(f"{C_DIM} HRS / ACT  hour-of-day heatmap (UTC){R}")
+    buf.append(f"{C_DIM} DAILY  per-day SES / MSG / TLC, last 5 days{R}")
     # ── Cost Breakdown ──
     buf.append(sep(SW))
     cp = max(0, SW - 14)
@@ -1098,6 +1109,8 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM} SUM  Sum of estimates (delta warn if >15% off CST){R}")
     buf.append(f"{C_WHT}TIN{R} {C_DIM}Total Input{R} {C_WHT}TOT{R} {C_DIM}Total Output{R}")
     buf.append(f"{C_ORN}CPM{R} {C_DIM}Cost/Min{R}")
+    buf.append(f"{C_WHT}WSR{R} {C_DIM}Web Search Reqs{R} {C_WHT}WFR{R} {C_DIM}Web Fetch Reqs{R}")
+    buf.append(f"{C_WHT}TIE{R} {C_DIM}Cache 1h-TTL{R} {C_WHT}T5M{R} {C_DIM}Cache 5m-TTL{R}")
     buf.append(f"{C_ORN}ERL{R} {C_DIM}Early 1/3{R} {C_ORN}MID{R} {C_DIM}Mid 1/3{R} {C_ORN}LAT{R} {C_DIM}Late 1/3{R}")
     # ── Update ──
     buf.append(sep(SW))
@@ -1169,6 +1182,72 @@ def _safe_transcript_path(tp):
         return None
 
 
+_AI_TITLE_CACHE = OrderedDict()  # LRU: {sid: (ts, mtime, title_or_None)}
+_AI_TITLE_CACHE_MAX = 64
+_AI_TITLE_TTL = 30.0
+_AI_TITLE_SCAN_BYTES = 512 * 1024  # CC writes ai-title within first ~20 records (<50 KiB)
+
+
+def _scan_ai_title(transcript_path):
+    """Return sanitized aiTitle from transcript JSONL, or None.
+
+    CC writes `{"type":"ai-title","aiTitle":"..."}` records early in the file
+    (within the first dozen records). We bound-read the head to keep this fast
+    on multi-megabyte transcripts called per render tick. Last record in the
+    scanned window wins. Path containment via _safe_transcript_path.
+    """
+    path = _safe_transcript_path(transcript_path)
+    if path is None:
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+
+    sid = path.stem
+    if not _SID_RE.match(sid):
+        return None
+
+    now = time.time()
+    cached = _AI_TITLE_CACHE.get(sid)
+    if cached and cached[1] == st.st_mtime and (now - cached[0]) < _AI_TITLE_TTL:
+        _AI_TITLE_CACHE.move_to_end(sid)
+        return cached[2]
+
+    title = None
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(_AI_TITLE_SCAN_BYTES)
+    except OSError:
+        raw = None
+    if raw:
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except (UnicodeDecodeError, ValueError):
+            text = ""
+        # Drop the trailing fragment if our read sliced mid-line.
+        if len(raw) >= _AI_TITLE_SCAN_BYTES:
+            nl = text.rfind("\n")
+            if nl >= 0:
+                text = text[:nl]
+        for line in text.splitlines():
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(obj, dict) and obj.get("type") == "ai-title":
+                t = obj.get("aiTitle")
+                if isinstance(t, str) and t.strip():
+                    title = _sanitize(t.strip())
+
+    while len(_AI_TITLE_CACHE) >= _AI_TITLE_CACHE_MAX:
+        _AI_TITLE_CACHE.popitem(last=False)
+    _AI_TITLE_CACHE[sid] = (now, st.st_mtime, title)
+    return title
+
+
 def _aggregate_session_cost(data):
     """Walk the current session's transcript JSONL, sum per-category tokens
     across all assistant records, apply pricing per-record model.
@@ -1212,6 +1291,8 @@ def _aggregate_session_cost(data):
 
     inp = out = cr = cw = 0.0
     ci = co = ccr = ccw = 0.0
+    wsr = wfr = 0
+    c1h = c5m = 0
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -1237,6 +1318,14 @@ def _aggregate_session_cost(data):
                 co += o * pricing["output"] / 1_000_000
                 ccr += r * pricing["cache_read"] / 1_000_000
                 ccw += w * pricing["cache_write"] / 1_000_000
+                stu = u.get("server_tool_use") or {}
+                if isinstance(stu, dict):
+                    wsr += int(_num(stu.get("web_search_requests", 0)))
+                    wfr += int(_num(stu.get("web_fetch_requests", 0)))
+                cc = u.get("cache_creation") or {}
+                if isinstance(cc, dict):
+                    c1h += int(_num(cc.get("ephemeral_1h_input_tokens", 0)))
+                    c5m += int(_num(cc.get("ephemeral_5m_input_tokens", 0)))
     except OSError:
         return None
 
@@ -1246,6 +1335,9 @@ def _aggregate_session_cost(data):
         "cost_input": ci, "cost_output": co,
         "cost_cache_read": ccr, "cost_cache_write": ccw,
         "cost_total": ci + co + ccr + ccw,
+        "web_search_requests": wsr,
+        "web_fetch_requests": wfr,
+        "cache_1h": c1h, "cache_5m": c5m,
     }
     _SESSION_COST_CACHE[sid] = (now, result)
     _SESSION_COST_CACHE.move_to_end(sid)
@@ -1375,6 +1467,23 @@ def render_cost_breakdown(data, hist, cols, rows):
     if dur > 0:
         cpm_val = usd / (dur / 60000)
         buf.append(f"{C_DIM}CPM:{R} {C_ORN}{cpm_val:.4f} $/min{R}")
+
+    # Server-side tool calls + cache TTL split (only if non-zero)
+    if sess:
+        wsr_v = int(sess.get("web_search_requests", 0))
+        wfr_v = int(sess.get("web_fetch_requests", 0))
+        c1h_v = int(sess.get("cache_1h", 0))
+        c5m_v = int(sess.get("cache_5m", 0))
+        if wsr_v or wfr_v:
+            buf.append(
+                f"{C_DIM}WSR:{R} {C_WHT}{wsr_v}{R}    "
+                f"{C_DIM}WFR:{R} {C_WHT}{wfr_v}{R}"
+            )
+        if c1h_v or c5m_v:
+            buf.append(
+                f"{C_DIM}TIE:{R} {C_WHT}{f_tok(c1h_v)}{R}  "
+                f"{C_DIM}T5M:{R} {C_WHT}{f_tok(c5m_v)}{R}"
+            )
 
     # Burn rate over time — 3 equal time slices, bar scaled to BRN_MAX
     thirds = _cost_thirds(hist)
@@ -1900,6 +2009,142 @@ def _total_tokens(m):
     return m.get("input", 0) + m.get("output", 0) + m.get("cache_read", 0) + m.get("cache_write", 0)
 
 
+_STATS_CACHE_PATH = pathlib.Path.home() / ".claude" / "stats-cache.json"
+_STATS_CACHE_MAX_BYTES = 4 * 1024 * 1024  # 4 MiB cap — CC stats cache is tiny in practice
+
+
+def _read_stats_cache():
+    """Read ~/.claude/stats-cache.json. Returns (data_dict, mtime) or (None, 0).
+
+    Validates schema version >= 1 and that top-level is a dict. Size-capped via
+    safe_read. No exceptions propagate — missing/invalid cache is silently None.
+    """
+    try:
+        st = _STATS_CACHE_PATH.stat()
+    except OSError:
+        return None, 0
+    raw = safe_read(_STATS_CACHE_PATH, _STATS_CACHE_MAX_BYTES)
+    if raw is None:
+        return None, 0
+    try:
+        obj = json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        return None, 0
+    if not isinstance(obj, dict):
+        return None, 0
+    ver = obj.get("version")
+    if not isinstance(ver, int) or ver < 1:
+        return None, 0
+    return obj, st.st_mtime
+
+
+_HEATMAP_GLYPHS = " ▁▂▃▄▅▆▇█"  # 9 levels including blank for zero
+_LIFETIME_CORE_LINES = 7     # sep + title + sep + ses/msg + 1st/lss + heat-hdr + heat-row
+_LIFETIME_DAILY_LINES = 7    # sep + label + 5 days
+_STATS_FOOTER_LINES = 3      # sep + 2 footer lines
+
+
+def _append_lifetime_block(buf, rows, width):
+    """Append LIFETIME ACTIVITY block to buf if it fits.
+
+    Respects rows budget: drops DAILY first, then whole block. Cache miss skips silently.
+    Renders to a side buffer first so partial output never reaches the terminal.
+    """
+    try:
+        rows = int(rows)
+    except (TypeError, ValueError):
+        return
+    budget = rows - len(buf) - _STATS_FOOTER_LINES
+    if budget < _LIFETIME_CORE_LINES:
+        return
+    cache, cache_mt = _read_stats_cache()
+    if not cache:
+        return
+
+    cd = cache.get("lastComputedDate") or "?"
+    la_title = f"LIFETIME  cached {cd}"
+    la_pad = max(0, width - len(la_title))
+
+    block = []
+    block.append(sep(width))
+    block.append(f"{BG_BAR}{C_WHT}{B}{la_title}{R}{BG_BAR}{' ' * la_pad}{R}")
+    block.append(sep(width))
+
+    tot_ses = int(_num(cache.get("totalSessions", 0)))
+    tot_msg = int(_num(cache.get("totalMessages", 0)))
+    tot_tlc = sum(int(_num(d.get("toolCallCount", 0)))
+                  for d in (cache.get("dailyActivity") or [])
+                  if isinstance(d, dict))
+    block.append(
+        f"{C_WHT}SES{R} {C_WHT}{tot_ses:,}{R} "
+        f"{C_WHT}MSG{R} {C_WHT}{tot_msg:,}{R} "
+        f"{C_WHT}TLC{R} {C_WHT}{tot_tlc:,}{R}"
+    )
+
+    first = cache.get("firstSessionDate") or ""
+    first_short = first[:10] if isinstance(first, str) else ""
+    longest = cache.get("longestSession") or {}
+    ls_dur = int(_num(longest.get("duration", 0))) if isinstance(longest, dict) else 0
+    block.append(
+        f"{C_WHT}1ST{R} {C_WHT}{first_short or '--'}{R} "
+        f"{C_WHT}LSS{R} {C_WHT}{f_dur(ls_dur)}{R}"
+    )
+
+    heat = _render_hour_heatmap(cache.get("hourCounts") or {})
+    # Labels align with heatmap glyph positions 0,6,12,18 (after 4-char prefix).
+    block.append(f"{C_DIM}HRS{R} {C_DIM}0     6     12    18{R}")
+    block.append(f"{C_DIM}ACT{R} {C_CYN}{heat}{R}")
+
+    if budget >= _LIFETIME_CORE_LINES + _LIFETIME_DAILY_LINES:
+        daily = cache.get("dailyActivity") or []
+        items = [d for d in daily if isinstance(d, dict)] if isinstance(daily, list) else []
+        if items:
+            items.sort(key=lambda d: d.get("date") or "", reverse=True)
+            block.append(sep(width))
+            block.append(f"{C_DIM}DAILY{R}")
+            for d in items[:5]:
+                date_s = (d.get("date") or "")[5:]  # MM-DD
+                ses = int(_num(d.get("sessionCount", 0)))
+                msg = int(_num(d.get("messageCount", 0)))
+                tlc = int(_num(d.get("toolCallCount", 0)))
+                block.append(
+                    f"{date_s} {C_DIM}SES{R} {C_WHT}{ses:,}{R} "
+                    f"{C_DIM}MSG{R} {C_WHT}{msg:,}{R} "
+                    f"{C_DIM}TLC{R} {C_WHT}{tlc:,}{R}"
+                )
+
+    buf.extend(block)
+
+
+def _render_hour_heatmap(hour_counts):
+    """Map dict[str_hour -> count] to a 24-char heatmap string.
+
+    Empty/all-zero input renders as 24 spaces. Each hour quantized to one of 9
+    levels by max-normalized fraction. Hours outside 0..23 are ignored.
+    """
+    counts = [0] * 24
+    if isinstance(hour_counts, dict):
+        for k, v in hour_counts.items():
+            try:
+                h = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= h < 24:
+                try:
+                    counts[h] = max(0, int(v))
+                except (TypeError, ValueError):
+                    counts[h] = 0
+    peak = max(counts)
+    if peak <= 0:
+        return " " * 24
+    last = len(_HEATMAP_GLYPHS) - 1
+    out = []
+    for c in counts:
+        idx = 0 if c <= 0 else max(1, min(last, round(c / peak * last)))
+        out.append(_HEATMAP_GLYPHS[idx])
+    return "".join(out)
+
+
 def render_stats(cols, rows, period="all"):
     SW = cols
     buf = []
@@ -1913,6 +2158,7 @@ def render_stats(cols, rows, period="all"):
     if not models:
         buf.append(f"{C_DIM}No transcript data found in ~/.claude/projects/{R}")
         buf.append(f"{C_DIM}(stats appear after at least one CC session){R}")
+        _append_lifetime_block(buf, rows, SW)
         buf.append(sep(SW))
         buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
         buf.append(f"{C_DIM}press any key to close{R}")
@@ -1990,6 +2236,9 @@ def render_stats(cols, rows, period="all"):
             f"    {C_DIM}CRD:{R} {C_WHT}{f_tok(total_cr)}{R}"
             f" {C_DIM}CWR:{R} {C_WHT}{f_tok(total_cw)}{R}"
         )
+
+    _append_lifetime_block(buf, rows, SW)
+
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
     buf.append(f"{C_DIM}press any key to close{R}")
@@ -2020,7 +2269,7 @@ def render_picker(sessions, cols, rows):
         shown = sorted_s[:9]
         for i, s in enumerate(shown):
             tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
-            nm = s["session_name"] or s["id"][:8]
+            nm = s["session_name"] or s.get("ai_title") or s["id"][:8]
             # Short model: "Opus 4.6 (1M context)" → "OP 4.6" via single source of truth
             code, ver = _model_code_from_label(s["model"])
             model_short = f"{code} {ver}".strip() if ver else code
@@ -2113,7 +2362,7 @@ def main():
     if args.list:
         for s in list_sessions():
             tag = "(stale)" if s["stale"] else "(live)"
-            nm = s["session_name"] or "--"
+            nm = s["session_name"] or s.get("ai_title") or "--"
             print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag}")
         return
 

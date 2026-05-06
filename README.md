@@ -54,7 +54,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/7DL segments also show a reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
 - **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
-- **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (TOP) count all token types: input + output + cache_read + cache_write.
+- **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (TOP) count all token types: input + output + cache_read + cache_write. Appended **LIFETIME** block reads `~/.claude/stats-cache.json` (Claude Code's pre-aggregated lifetime stats) and adds: total messages, tool-call count, first session date, longest session, a 24-hour heatmap (UTC), and the last 5 daily activity rows. Auto-collapses on small terminals.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
 <p align="center">
 <a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal with per-model breakdown using 3-char codes, includes cache tokens in bar"></a>
@@ -66,12 +66,12 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12), macOS (Python 3.12).
 - **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
-- **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime.
+- **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. Dashboard label is capped at 24 characters; the picker shows the full title.
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
 - **Auto-purge** — dead session files older than 48 hours are automatically cleaned up from the temp directory.
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
 - **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, cost breakdown, update manager.
-- **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). Also shows cache savings percentage and burn rate over time bars.
+- **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). Also shows cache savings percentage and burn rate over time bars. When non-zero, **WSR / WFR** rows surface server-side tool calls (`web_search_requests` / `web_fetch_requests` from `usage.server_tool_use`) and **TIE / T5M** rows split cache-creation tokens between the 1-hour and 5-minute ephemeral TTLs.
 - **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.claude.com` (indicator + incidents) + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku) — prefers `incidents[].components[]` array, falls back to regex on title. JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`) with Windows reserved-device-name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink rejection on data directory, file size limits (1MB JSON, 2MB JSONL, 10MB cross-session).
 
@@ -107,6 +107,15 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **STK** | Streak (current/best) | — | usage stats modal |
 | **LSS** | Longest session | — | usage stats modal |
 | **TOP** | Most active day | — | usage stats modal |
+| **MSG** | Total messages (lifetime, from CC stats cache) | — | usage stats modal |
+| **TLC** | Tool-call count (lifetime) | — | usage stats modal |
+| **1ST** | First session date | YYYY-MM-DD | usage stats modal |
+| **HRS** / **ACT** | Hour-of-day heatmap (UTC) | 24 cells | usage stats modal |
+| **DAILY** | Per-day SES / MSG / TLC, last 5 days | — | usage stats modal |
+| **WSR** | Web search requests (server-side tool use) | — | cost breakdown modal |
+| **WFR** | Web fetch requests (server-side tool use) | — | cost breakdown modal |
+| **TIE** | Cache-creation tokens, 1-hour ephemeral TTL | — | cost breakdown modal |
+| **T5M** | Cache-creation tokens, 5-minute ephemeral TTL | — | cost breakdown modal |
 
 ## Usage
 
@@ -144,7 +153,7 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 
 ### Session Picker
 
-Shown on launch when multiple session files exist. Press `1-9` to select. Active sessions sorted first, max 9 shown. Auto-connects only when exactly one session exists (no stale sessions). Press `s` to force picker from dashboard or menu.
+Shown on launch when multiple session files exist. Press `1-9` to select. Active sessions sorted first, max 9 shown. Auto-connects only when exactly one session exists (no stale sessions). Press `s` to force picker from dashboard or menu. Each row shows the session label (full `ai-title` if Claude Code generated one, otherwise UUID prefix), the model code, and a `live` / `stale` tag.
 
 ## How It Works
 

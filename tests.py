@@ -5084,6 +5084,568 @@ class TestAuditRegressionV1105(unittest.TestCase):
         )
 
 
+class TestScanAiTitle(unittest.TestCase):
+    """Coverage for _scan_ai_title — transcript JSONL ai-title extractor."""
+
+    def setUp(self):
+        import monitor as _monitor
+        self._monitor = _monitor
+        self._tmpdir = tempfile.mkdtemp()
+        self._proj = pathlib.Path(self._tmpdir) / "proj"
+        self._proj.mkdir()
+        self._fake_root = pathlib.Path(self._tmpdir).resolve()
+        _monitor._AI_TITLE_CACHE.clear()
+
+    def tearDown(self):
+        import shutil as _sh
+        self._monitor._AI_TITLE_CACHE.clear()
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write(self, sid, lines):
+        jl = self._proj / f"{sid}.jsonl"
+        jl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return jl
+
+    def test_extracts_ai_title(self):
+        jl = self._write("session1", [
+            json.dumps({"type": "user", "content": "hi"}),
+            json.dumps({"type": "ai-title", "aiTitle": "Refactor cost modal"}),
+            json.dumps({"type": "assistant", "content": "ok"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertEqual(result, "Refactor cost modal")
+
+    def test_last_title_wins(self):
+        jl = self._write("session2", [
+            json.dumps({"type": "ai-title", "aiTitle": "Old title"}),
+            json.dumps({"type": "user", "content": "x"}),
+            json.dumps({"type": "ai-title", "aiTitle": "New title"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertEqual(result, "New title")
+
+    def test_missing_returns_none(self):
+        jl = self._write("session3", [
+            json.dumps({"type": "user", "content": "no title here"}),
+            json.dumps({"type": "assistant", "content": "ok"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertIsNone(result)
+
+    def test_sanitizes_ansi(self):
+        jl = self._write("session4", [
+            json.dumps({"type": "ai-title", "aiTitle": "Title \x1b[31mred\x1b[0m"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertNotIn("\x1b", result or "")
+        self.assertIn("Title", result or "")
+
+    def test_invalid_json_lines_skipped(self):
+        jl = self._proj / "session5.jsonl"
+        jl.write_text(
+            "not json\n"
+            + json.dumps({"type": "ai-title", "aiTitle": "Survived"}) + "\n"
+            + "{broken\n",
+            encoding="utf-8",
+        )
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertEqual(result, "Survived")
+
+    def test_oversize_file_returns_none(self):
+        from shared import TRANSCRIPT_MAX_BYTES
+        jl = self._proj / "session6.jsonl"
+        # Write bytes just over the cap — should be rejected by stat check
+        jl.write_bytes(b"x" * (TRANSCRIPT_MAX_BYTES + 1))
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertIsNone(result)
+
+    def test_empty_string_title_ignored(self):
+        jl = self._write("session7", [
+            json.dumps({"type": "ai-title", "aiTitle": "   "}),
+            json.dumps({"type": "ai-title", "aiTitle": ""}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertIsNone(result)
+
+    def test_path_outside_root_rejected(self):
+        # Write outside the fake root, ensure containment check rejects it
+        outside = pathlib.Path(self._tmpdir).parent / "evil.jsonl"
+        try:
+            outside.write_text(
+                json.dumps({"type": "ai-title", "aiTitle": "Pwn"}) + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+                result = self._monitor._scan_ai_title(str(outside))
+            self.assertIsNone(result)
+        finally:
+            try:
+                outside.unlink()
+            except OSError:
+                pass
+
+    def test_cache_hit_skips_reparse(self):
+        jl = self._write("session8", [
+            json.dumps({"type": "ai-title", "aiTitle": "First read"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            r1 = self._monitor._scan_ai_title(str(jl))
+            # Overwrite contents but DON'T touch mtime — cache should serve old value
+            old_mt = jl.stat().st_mtime
+            jl.write_text(
+                json.dumps({"type": "ai-title", "aiTitle": "Changed"}) + "\n",
+                encoding="utf-8",
+            )
+            os.utime(str(jl), (old_mt, old_mt))
+            r2 = self._monitor._scan_ai_title(str(jl))
+        self.assertEqual(r1, "First read")
+        self.assertEqual(r2, "First read")  # cached
+
+    def test_cache_invalidates_on_mtime_change(self):
+        jl = self._write("session9", [
+            json.dumps({"type": "ai-title", "aiTitle": "v1"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            r1 = self._monitor._scan_ai_title(str(jl))
+            # Write new content + bump mtime
+            jl.write_text(
+                json.dumps({"type": "ai-title", "aiTitle": "v2"}) + "\n",
+                encoding="utf-8",
+            )
+            os.utime(str(jl), (time.time() + 10, time.time() + 10))
+            r2 = self._monitor._scan_ai_title(str(jl))
+        self.assertEqual(r1, "v1")
+        self.assertEqual(r2, "v2")
+
+    def test_invalid_input_returns_none(self):
+        self.assertIsNone(self._monitor._scan_ai_title(None))
+        self.assertIsNone(self._monitor._scan_ai_title(""))
+        self.assertIsNone(self._monitor._scan_ai_title(12345))
+
+
+class TestListSessionsAiTitle(unittest.TestCase):
+    """ai_title surfaces into list_sessions output dict."""
+
+    def setUp(self):
+        import monitor as _monitor
+        self._monitor = _monitor
+        self._orig_data = _monitor.DATA_DIR
+        self._tmpdir = tempfile.mkdtemp()
+        self._proj_root = pathlib.Path(self._tmpdir) / "projects"
+        self._proj_root.mkdir()
+        self._proj_dir = self._proj_root / "proj"
+        self._proj_dir.mkdir()
+        self._data_dir = pathlib.Path(self._tmpdir) / "data"
+        self._data_dir.mkdir()
+        _monitor.DATA_DIR = self._data_dir
+        _monitor._AI_TITLE_CACHE.clear()
+
+    def tearDown(self):
+        import shutil as _sh
+        self._monitor.DATA_DIR = self._orig_data
+        self._monitor._AI_TITLE_CACHE.clear()
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_ai_title_surfaces_into_session_dict(self):
+        sid = "abc123validsid"
+        # Transcript inside fake projects root with ai-title record
+        jl = self._proj_dir / f"{sid}.jsonl"
+        jl.write_text(
+            json.dumps({"type": "ai-title", "aiTitle": "My session goal"}) + "\n",
+            encoding="utf-8",
+        )
+        # State snapshot pointing at transcript
+        snap = self._data_dir / f"{sid}.json"
+        snap.write_text(
+            json.dumps({
+                "model": {"display_name": "Opus"},
+                "session_name": "",
+                "cwd": "",
+                "transcript_path": str(jl),
+            }),
+            encoding="utf-8",
+        )
+        fake_root = self._proj_root.resolve()
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", fake_root):
+            sessions = self._monitor.list_sessions()
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["ai_title"], "My session goal")
+
+    def test_missing_transcript_yields_empty_ai_title(self):
+        sid = "noTranscriptSid"
+        snap = self._data_dir / f"{sid}.json"
+        snap.write_text(
+            json.dumps({
+                "model": {"display_name": "Opus"},
+                "session_name": "",
+                "cwd": "",
+            }),
+            encoding="utf-8",
+        )
+        sessions = self._monitor.list_sessions()
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["ai_title"], "")
+
+
+class TestServerToolUseAggregation(unittest.TestCase):
+    """C: server_tool_use + cache 1h/5m split surface in _aggregate_session_cost."""
+
+    def _make_record(self, **usage_overrides):
+        usage = {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        usage.update(usage_overrides)
+        return json.dumps({
+            "type": "assistant",
+            "message": {"model": "claude-opus-4-7", "usage": usage},
+        })
+
+    def setUp(self):
+        from monitor import _SESSION_COST_CACHE as _cache
+        self._cache = _cache
+        _cache.clear()
+        self._tmpdir = tempfile.mkdtemp()
+        self._proj_dir = pathlib.Path(self._tmpdir) / "proj"
+        self._proj_dir.mkdir()
+        self._fake_root = pathlib.Path(self._tmpdir).resolve()
+
+    def tearDown(self):
+        import shutil as _sh
+        self._cache.clear()
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _run(self, sid, lines):
+        import monitor as _m
+        jl = self._proj_dir / f"{sid}.jsonl"
+        jl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with patch.object(_m, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            return _m._aggregate_session_cost(
+                {"session_id": sid, "transcript_path": str(jl)}
+            )
+
+    def test_counts_web_search_and_fetch(self):
+        result = self._run("svrtoolssid", [
+            self._make_record(server_tool_use={
+                "web_search_requests": 5, "web_fetch_requests": 2,
+            }),
+            self._make_record(server_tool_use={
+                "web_search_requests": 7, "web_fetch_requests": 1,
+            }),
+        ])
+        self.assertEqual(result["web_search_requests"], 12)
+        self.assertEqual(result["web_fetch_requests"], 3)
+
+    def test_counts_cache_creation_split(self):
+        result = self._run("cachesplitsid", [
+            self._make_record(cache_creation={
+                "ephemeral_1h_input_tokens": 34117,
+                "ephemeral_5m_input_tokens": 0,
+            }),
+            self._make_record(cache_creation={
+                "ephemeral_1h_input_tokens": 1000,
+                "ephemeral_5m_input_tokens": 500,
+            }),
+        ])
+        self.assertEqual(result["cache_1h"], 35117)
+        self.assertEqual(result["cache_5m"], 500)
+
+    def test_backwards_compat_no_server_tool_use(self):
+        # Old transcript records without server_tool_use / cache_creation
+        result = self._run("oldsid", [
+            self._make_record(input_tokens=100, output_tokens=50),
+        ])
+        self.assertEqual(result["web_search_requests"], 0)
+        self.assertEqual(result["web_fetch_requests"], 0)
+        self.assertEqual(result["cache_1h"], 0)
+        self.assertEqual(result["cache_5m"], 0)
+
+    def test_non_dict_server_tool_use_ignored(self):
+        # Defensive: malformed sub-objects must not crash
+        result = self._run("badtypesid", [
+            self._make_record(server_tool_use="not-a-dict",
+                              cache_creation=12345),
+        ])
+        self.assertEqual(result["web_search_requests"], 0)
+        self.assertEqual(result["cache_1h"], 0)
+
+
+class TestRenderCostBreakdownServerTool(unittest.TestCase):
+    """C: WSR/WFR/TIE/T5M rows render conditionally on non-zero values."""
+
+    def setUp(self):
+        from monitor import _SESSION_COST_CACHE as _cache
+        self._cache = _cache
+        _cache.clear()
+        self._tmpdir = tempfile.mkdtemp()
+        self._proj_dir = pathlib.Path(self._tmpdir) / "proj"
+        self._proj_dir.mkdir()
+        self._fake_root = pathlib.Path(self._tmpdir).resolve()
+
+    def tearDown(self):
+        import shutil as _sh
+        self._cache.clear()
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _strip_ansi(self, lines):
+        ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+        return [ansi.sub("", ln) for ln in lines]
+
+    def _render(self, sid, usage):
+        import monitor as _m
+        jl = self._proj_dir / f"{sid}.jsonl"
+        jl.write_text(
+            json.dumps({"type": "assistant",
+                        "message": {"model": "claude-opus-4-7", "usage": usage}}) + "\n",
+            encoding="utf-8",
+        )
+        data = {
+            "session_id": sid,
+            "transcript_path": str(jl),
+            "model": {"id": "claude-opus-4-7", "display_name": "Opus 4.7"},
+            "cost": {"total_cost_usd": 0.5, "total_duration_ms": 60000},
+            "context_window": {
+                "current_usage": {"input_tokens": 100, "output_tokens": 50,
+                                   "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0},
+                "total_input_tokens": 100, "total_output_tokens": 50,
+            },
+        }
+        with patch.object(_m, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            buf = _m.render_cost_breakdown(data, [], 80, 50)
+        return "\n".join(self._strip_ansi(buf))
+
+    def test_wsr_wfr_visible_when_nonzero(self):
+        plain = self._render("wsrvisible", {
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+            "server_tool_use": {"web_search_requests": 7, "web_fetch_requests": 2},
+        })
+        self.assertIn("WSR:", plain)
+        self.assertIn("WFR:", plain)
+        self.assertIn("7", plain)
+
+    def test_wsr_wfr_hidden_when_zero(self):
+        plain = self._render("wsrhidden", {
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        })
+        self.assertNotIn("WSR:", plain)
+        self.assertNotIn("WFR:", plain)
+
+    def test_cache_split_visible_when_nonzero(self):
+        plain = self._render("cachesplit", {
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 5000,
+                "ephemeral_5m_input_tokens": 200,
+            },
+        })
+        self.assertIn("TIE:", plain)
+        self.assertIn("T5M:", plain)
+
+
+class TestReadStatsCache(unittest.TestCase):
+    """Coverage for _read_stats_cache — CC ~/.claude/stats-cache.json reader."""
+
+    def setUp(self):
+        import monitor as _monitor
+        self._monitor = _monitor
+        self._tmpdir = tempfile.mkdtemp()
+        self._fake_path = pathlib.Path(self._tmpdir) / "stats-cache.json"
+        self._orig_path = _monitor._STATS_CACHE_PATH
+        _monitor._STATS_CACHE_PATH = self._fake_path
+
+    def tearDown(self):
+        import shutil as _sh
+        self._monitor._STATS_CACHE_PATH = self._orig_path
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_missing_file(self):
+        data, mt = self._monitor._read_stats_cache()
+        self.assertIsNone(data)
+        self.assertEqual(mt, 0)
+
+    def test_invalid_json(self):
+        self._fake_path.write_text("not json", encoding="utf-8")
+        data, mt = self._monitor._read_stats_cache()
+        self.assertIsNone(data)
+        self.assertEqual(mt, 0)
+
+    def test_missing_version(self):
+        self._fake_path.write_text(json.dumps({"foo": "bar"}), encoding="utf-8")
+        data, mt = self._monitor._read_stats_cache()
+        self.assertIsNone(data)
+
+    def test_invalid_version_type(self):
+        self._fake_path.write_text(json.dumps({"version": "3"}), encoding="utf-8")
+        data, mt = self._monitor._read_stats_cache()
+        self.assertIsNone(data)
+
+    def test_non_dict_root(self):
+        self._fake_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        data, mt = self._monitor._read_stats_cache()
+        self.assertIsNone(data)
+
+    def test_oversize_rejected(self):
+        self._fake_path.write_bytes(b"x" * (self._monitor._STATS_CACHE_MAX_BYTES + 1))
+        data, mt = self._monitor._read_stats_cache()
+        self.assertIsNone(data)
+
+    def test_valid_cache(self):
+        payload = {
+            "version": 3,
+            "lastComputedDate": "2026-04-24",
+            "totalSessions": 31,
+            "totalMessages": 8744,
+            "hourCounts": {"0": 7, "12": 1},
+            "dailyActivity": [{"date": "2026-04-24", "messageCount": 865, "sessionCount": 1, "toolCallCount": 239}],
+        }
+        self._fake_path.write_text(json.dumps(payload), encoding="utf-8")
+        data, mt = self._monitor._read_stats_cache()
+        self.assertIsNotNone(data)
+        self.assertEqual(data["totalSessions"], 31)
+        self.assertGreater(mt, 0)
+
+
+class TestRenderHourHeatmap(unittest.TestCase):
+
+    def setUp(self):
+        import monitor as _monitor
+        self._monitor = _monitor
+
+    def test_empty_dict(self):
+        result = self._monitor._render_hour_heatmap({})
+        self.assertEqual(result, " " * 24)
+
+    def test_all_zero(self):
+        result = self._monitor._render_hour_heatmap({"0": 0, "12": 0})
+        self.assertEqual(result, " " * 24)
+
+    def test_single_hour(self):
+        result = self._monitor._render_hour_heatmap({"5": 100})
+        self.assertEqual(len(result), 24)
+        self.assertEqual(result[5], "█")  # peak hour gets full block
+        # Other hours blank
+        self.assertEqual(result[0], " ")
+
+    def test_peak_is_highest_glyph(self):
+        result = self._monitor._render_hour_heatmap({"3": 1, "10": 50, "20": 100})
+        self.assertEqual(result[20], "█")
+        # mid value uses lower glyph
+        self.assertNotEqual(result[10], "█")
+        self.assertNotEqual(result[10], " ")
+
+    def test_invalid_keys_ignored(self):
+        result = self._monitor._render_hour_heatmap({"abc": 5, "24": 10, "-1": 7, "5": 1})
+        self.assertEqual(len(result), 24)
+        self.assertEqual(result[5], "█")
+
+    def test_negative_values_treated_as_zero(self):
+        result = self._monitor._render_hour_heatmap({"5": -10, "6": 10})
+        self.assertEqual(result[5], " ")
+        self.assertEqual(result[6], "█")
+
+    def test_non_dict_input(self):
+        result = self._monitor._render_hour_heatmap(None)
+        self.assertEqual(result, " " * 24)
+
+
+class TestRenderStatsLifetime(unittest.TestCase):
+    """Coverage for LIFETIME ACTIVITY block in render_stats."""
+
+    def setUp(self):
+        import monitor as _monitor
+        self._monitor = _monitor
+        self._tmpdir = tempfile.mkdtemp()
+        self._fake_path = pathlib.Path(self._tmpdir) / "stats-cache.json"
+        self._orig_path = _monitor._STATS_CACHE_PATH
+        _monitor._STATS_CACHE_PATH = self._fake_path
+        # Force scan_transcript_stats to return empty so layout is deterministic
+        # and the LIFETIME block has predictable space budget.
+        self._scan_patcher = patch.object(
+            _monitor, "scan_transcript_stats",
+            return_value=({}, {"sessions": 0, "active_days": set(),
+                                "longest_dur_ms": 0, "first_date": None,
+                                "daily_tokens": {}, "truncated": False}),
+        )
+        self._scan_patcher.start()
+
+    def tearDown(self):
+        import shutil as _sh
+        self._scan_patcher.stop()
+        self._monitor._STATS_CACHE_PATH = self._orig_path
+        # Clear module-level caches so we don't pollute subsequent tests
+        self._monitor._usage_cache.clear()
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_cache(self, **overrides):
+        payload = {
+            "version": 3,
+            "lastComputedDate": "2026-04-24",
+            "totalSessions": 42,
+            "totalMessages": 9999,
+            "firstSessionDate": "2026-04-20T17:54:18.073Z",
+            "longestSession": {"sessionId": "abc", "duration": 80793630, "messageCount": 100},
+            "hourCounts": {"5": 10, "14": 25, "20": 50},
+            "dailyActivity": [
+                {"date": "2026-04-24", "messageCount": 865, "sessionCount": 1, "toolCallCount": 239},
+                {"date": "2026-04-23", "messageCount": 928, "sessionCount": 2, "toolCallCount": 365},
+                {"date": "2026-04-22", "messageCount": 2018, "sessionCount": 4, "toolCallCount": 814},
+            ],
+        }
+        payload.update(overrides)
+        self._fake_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _strip_ansi(self, lines):
+        ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+        return [ansi.sub("", ln) for ln in lines]
+
+    def test_lifetime_block_renders_when_cache_present(self):
+        self._write_cache()
+        buf = self._monitor.render_stats(80, 40, period="all")
+        plain = "\n".join(self._strip_ansi(buf))
+        self.assertIn("LIFETIME", plain)
+        self.assertIn("cached 2026-04-24", plain)
+        self.assertIn("42", plain)        # totalSessions
+        self.assertIn("9,999", plain)     # totalMessages
+        self.assertIn("HRS", plain)
+        self.assertIn("DAILY", plain)
+        self.assertIn("04-24", plain)     # date short
+
+    def test_lifetime_block_omitted_on_small_terminal(self):
+        self._write_cache()
+        buf = self._monitor.render_stats(80, 12, period="all")
+        plain = "\n".join(self._strip_ansi(buf))
+        self.assertNotIn("LIFETIME", plain)
+
+    def test_daily_omitted_on_medium_terminal(self):
+        self._write_cache()
+        # Empty-models path: pre=5, footer=3, core needs 7, daily needs 7 more.
+        # rows=18 gives budget = 10 → core fits, daily doesn't.
+        buf = self._monitor.render_stats(80, 18, period="all")
+        plain = "\n".join(self._strip_ansi(buf))
+        self.assertIn("LIFETIME", plain)
+        self.assertIn("HRS", plain)
+        self.assertNotIn("DAILY", plain)
+
+    def test_lifetime_block_skipped_when_cache_missing(self):
+        # No file written
+        buf = self._monitor.render_stats(80, 40, period="all")
+        plain = "\n".join(self._strip_ansi(buf))
+        self.assertNotIn("LIFETIME", plain)
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)
