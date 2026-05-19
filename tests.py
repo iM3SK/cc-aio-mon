@@ -2623,6 +2623,16 @@ class TestApplyUpdateAction(unittest.TestCase):
         import monitor
         self.assertIn("complete", monitor._update_result)
 
+    def test_syntax_check_uses_safe_read(self):
+        import monitor
+        with patch("monitor._git_cmd", return_value=(0, "ok", "")):
+            with patch.object(monitor, "PY_FILES", ("monitor.py",)):
+                with patch("pathlib.Path.exists", return_value=True):
+                    with patch("monitor.safe_read", return_value=None) as mock_safe_read:
+                        _apply_update_worker()
+        mock_safe_read.assert_called_once()
+        self.assertIn("syntax errors", monitor._update_result)
+
     def test_failure(self):
         with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
             _apply_update_worker()
@@ -4358,6 +4368,30 @@ class TestAggregateSessionCostSecurity(unittest.TestCase):
                 result = _aggregate_session_cost(data)
         self.assertIsNone(result)
 
+    def test_claude_projects_root_symlink_rejected(self):
+        import monitor as _monitor
+        with tempfile.TemporaryDirectory() as td:
+            base = pathlib.Path(td)
+            real_root = base / "real-projects"
+            real_root.mkdir()
+            proj = real_root / "proj"
+            proj.mkdir()
+            sid = "rootsymlinksid"
+            jl = proj / f"{sid}.jsonl"
+            jl.write_text(
+                '{"type":"assistant","message":{"model":"x","usage":{"input_tokens":1}}}\n',
+                encoding="utf-8",
+            )
+            link_root = base / "projects-link"
+            try:
+                link_root.symlink_to(real_root, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported")
+            with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", link_root):
+                data = {"session_id": sid, "transcript_path": str(jl)}
+                result = _aggregate_session_cost(data)
+        self.assertIsNone(result)
+
     def test_transcript_path_non_string_rejected(self):
         import monitor as _monitor
         for bad in (None, 42, ["/tmp/x"], {"path": "/tmp/x"}):
@@ -4408,6 +4442,19 @@ class TestRunGitEnvWhitelist(unittest.TestCase):
             from shared import run_git
             run_git(["status"], cwd=".", timeout=5)
         self.assertEqual(m.call_args[1]["env"].get("GIT_TERMINAL_PROMPT"), "0")
+
+
+# ---------------------------------------------------------------------------
+# Security: pre-push hook scans new branch tips
+# ---------------------------------------------------------------------------
+class TestPrePushHook(unittest.TestCase):
+
+    def test_new_branch_scans_tip_tree(self):
+        hook = pathlib.Path(".githooks") / "pre-push"
+        src = hook.read_text(encoding="utf-8")
+        self.assertIn('git diff-tree --no-commit-id --name-only -r "$local_sha"', src)
+        self.assertIn('git diff-tree --no-commit-id -p -r "$local_sha"', src)
+        self.assertNotIn('range="$local_sha"  # new branch', src)
 
 
 # ---------------------------------------------------------------------------
@@ -5157,11 +5204,14 @@ class TestScanAiTitle(unittest.TestCase):
         self.assertEqual(result, "Survived")
 
     def test_oversize_file_returns_none(self):
-        from shared import TRANSCRIPT_MAX_BYTES
         jl = self._proj / "session6.jsonl"
-        # Write bytes just over the cap — should be rejected by stat check
-        jl.write_bytes(b"x" * (TRANSCRIPT_MAX_BYTES + 1))
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+        # Title at the head still must be ignored when the transcript exceeds the cap.
+        jl.write_text(
+            json.dumps({"type": "ai-title", "aiTitle": "Too large"}) + "\n" + ("x" * 64),
+            encoding="utf-8",
+        )
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root), \
+             patch.object(self._monitor, "TRANSCRIPT_MAX_BYTES", 10):
             result = self._monitor._scan_ai_title(str(jl))
         self.assertIsNone(result)
 

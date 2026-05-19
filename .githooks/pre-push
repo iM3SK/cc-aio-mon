@@ -15,13 +15,18 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         continue  # deletion
     fi
     if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
-        range="$local_sha"  # new branch — scan full history is too broad; scan only tip
+        # New branch: scan the pushed tip commit tree. `git diff "$local_sha"`
+        # compares the commit to the worktree and can return nothing on a clean
+        # checkout, bypassing the hook for first pushes.
+        files=$(git diff-tree --no-commit-id --name-only -r "$local_sha" 2>/dev/null || true)
+        diff_text=$(git diff-tree --no-commit-id -p -r "$local_sha" -- '*.py' '*.sh' '*.ps1' '*.md' '*.yml' '*.yaml' '*.json' 2>/dev/null || true)
     else
         range="$remote_sha..$local_sha"
+        files=$(git diff --name-only "$range" 2>/dev/null || true)
+        diff_text=$(git diff "$range" -- '*.py' '*.sh' '*.ps1' '*.md' '*.yml' '*.yaml' '*.json' 2>/dev/null || true)
     fi
 
-    # Changed files across the range
-    files=$(git diff --name-only "$range" 2>/dev/null || true)
+    # Changed files across the range / pushed tip
     [ -z "$files" ] && continue
 
     # Block sensitive filenames outright
@@ -35,7 +40,6 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     done <<< "$files"
 
     # Block obvious credential patterns in diff content (heuristic, not exhaustive)
-    diff_text=$(git diff "$range" -- '*.py' '*.sh' '*.ps1' '*.md' '*.yml' '*.yaml' '*.json' 2>/dev/null || true)
     if echo "$diff_text" | grep -qE -- 'sk-ant-[a-zA-Z0-9_-]{20,}'; then
         echo "BLOCKED: Anthropic API key pattern (sk-ant-*) in diff" >&2
         fail=1
