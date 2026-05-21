@@ -6,7 +6,7 @@
 
 > _Independent community project. Not affiliated with or endorsed by Anthropic. See [NOTICE](NOTICE.md) for provenance & trademark attribution._
 
-> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** after each assistant message, permission mode change, or vim mode toggle (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Five Python files, stdlib only, no build step.**
+> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** after each assistant message, permission mode change, or vim mode toggle (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Five runtime Python files, stdlib only, no build step.**
 
 | | |
 |---|---|
@@ -36,6 +36,8 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 <p align="center"><a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay showing all metric codes, hotkeys, token stats, cost breakdown, and update sections"></a></p>
 
 ## Setup
+
+Optional first step: run `check-requirements.ps1` (Windows) or `check-requirements.sh` (macOS/Linux) from the repo root to verify Python version, ANSI/truecolor support, and that the pre-push hook is wired up. The scripts then point you to the matching platform guide below.
 
 | Platform | Guide |
 |----------|-------|

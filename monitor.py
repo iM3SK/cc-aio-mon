@@ -2077,7 +2077,7 @@ def _append_lifetime_block(buf, rows, width):
     budget = rows - len(buf) - _STATS_FOOTER_LINES
     if budget < _LIFETIME_CORE_LINES:
         return
-    cache, cache_mt = _read_stats_cache()
+    cache, _ = _read_stats_cache()
     if not cache:
         return
 

@@ -43,7 +43,7 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 - Include a description of what changed and why.
 - Reference any related issues.
 - Commit/PR title format: `<type>(<scope>): <short description>`.
-  Allowed scopes: `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`.
+  Allowed scopes: `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`, `repo`.
 
 ## See also
 
