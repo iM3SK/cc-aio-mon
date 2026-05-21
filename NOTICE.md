@@ -1,7 +1,7 @@
 CC AIO MON
 Copyright (c) 2026 CC AIO MON Contributors
 
-Licensed under the MIT License. See LICENSE file for terms.
+Licensed under the MIT License. See LICENSE.md file for terms.
 
 ================================================================
 Affiliation Notice

@@ -46,7 +46,7 @@ CC AIO MON reads session data from Claude Code via stdin and writes snapshots to
 
 - **statusLine JSON input** (stdin) — size-capped (1 MB), parse-error bounded.
 - **Session IDs** — regex-validated (`^[a-zA-Z0-9_\-]{1,128}$`), reserved names (`rls`, `stats`, `pulse`) blocked.
-- **transcript_path** (statusline JSON) — containment-checked: must be regular file inside `~/.claude/projects/`, symlinks rejected. (added 2026-04)
+- **transcript_path** (statusline JSON) — containment-checked: `~/.claude/projects/` itself must be a real directory, and the transcript must be a regular file inside it; symlinks/junctions are rejected. (added 2026-04; root validation tightened 2026-05)
 - **Transcript content** (read-only, `~/.claude/projects/`) — per-file 50 MB cap, model IDs sanitized before terminal render. (added 2026-04)
 - **File I/O** — confined to `$TMPDIR/claude-aio-monitor/` (writes) and `~/.claude/projects/` (reads). Atomic writes via `NamedTemporaryFile` + `os.replace`.
 - **Subprocess** — git only. `shell=False`, list args, `GIT_TERMINAL_PROMPT=0`, bounded timeouts, minimal env whitelist (added 2026-04). Never uses `--no-verify` / `--force`.
@@ -59,7 +59,7 @@ Key protections:
 - Session ID validated against `[a-zA-Z0-9_-]{1,128}` — prevents path traversal
 - All JSON fields sanitized before terminal output — prevents escape injection
 - Atomic writes via `NamedTemporaryFile` + `os.replace()` — prevents partial reads
-- File size limits on all reads (1 MB JSON, 2 MB JSONL, 10 MB cross-session, 512 KB pulse response, 1 MB `pulse.jsonl`) — prevents memory exhaustion
+- File size limits on all reads (1 MB JSON/source files, 2 MB JSONL, 10 MB cross-session, 50 MiB transcripts, 512 KB pulse response, 1 MB `pulse.jsonl`) — prevents memory exhaustion
 - Symlink and NTFS junction rejection on temp data directory — `lstat()` + `S_ISDIR` verification with `FILE_ATTRIBUTE_REPARSE_POINT` check on Windows. Defends against TOCTOU races between mkdir and validation.
 - Temp directory created with `0o700` permissions where supported
 - `update.py` guards: dirty tree, wrong branch, detached HEAD, divergence, downgrade, Python version mismatch
@@ -68,5 +68,5 @@ Key protections:
 ## See also
 
 - [README.md](../README.md) — feature overview and architecture
-- [NOTICE](../NOTICE) — legal notice and affiliation disclaimer
+- [NOTICE](../NOTICE.md) — legal notice and affiliation disclaimer
 - [CHANGELOG.md](../CHANGELOG.md) — release history

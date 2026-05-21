@@ -12,8 +12,6 @@ macOS/Linux: python3). Stdlib only.
 
 import argparse
 import datetime
-import os
-import re
 import signal
 import sys
 from pathlib import Path

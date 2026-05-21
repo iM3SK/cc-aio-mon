@@ -24,6 +24,7 @@ PROMO.md
 
 # AI agent memory / instruction files — LOCAL ONLY, must never reach GitHub
 CLAUDE.md
+/index.md
 AGENTS.md
 GEMINI.md
 .cursorrules
@@ -51,10 +52,20 @@ env/
 *.key
 *.crt
 *.p12
+*.pfx
 credentials.json
+token.json
+*.token
+adc.json
+client_secret_*.json
+google_ads_token.json
 .env.*
 .envrc
 secrets/
+
+# SSH keys (defense-in-depth)
+id_rsa*
+id_ed25519*
 
 # Backup / merge artifacts
 *.bak

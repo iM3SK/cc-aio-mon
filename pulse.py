@@ -40,7 +40,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 
-from shared import DATA_DIR, ensure_data_dir, safe_read, VERSION
+from shared import DATA_DIR, MAX_FILE_SIZE, ensure_data_dir, safe_read, VERSION
 
 # ---------------------------------------------------------------------------
 # Config
@@ -65,7 +65,7 @@ urllib.request.install_opener(
 
 # Persistence + cleanup
 LOG_PATH = DATA_DIR / "pulse.jsonl"
-LOG_MAX_BYTES = 1_048_576        # 1 MB — aligned with shared.MAX_FILE_SIZE
+LOG_MAX_BYTES = MAX_FILE_SIZE    # 1 MB — single source of truth via shared
 LOG_AGE_CUTOFF = 24 * 3600       # startup: drop entries older than 24h
 LOG_TRIM_TARGET = 500            # runtime rotation: keep last N lines
 LOG_STARTUP_CAP = 2000           # startup: hard cap on record count
