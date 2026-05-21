@@ -43,11 +43,11 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 - Include a description of what changed and why.
 - Reference any related issues.
 - Commit/PR title format: `<type>(<scope>): <short description>`.
-  Allowed scopes: `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`.
+  Allowed scopes: `monitor`, `statusline`, `pulse`, `shared`, `update`, `tests`, `changelog`, `audit`, `security`, `license`, `docs`, `ci`, `repo`.
 
 ## See also
 
 - [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting
-- [NOTICE](NOTICE) — legal notice and affiliation disclaimer
+- [NOTICE](NOTICE.md) — legal notice and affiliation disclaimer

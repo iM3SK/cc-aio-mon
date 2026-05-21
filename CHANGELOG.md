@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.11.1 — 2026-05-06
+
+**Security hardening:**
+- Session cost aggregation now validates the `~/.claude/projects/` root itself before accepting `transcript_path` values. A symlinked or junctioned projects root is rejected instead of only checking containment against its resolved target.
+- The dashboard's `ai-title` scanner now respects the shared 50 MiB transcript size cap even when the title appears at the start of an oversized transcript.
+- The in-app update worker now uses the same bounded `safe_read(..., MAX_FILE_SIZE)` syntax-check path as `update.py --apply`, preventing unbounded reads of post-pull Python files.
+
+**Repository safety:**
+- The pre-push hook now scans the pushed tip tree for brand-new remote branches. First pushes no longer bypass the secret/sensitive-file scan on a clean worktree.
+
+**Documentation:**
+- Local agent guidance was synced back to Claude Code terminology and paths so future workspace sessions do not confuse this project with a Codex monitor.
+- README and security policy wording now document the stricter transcript-root validation and bounded source-file checks.
+
+**Tests:** 542 passing (+3).
+
 ## v1.11.0 — 2026-05-05
 
 **New features — surface fresh data from Claude Code:**

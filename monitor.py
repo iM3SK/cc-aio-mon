@@ -1150,7 +1150,18 @@ _SESSION_COST_CACHE = OrderedDict()  # LRU: {session_id: (ts, breakdown_dict)}
 _SESSION_COST_CACHE_MAX = 64  # cap — prevents unbounded growth across rotating session IDs
 _SESSION_COST_TTL = 5.0   # refresh every 5s
 
-CLAUDE_PROJECTS_DIR = _CLAUDE_DIR.resolve()
+CLAUDE_PROJECTS_DIR = _CLAUDE_DIR
+
+
+def _safe_claude_projects_root():
+    """Return resolved ~/.claude/projects root only when the root itself is safe."""
+    root = pathlib.Path(CLAUDE_PROJECTS_DIR)
+    if not is_safe_dir(root):
+        return None
+    try:
+        return root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
 
 
 def _safe_transcript_path(tp):
@@ -1159,6 +1170,9 @@ def _safe_transcript_path(tp):
     if not tp or not isinstance(tp, str):
         return None
     try:
+        root = _safe_claude_projects_root()
+        if root is None:
+            return None
         cand = pathlib.Path(tp)
         try:
             st = cand.lstat()
@@ -1174,7 +1188,7 @@ def _safe_transcript_path(tp):
             return None
         # Python 3.8 compat: is_relative_to not available
         try:
-            resolved.relative_to(CLAUDE_PROJECTS_DIR)
+            resolved.relative_to(root)
         except ValueError:
             return None
         return resolved
@@ -1202,6 +1216,8 @@ def _scan_ai_title(transcript_path):
     try:
         st = path.stat()
     except OSError:
+        return None
+    if st.st_size > TRANSCRIPT_MAX_BYTES:
         return None
 
     sid = path.stem
@@ -1270,7 +1286,7 @@ def _aggregate_session_cost(data):
     if path is None:
         # Fallback: scan ~/.claude/projects/*/{sid}.jsonl (first match wins)
         try:
-            home = CLAUDE_PROJECTS_DIR
+            home = pathlib.Path(CLAUDE_PROJECTS_DIR)
             if is_safe_dir(home):
                 for cand in home.glob(f"*/{sid}.jsonl"):
                     if cand.is_file():
@@ -1794,8 +1810,12 @@ def _apply_update_worker():
             for f in PY_FILES:
                 fp = _REPO_ROOT / f
                 if fp.exists():
+                    raw = safe_read(fp, MAX_FILE_SIZE)
+                    if raw is None:
+                        bad.append(f)
+                        continue
                     try:
-                        compile(fp.read_text(encoding="utf-8"), str(fp), "exec")
+                        compile(raw.decode("utf-8", errors="replace"), str(fp), "exec")
                     except SyntaxError:
                         bad.append(f)
             if bad:
@@ -2057,7 +2077,7 @@ def _append_lifetime_block(buf, rows, width):
     budget = rows - len(buf) - _STATS_FOOTER_LINES
     if budget < _LIFETIME_CORE_LINES:
         return
-    cache, cache_mt = _read_stats_cache()
+    cache, _ = _read_stats_cache()
     if not cache:
         return
 
