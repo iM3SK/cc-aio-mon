@@ -50,4 +50,4 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 - [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting
-- [NOTICE](NOTICE) — legal notice and affiliation disclaimer
+- [NOTICE](NOTICE.md) — legal notice and affiliation disclaimer

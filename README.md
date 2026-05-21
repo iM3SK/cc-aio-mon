@@ -4,7 +4,7 @@
 
 **Real-time terminal monitor for Claude Code CLI.** Track context window usage, API rate limits, session costs, burn rate, and cache performance — all in one compact TUI dashboard. Stdlib only (Python 3.8+), cross-platform.
 
-> _Independent community project. Not affiliated with or endorsed by Anthropic. See [NOTICE](NOTICE) for provenance & trademark attribution._
+> _Independent community project. Not affiliated with or endorsed by Anthropic. See [NOTICE](NOTICE.md) for provenance & trademark attribution._
 
 > **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** after each assistant message, permission mode change, or vim mode toggle (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Five Python files, stdlib only, no build step.**
 
@@ -319,7 +319,7 @@ Open an issue first for anything non-trivial so the approach can be discussed be
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE.md) for details.
 
 ## Legal & Affiliation
 
@@ -331,7 +331,7 @@ All source code is **original work** by the project contributors. No code was co
 
 This tool **does not modify, patch, or alter** Claude Code or any Anthropic service — it is a read-only observer of data the user's own Claude Code installation voluntarily emits via its documented extension points.
 
-See [NOTICE](NOTICE) for full provenance, third-party references, and trademark attribution.
+See [NOTICE](NOTICE.md) for full provenance, third-party references, and trademark attribution.
 
 ---
 

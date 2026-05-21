@@ -68,5 +68,5 @@ Key protections:
 ## See also
 
 - [README.md](../README.md) — feature overview and architecture
-- [NOTICE](../NOTICE) — legal notice and affiliation disclaimer
+- [NOTICE](../NOTICE.md) — legal notice and affiliation disclaimer
 - [CHANGELOG.md](../CHANGELOG.md) — release history
