@@ -442,15 +442,21 @@ class TestApplyUpdateAction(unittest.TestCase):
         # safe_read call live in shared.py. Patch targets moved with the code:
         # PY_FILES is read from shared's module scope (not monitor's), and
         # safe_read is invoked via shared's import (not monitor's).
+        # Real-file approach (vs. global pathlib.Path.exists patch): create a
+        # tmp repo root with one real file so the existence check passes
+        # without polluting Path.exists for any unrelated code path.
         import monitor
         import shared
-        with patch("monitor._git_cmd", return_value=(0, "ok", "")):
-            with patch.object(shared, "PY_FILES", ("monitor.py",)):
-                with patch("pathlib.Path.exists", return_value=True):
-                    with patch("shared.safe_read", return_value=None) as mock_safe_read:
-                        _apply_update_worker()
-        mock_safe_read.assert_called_once()
-        self.assertIn("syntax errors", monitor._update_result)
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = pathlib.Path(td)
+            (repo_root / "monitor.py").write_text("# stub")
+            with patch("monitor._git_cmd", return_value=(0, "ok", "")):
+                with patch.object(shared, "PY_FILES", ("monitor.py",)):
+                    with patch.object(monitor, "_REPO_ROOT", repo_root):
+                        with patch("shared.safe_read", return_value=None) as mock_safe_read:
+                            _apply_update_worker()
+            mock_safe_read.assert_called_once()
+            self.assertIn("syntax errors", monitor._update_result)
 
     def test_failure(self):
         with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
@@ -627,6 +633,47 @@ class TestApplyUpdateSingletonLock(unittest.TestCase):
                 pass  # may exit after git ops — that is fine for this assertion
 
         mock_run_git.assert_called()
+
+
+class TestCheckPythonVersion(unittest.TestCase):
+    """update.check_python_version is a single early-exit gate; trivial but
+    must not silently regress (e.g. a typo flipping the comparison).
+
+    sys.version_info itself is a non-constructible structseq, so the mock
+    uses a stand-in namedtuple with the same fields (.major/.minor are read
+    by the error-message format string; comparison is delegated to the
+    tuple-ordering protocol).
+    """
+
+    from collections import namedtuple
+    _VI = namedtuple("_VI", "major minor micro releaselevel serial")
+
+    @classmethod
+    def _vi(cls, major, minor):
+        return cls._VI(major, minor, 0, "final", 0)
+
+    def test_below_min_exits_with_code_1(self):
+        import update as _u
+        with patch("update.sys.version_info", self._vi(3, 7)):
+            with self.assertRaises(SystemExit) as cm:
+                _u.check_python_version()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_at_minimum_does_not_exit(self):
+        import update as _u
+        with patch("update.sys.version_info", self._vi(3, 8)):
+            try:
+                _u.check_python_version()
+            except SystemExit:  # pragma: no cover
+                self.fail("Python at MIN_PYTHON must not trigger sys.exit")
+
+    def test_above_minimum_does_not_exit(self):
+        import update as _u
+        with patch("update.sys.version_info", self._vi(3, 12)):
+            try:
+                _u.check_python_version()
+            except SystemExit:  # pragma: no cover
+                self.fail("Python newer than MIN_PYTHON must not trigger sys.exit")
 
 
 if __name__ == "__main__":

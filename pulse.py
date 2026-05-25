@@ -40,7 +40,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 
-from shared import DATA_DIR, MAX_FILE_SIZE, ensure_data_dir, safe_read, VERSION
+from shared import DATA_DIR, MAX_FILE_SIZE, SECONDS_1D, ensure_data_dir, safe_read, VERSION
 
 # ---------------------------------------------------------------------------
 # Config
@@ -67,7 +67,7 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 # Persistence + cleanup
 LOG_PATH = DATA_DIR / "pulse.jsonl"
 LOG_MAX_BYTES = MAX_FILE_SIZE    # 1 MB — single source of truth via shared
-LOG_AGE_CUTOFF = 24 * 3600       # startup: drop entries older than 24h
+LOG_AGE_CUTOFF = SECONDS_1D      # startup: drop entries older than 24h
 LOG_TRIM_TARGET = 500            # runtime rotation: keep last N lines
 LOG_STARTUP_CAP = 2000           # startup: hard cap on record count
 ROTATE_CHECK_EVERY = 100         # runtime: check size every N appends
@@ -146,7 +146,10 @@ def _latency_score(latency_ms):
     return 10
 
 
-def _indicator_label(indicator):
+def indicator_label(indicator):
+    """Map Statuspage indicator value to human-readable label. Public API
+    so monitor.render_pulse_modal can format it without reaching into a
+    private symbol."""
     m = {
         "none": "operational",
         "maintenance": "maintenance",
@@ -257,7 +260,7 @@ def compute_score(raw):
     # Reason: pick dominant factor
     reasons = []
     if indicator and indicator != "none":
-        reasons.append(f"status: {_indicator_label(indicator)}")
+        reasons.append(f"status: {indicator_label(indicator)}")
     if incidents:
         reasons.append(f"{len(incidents)} active incident(s)")
     if latency_ms is None:
@@ -364,7 +367,11 @@ def _tag_models_from_incident(inc):
     if isinstance(updates, list) and updates and isinstance(updates[0], dict):
         body = (updates[0].get("body") or "").lower()
     impact_override = inc.get("impact_override")
-    impact_override_s = str(impact_override).lower() if isinstance(impact_override, (str, int, float)) else ""
+    impact_override_s = (
+        str(impact_override).lower()
+        if isinstance(impact_override, (str, int, float)) and not isinstance(impact_override, bool)
+        else ""
+    )
     text = f"{title} {impact_override_s} {body}"
     for fam in ("opus", "sonnet", "haiku"):
         if re.search(rf"\b{fam}\b", text):

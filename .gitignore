@@ -66,6 +66,15 @@ secrets/
 # SSH keys (defense-in-depth)
 id_rsa*
 id_ed25519*
+id_ecdsa*
+.ssh/
+known_hosts
+
+# Service accounts & credential stores (defense-in-depth)
+service-account*.json
+.netrc
+*.kdbx
+.aws/credentials
 
 # Backup / merge artifacts
 *.bak

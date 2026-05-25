@@ -322,6 +322,13 @@ class TestSafeRead(unittest.TestCase):
         finally:
             os.unlink(p)
 
+    def test_returns_none_on_permission_error(self):
+        """An unreadable existing file (any OSError, not just missing)
+        must return None — caller treats the read as a failed datapoint
+        rather than propagating an exception into the render path."""
+        with patch("builtins.open", side_effect=PermissionError("denied")):
+            self.assertIsNone(shared.safe_read("any/path", 100))
+
 
 class TestVersionSingleSourceOfTruth(unittest.TestCase):
     """I-1: VERSION lives in shared.py; monitor + pulse import from there."""
@@ -488,6 +495,30 @@ class TestRotateCrashLog(unittest.TestCase):
         # Must not raise
         rotate_crash_log(nonexistent, max_bytes=100)
 
+    def test_always_rotates_small_file(self):
+        """always=True must rotate even when file is well under max_bytes.
+        Guards against two-crashes-in-quick-succession losing first traceback."""
+        from shared import rotate_crash_log, MAX_FILE_SIZE
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".log") as f:
+            f.write(b"first crash traceback")
+            p = pathlib.Path(f.name)
+        backup = p.with_suffix(p.suffix + ".1")
+        try:
+            rotate_crash_log(p, max_bytes=MAX_FILE_SIZE, always=True)
+            self.assertFalse(p.exists(), "original must be gone after always-rotate")
+            self.assertTrue(backup.exists(), ".1 backup must exist")
+            self.assertEqual(backup.read_bytes(), b"first crash traceback")
+        finally:
+            p.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+
+    def test_always_no_op_when_path_missing(self):
+        """always=True must not raise when the source path does not exist."""
+        from shared import rotate_crash_log
+        nonexistent = pathlib.Path(tempfile.gettempdir()) / "cc_aio_rotate_always_nonexist_xyz.log"
+        rotate_crash_log(nonexistent, always=True)
+        self.assertFalse(nonexistent.exists())
+
 
 class TestPyFilesSingleSourceOfTruth(unittest.TestCase):
     """I-2: PY_FILES in shared.py is the single source of truth for syntax-check list."""
@@ -646,6 +677,82 @@ class TestAcquireSingletonLockCrossPlatform(unittest.TestCase):
                 fh.close()
             except OSError:
                 pass
+
+
+class TestExtractChangelogEntry(unittest.TestCase):
+    """Direct unit tests for shared.extract_changelog_entry. Previously
+    covered only indirectly via test_update (TestUpdate / TestGetRemoteChangelogPreview)."""
+
+    def test_extracts_middle_entry(self):
+        text = (
+            "## v1.2.0\n"
+            "feat: middle\n"
+            "\n"
+            "## v1.1.0\n"
+            "fix: old\n"
+        )
+        out = shared.extract_changelog_entry(text, "1.2.0")
+        self.assertIn("## v1.2.0", out)
+        self.assertIn("feat: middle", out)
+        self.assertNotIn("v1.1.0", out)
+
+    def test_extracts_last_entry_at_eof(self):
+        """Final entry has no following '## v' — pattern must anchor on \\Z."""
+        text = "## v0.9.0\nfeat: trailing\n"
+        out = shared.extract_changelog_entry(text, "0.9.0")
+        self.assertIn("feat: trailing", out)
+        self.assertTrue(out.startswith("## v0.9.0"))
+
+    def test_missing_version_returns_empty_string(self):
+        text = "## v1.0.0\nfeat: only\n"
+        self.assertEqual(shared.extract_changelog_entry(text, "9.9.9"), "")
+
+    def test_empty_input_returns_empty_string(self):
+        self.assertEqual(shared.extract_changelog_entry("", "1.0.0"), "")
+
+    def test_max_lines_truncates(self):
+        body = "\n".join(f"line {i}" for i in range(20))
+        text = f"## v2.0.0\n{body}\n"
+        out = shared.extract_changelog_entry(text, "2.0.0", max_lines=5)
+        self.assertEqual(len(out.splitlines()), 5)
+
+    def test_version_with_regex_metachars_is_escaped(self):
+        """Versions like 1.0.0+build.1 contain regex metachars — re.escape
+        must prevent them from acting as the regex's '.' wildcard."""
+        text = "## v1.0.0+build.1\nfeat: a\n\n## v1X0X0PbuildX1\nfeat: b\n"
+        out = shared.extract_changelog_entry(text, "1.0.0+build.1")
+        self.assertIn("feat: a", out)
+        self.assertNotIn("feat: b", out)
+
+
+class TestContextSuffixHelpers(unittest.TestCase):
+    """Direct unit tests for shared.strip_context_suffix and
+    compact_context_suffix. Previously only covered implicitly through
+    statusline rendering tests."""
+
+    def test_strip_removes_1m_context(self):
+        self.assertEqual(shared.strip_context_suffix("Opus 4.7 (1M context)"), "Opus 4.7")
+
+    def test_strip_removes_200k_context(self):
+        self.assertEqual(shared.strip_context_suffix("Sonnet 4.6 (200k context)"), "Sonnet 4.6")
+
+    def test_strip_no_suffix_unchanged(self):
+        self.assertEqual(shared.strip_context_suffix("Opus 4.7"), "Opus 4.7")
+
+    def test_strip_empty_input(self):
+        self.assertEqual(shared.strip_context_suffix(""), "")
+
+    def test_compact_inlines_1m(self):
+        self.assertEqual(shared.compact_context_suffix("Opus 4.7 (1M context)"), "Opus 4.7 1M")
+
+    def test_compact_inlines_200k(self):
+        self.assertEqual(shared.compact_context_suffix("Sonnet 4.6 (200k context)"), "Sonnet 4.6 200k")
+
+    def test_compact_no_suffix_unchanged(self):
+        self.assertEqual(shared.compact_context_suffix("Opus 4.7"), "Opus 4.7")
+
+    def test_compact_empty_input(self):
+        self.assertEqual(shared.compact_context_suffix(""), "")
 
 
 if __name__ == "__main__":
