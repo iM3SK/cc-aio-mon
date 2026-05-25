@@ -93,3 +93,4 @@ notes.md
 
 # Audit tooling — LOCAL ONLY, must never reach GitHub
 docs/audits/
+.full-review/
