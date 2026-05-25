@@ -1,5 +1,65 @@
 # Changelog
 
+## v1.12.0 — 2026-05-25
+
+**New features — operational reliability:**
+- **Singleton lock for `monitor.py`.** The interactive dashboard now acquires an exclusive lock on `$TMPDIR/claude-aio-monitor/monitor.lock` at startup; running a second `monitor.py` instance exits with a clear error instead of racing the first on snapshot polling and crash-log writes. The `--list` mode is exempt (one-shot, non-interactive). Cross-platform via `fcntl.flock` (Unix) and `msvcrt.locking` (Windows); the OS releases the lock on process exit, including hard kills.
+- **Crash-log rotation.** `monitor-crash.log` is rotated to `monitor-crash.log.1` once it grows past 1 MB, preventing unbounded growth across repeated crash cycles. Best-effort: any rotation failure is silently swallowed so a broken filesystem cannot prevent crash recording.
+- **File-IPC schema version.** Statusline snapshots and JSONL history entries now carry a `_schema_version: 1` field. Monitor tolerates the new field because all snapshot reads use `dict.get(...)` for known keys and never enumerate the whole dict — it lays the groundwork for non-backward-compatible JSON shape changes in future releases.
+
+**Bug fixes — Windows console rendering:**
+- **Diacritic mojibake fixed (no more `chcp 65001` required).** On Windows locales whose default console output code page isn't UTF-8 (e.g. CP1250 on Slovak, CP1252 on US, CP852 on legacy DOS-derived locales), Python's UTF-8 byte stream was being interpreted by the console as the locale code page, mangling session names, AI titles, and model labels containing diacritics (`Vytvoriť` rendered as `VytvoriĹĄ`). `monitor.py:_setup_term` now calls `kernel32.SetConsoleOutputCP(65001)` alongside the existing `SetConsoleMode` ANSI/VT enablement, and `_restore_term` (already registered via `atexit.register(cleanup)`) restores the original code page on exit so the user's shell isn't left in UTF-8 mode after monitor quits. No user-side `chcp 65001` workaround needed; the troubleshooting line in `docs/setup-windows.md` has been updated accordingly.
+
+**Performance — render path freezes eliminated:**
+- **Update modal no longer freezes the keyboard.** `render_update_modal` previously issued 5 synchronous `git` subprocess calls per 50 ms render tick (`_get_new_commits`, `_get_remote_changelog_preview`, and 3× `_update_checks`), each with a 15 s timeout — worst-case 75 s frozen TUI on a slow filesystem or network. Helpers now go through TTL-cached wrappers (`_cached_get_new_commits`, `_cached_get_remote_changelog_preview`, `_cached_update_checks`) keyed by remote version with a 30 s TTL. `_apply_update_worker` invokes `_invalidate_update_modal_cache` on successful `git pull` so post-update state is reflected on the next render.
+- **Session picker CPU drop from ~10 % to ~1 %.** Picker mode (`sid is None`) renders at 20 Hz; previously each tick triggered a full `DATA_DIR.glob()` + per-session JSON parse + AI-title extraction via `list_sessions()`. New `cached_list_sessions(ttl=1.0)` (mirrors the existing `cached_cross_session_costs` pattern) caches the result for 1 s — visually fresh (sessions don't appear/disappear faster than ~1 Hz) but with ~20× fewer disk operations. The direct `list_sessions()` call site for the one-shot CLI `--list` mode is unchanged.
+- **AI-title scan 8× faster on cache miss.** `_AI_TITLE_SCAN_BYTES` lowered from 512 KiB to 64 KiB; Claude Code writes the `ai-title` record within the first ~20 transcript entries (<50 KiB), so the previous cap was over-provisioned.
+
+**Refactor — single source of truth:**
+- The byte-for-byte duplicate post-pull syntax-check loop in `monitor.py:_apply_update_worker` and `update.py:apply_update` has been extracted to `shared.check_syntax_after_pull(repo_root)`. Both call sites now delegate to the shared helper, and a regression-guard test enforces that the loop never reappears in either consumer.
+- The `git rev-list --left-right --count` parser used by both `monitor._update_checks` and `update.get_ahead_behind` is now `shared.parse_ahead_behind(output)`. Same canonical `(ahead, behind)` return; `update.py` swaps locally to preserve its `(behind, ahead)` public contract.
+- Cross-session cost aggregation in `calc_cross_session_costs` had two identical baseline-subtraction loops (one for today, one for the week, differing only in the cutoff timestamp). Extracted into `_baseline_delta(entries, cutoff_ts)` — net −15 LOC and a uniform cutoff semantics for any future windowing.
+
+**Repository structure — developer experience:**
+- The monolithic `tests.py` (5 701 LOC, 110 test classes) has been split into a `tests/` package — one module per source file (`test_statusline.py`, `test_monitor.py`, `test_shared.py`, `test_pulse.py`, `test_update.py`). The root-level `tests.py` is now a thin wrapper that runs `unittest discover tests/`, so existing `py tests.py` invocations continue to work unchanged.
+
+**Security hardening — pre-push hook patterns extended:**
+- `.githooks/pre-push` now blocks pushes containing additional credential prefixes: GitHub server/user/OAuth/refresh tokens (`ghs_`, `ghu_`, `gho_`, `ghr_`) alongside the existing `ghp_`/`github_pat_`; AWS STS temporary keys (`ASIA*`) alongside `AKIA*`; Google API keys (`AIza...`); Slack tokens (`xox[baprs]-...`); Stripe live/test keys (`sk_live_`/`sk_test_`/`rk_live_`/`pk_live_`). Hook remains best-effort (`--no-verify` still bypasses).
+
+**Documentation:**
+- New `docs/ARCHITECTURE.md` — contributor-oriented architecture overview (two-process model, five modules, data flow Mermaid, threading model, "where to look for X" pointer table).
+- New `docs/FILE-IPC-CONTRACT.md` — exhaustive reference for the statusline ↔ monitor file-IPC contract: full schemas for `<sid>.json`, `<sid>.jsonl`, `pulse.jsonl`, `monitor-crash.log`, `monitor.lock`, plus atomicity guarantees, session ID validation rules, and the `_schema_version` evolution policy.
+- New `docs/RELEASE.md` — release process checklist: SemVer policy with worked examples, CHANGELOG entry format derived from this changelog's actual entries, pre-release verification steps, tag + push order, self-update integration constraints, rollback procedure.
+- Updated `.github/SECURITY.md` — appended v1.12.0 primitives (singleton lock, crash-log rotation, schema_version tag, deduplicated post-pull syntax check).
+- Updated `CONTRIBUTING.md` — documents the new `tests/` package layout, 583-test baseline, no-parallel-implementations policy enforced by regression-guard test, file-IPC schema bump procedure, and architecture-orientation pointer for new contributors.
+- Updated `README.md` — added v1.12.0 user-facing notes (singleton lock UX, crash-log rotation, schema versioning) and a Documentation index linking to the new architecture / IPC / release / security references.
+
+**Internal — test suite DRY:**
+- Extracted `_vlen`, `_strip_ansi`, `_full_data`, `_write_session`, `_write_transcript`, and `_make_assistant_record` helper duplicates (originally cloned into two test files by the v1.12.0 monolithic-tests split) into a single `tests/_helpers.py`. Net 95 LOC removed from `tests/test_statusline.py` + `tests/test_monitor.py` (one helper pair was unexpectedly duplicated _twice_ in `test_monitor.py` — both inline copies removed).
+
+**Post-release audit follow-ups (same v1.12.0 cycle):**
+- `update.py --apply` now acquires the same singleton lock as `monitor.py` before any rollback tag or `git pull`. Prevents concurrent CLI updates from racing the running TUI on `.py` file replacement. Bails out with a friendly error and `sys.exit(1)` if monitor.py is already running. Closes a security audit gap where `.github/SECURITY.md` claimed lock coverage that did not match update.py reality.
+- Added direct test coverage for v1.12.0 primitives that had only indirect (regression-guard) coverage: `TestParseAheadBehind` (6 methods covering malformed input), `TestAcquireSingletonLock` (3 methods covering happy path, contention, missing dir), `TestRotateCrashLog` (4 methods covering boundary, missing path, .1 pre-existing), `TestMainSingleton` (3 methods covering monitor.main exit on lock contention), and a `_schema_version` field assertion in `TestWriteSharedState`. Plus `TestApplyUpdateSingletonLock` validating the new update.py lock behavior.
+
+**Second-pass audit (2026-05-22):**
+- `TestParseAheadBehind` extended to 8 methods: added `test_tab_separated_valid` (tab-delimited ahead/behind is valid input) and `test_negative_integer_rejected` (negative integers must be rejected as malformed).
+- `TestMainSingleton` extended to 4 methods: added `test_main_list_mode_skips_singleton_lock` (list-mode flag bypasses lock acquisition entirely).
+- `TestApplyUpdateSingletonLock` extended to 2 methods: added `test_apply_update_proceeds_when_lock_acquired` (happy-path lock acquisition in update.py --apply).
+- `TestPrePushHook` skip guard added: test skips when `.githooks/pre-push` is absent (covers Windows and repos without the hook installed) instead of failing.
+- `update.py --apply` now emits a stderr warning (`"lock dir unavailable; proceeding without singleton guard"`) when the data dir cannot be created (`ensure_data_dir` returns False), instead of silently proceeding without the singleton lock. Surfaces a previously invisible gap in lock coverage that `.github/SECURITY.md` did not document.
+
+**Third-pass audit (2026-05-25) — regression-guard coverage for bug fixes & perf:**
+- `tests/test_shared.py::TestLoadHistory` — `RESERVED_SIDS` guard (rls/stats/pulse cannot be read via session history API) and `UnicodeDecodeError` branch (binary garbage in a `.jsonl` returns `[]` rather than raising). Previous test suite had neither path.
+- `tests/test_shared.py::TestEnvPct` — 5 cases for `_env_pct` (valid float, integer string, empty, invalid, missing env var) which is the single source of truth for `WARN_PCT` / `CRIT_PCT` threshold parsing.
+- `tests/test_shared.py::TestEnsureUtf8Stdout` — positive path (already utf-8 → no-op) and reconfigure path (non-utf-8 → reopen stdout with `encoding="utf-8"`, `errors="replace"`, `closefd=False`).
+- `tests/test_shared.py::TestAcquireSingletonLockCrossPlatform` — both `fcntl`/`msvcrt` branches now exercised on any host via mocked `sys.platform`, not only the runner's native platform.
+- `tests/test_statusline.py::TestStatuslineMainE2E` — end-to-end smoke for `statusline.main()` (stdin → JSON → `build_line` → `write_shared_state` → stdout) plus empty-stdin and invalid-JSON early-return paths.
+- `tests/test_statusline.py::TestIPCForwardCompatNoSchemaVersion` — `load_state` tolerates pre-v1.10 snapshots that lack `_schema_version` (the contract is documented in `docs/FILE-IPC-CONTRACT.md` but had no test pinning it).
+- `tests/test_pulse.py::TestWorkerLoopCrashRecovery` — `_worker_loop`'s `except Exception` last-resort guard writes a `worker crashed` snapshot rather than letting the daemon thread die silently.
+- `tests/test_monitor.py::TestAuditRegressionV1105::test_debt016_monitor_loc_tripwire` — DEBT-016 trigger: `monitor.py` exceeding 3 500 LOC fails the test with a pointer to `PROJECTS/cc-aio-mon/ROZHODNUTIA.md` ADR-002, requiring an ADR before further growth.
+
+**Tests:** 583 passing (+41).
+
 ## v1.11.1 — 2026-05-06
 
 **Security hardening:**

@@ -67,7 +67,7 @@ function mon { py "$env:USERPROFILE\.cc-aio-mon\monitor.py" @args }
 
 ## Requirements check (optional)
 
-[check-requirements.ps1](../check-requirements.ps1) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
+[check-requirements.ps1](check-requirements.ps1) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
 
 Run from the repo directory:
 
@@ -89,7 +89,7 @@ py update.py                  # check only
 py update.py --apply          # check + apply
 ```
 
-Restart Claude Code after updating. See [README — Updating](../README.md#updating) for full details.
+Restart Claude Code after updating. See [README — Updating](Archyv/cc-aio-mon/README.md#updating) for full details.
 
 ## Troubleshooting
 
@@ -110,8 +110,11 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 
 **Garbled output or missing colors**
 - Use Windows Terminal — cmd.exe and classic PowerShell console do not support truecolor.
-- Run `chcp 65001` for UTF-8 encoding.
 - Test color support: `py -c "print('\033[32mGREEN\033[0m')"`
+
+**Diacritics show as `Ĺĺ` / `ĂĄ` / `Ăľ` mojibake**
+- `monitor.py` already switches the console output code page to UTF-8 (CP 65001) on startup and restores it on exit. If you still see mojibake, you are likely either (a) on a Windows version that does not honour `SetConsoleOutputCP` from Python (rare), or (b) viewing the screen of a `monitor.py` instance started **before** v1.12.1 — quit (`q`) and relaunch.
+- Manual fallback: `chcp 65001` before launching, or enable the system-wide UTF-8 locale (Settings → Time & Language → Language & region → Administrative language settings → "Beta: Use Unicode UTF-8 for worldwide language support").
 
 **Raw escape codes visible**
 - Same fix — use Windows Terminal. The monitor checks `isatty()` and `TERM=dumb` on startup.

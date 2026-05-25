@@ -62,7 +62,7 @@ alias mon='python3 ~/.cc-aio-mon/monitor.py'
 
 ## Requirements check (optional)
 
-[check-requirements.sh](../check-requirements.sh) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
+[check-requirements.sh](check-requirements.sh) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
 
 Run from the repo directory:
 
@@ -83,7 +83,7 @@ python3 update.py             # check only
 python3 update.py --apply     # check + apply
 ```
 
-Restart Claude Code after updating. See [README — Updating](../README.md#updating) for full details.
+Restart Claude Code after updating. See [README — Updating](Archyv/cc-aio-mon/README.md#updating) for full details.
 
 ## Troubleshooting
 
@@ -96,7 +96,9 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 
 **Monitor shows "Waiting for Claude Code session..."**
 - Check `statusLine.command` in `~/.claude/settings.json`.
-- Verify temp files appear after a Claude Code event: `/tmp/claude-aio-monitor/`
+- Verify temp files appear after a Claude Code event: `$TMPDIR/claude-aio-monitor/`
+
+  > Note: on macOS `$TMPDIR` resolves to a per-user path like `/var/folders/.../T/`, not `/tmp`.
 - Test: `echo '{"context_window": {"used_percentage": 42}}' | python3 ~/.cc-aio-mon/statusline.py`
 
 **Raw escape codes visible**

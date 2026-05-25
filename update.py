@@ -18,6 +18,8 @@ from pathlib import Path
 from shared import (
     VERSION_RE, MAX_FILE_SIZE, _sanitize, run_git as _shared_run_git,
     ensure_utf8_stdout, extract_changelog_entry, PY_FILES, safe_read,
+    check_syntax_after_pull, parse_ahead_behind,
+    DATA_DIR, ensure_data_dir, acquire_singleton_lock,
 )
 
 if sys.platform == "win32":
@@ -137,11 +139,10 @@ def get_ahead_behind():
     r = run_git(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
     if r.returncode != 0:
         raise RuntimeError("Failed to compare commits")
-    parts = r.stdout.strip().split()
-    if len(parts) != 2:
-        raise RuntimeError(f"Unexpected rev-list output: {r.stdout}")
-    # rev-list --left-right: parts[0]=left(HEAD)=ahead, parts[1]=right(origin)=behind
-    behind, ahead = int(parts[1]), int(parts[0])
+    try:
+        ahead, behind = parse_ahead_behind(r.stdout)
+    except ValueError as e:
+        raise RuntimeError(str(e)) from e
     return behind, ahead
 
 
@@ -160,8 +161,32 @@ def get_remote_changelog_entry(version):
     return entry if entry else None
 
 
+# Mutual exclusion with monitor.py: the interactive monitor holds a singleton
+# OS-level lock at ``DATA_DIR / "monitor.lock"`` for its entire TUI lifetime
+# (see monitor.main() and shared.acquire_singleton_lock). `update.py --apply`
+# rewrites the same .py files monitor imports — if both ran concurrently, git
+# pull could replace a module on disk while monitor's threads still hold open
+# references, producing partial reads or stale imports. apply_update() must
+# therefore acquire the SAME lock before any tag/pull operation; if monitor is
+# running it bails out with a friendly message instead of racing it.
 def apply_update():
     hdr("Applying update")
+
+    # Singleton lock — fail fast if monitor.py is running. Lock handle stays in
+    # function scope; OS releases it when apply_update() returns or sys.exit().
+    if ensure_data_dir(DATA_DIR):
+        _lock_handle = acquire_singleton_lock(DATA_DIR / "monitor.lock")
+        if _lock_handle is None:
+            err("Close monitor.py first — another instance is running")
+            note(f"Lock file: {DATA_DIR / 'monitor.lock'} (inspect for PID)")
+            sys.exit(1)
+    else:
+        _lock_handle = None  # data dir unusable — proceed without lock (best effort)
+        print(
+            "Warning: lock dir unavailable; proceeding without singleton guard. "
+            "If monitor.py is running, file replacement may race.",
+            file=sys.stderr,
+        )
 
     # Rollback point — created before pull so user can revert via `git reset --hard <tag>`
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -192,19 +217,9 @@ def apply_update():
         warn(f"Could not verify new VERSION: {_sanitize(str(e))}")
 
     # Syntax check — catch broken updates before user runs monitor.
-    # File list comes from shared.PY_FILES (single source of truth).
-    bad = []
-    for f in PY_FILES:
-        fp = REPO_ROOT / f
-        if fp.exists():
-            raw = safe_read(fp, MAX_FILE_SIZE)
-            if raw is None:
-                bad.append(f)
-                continue
-            try:
-                compile(raw.decode("utf-8", errors="replace"), str(fp), "exec")
-            except SyntaxError:
-                bad.append(f)
+    # File list + check logic come from shared (single source of truth across
+    # update.py CLI and monitor.py TUI worker).
+    bad = check_syntax_after_pull(REPO_ROOT)
     if bad:
         warn(f"Syntax errors in: {', '.join(bad)} — update may be broken")
         note(f"Revert with: git reset --hard {rollback_tag}")

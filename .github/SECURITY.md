@@ -64,6 +64,10 @@ Key protections:
 - Temp directory created with `0o700` permissions where supported
 - `update.py` guards: dirty tree, wrong branch, detached HEAD, divergence, downgrade, Python version mismatch
 - `pulse.py` uses `urllib.request.urlopen` with default CA verification (no `ssl._create_unverified_context`); errors are caught by specific type, never broadly suppressed in probe logic
+- **(v1.12.0)** Both `monitor.py` (interactive TUI) AND `update.py --apply` (CLI updater) acquire the same singleton OS-level lock (`shared.acquire_singleton_lock` — `fcntl.flock` on Unix, `msvcrt.locking` on Windows) on `$TMPDIR/claude-aio-monitor/monitor.lock`. Prevents two concurrent dashboards from racing on shared snapshot reads and crash-log writes, AND prevents `update.py --apply` from rewriting `.py` files while monitor's threads still hold open references. `monitor.py --list` mode is exempt (one-shot, non-interactive read)
+- **(v1.12.0)** `monitor-crash.log` rotated to `.log.1` past 1 MB via `shared.rotate_crash_log` — bounds disk growth across repeated crash cycles
+- **(v1.12.0)** File-IPC schema tagged with `shared.SCHEMA_VERSION` (currently `1`) — statusline writes the field on every snapshot + history entry; monitor reads via `dict.get()` so unknown values are silently ignored, providing forward-compat for future incompatible bumps
+- **(v1.12.0)** Post-pull syntax check unified in `shared.check_syntax_after_pull` — single canonical loop iterated by both `update.py --apply` (CLI) and `monitor.py:_apply_update_worker` (TUI background thread). A regression-guard test fails if either consumer reintroduces the parallel implementation
 
 ## See also
 
