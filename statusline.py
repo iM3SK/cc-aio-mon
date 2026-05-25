@@ -23,8 +23,8 @@ import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
-                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, DATA_DIR, RESERVED_SIDS,
-                    SCHEMA_VERSION,
+                    _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
+                    DATA_DIR, RESERVED_SIDS, SCHEMA_VERSION,
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
                     R, B, C_RED, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
@@ -272,7 +272,7 @@ HISTORY_TRIM_TO = 1000
 # MAX_FILE_SIZE, DATA_DIR imported from shared.py
 
 
-def _load_history_for_rates(sid, n=120):
+def _load_history_for_rates(sid, n=HISTORY_RATE_SAMPLES):
     """Read last n history entries for BRN/CTR rate computation. Call BEFORE write_shared_state.
 
     Thin wrapper around shared.load_history — both modules share the same reader

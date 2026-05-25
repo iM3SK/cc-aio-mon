@@ -255,12 +255,13 @@ After successful snapshot write:
 
 ### Reading (shared.py + monitor.py)
 
-**Function**: `load_history(sid, n=120, data_dir=None)` (`shared.py:122-153`)
+**Function**: `load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None)` (`shared.py:122-153`)
 
-Single source of truth for both statusline and monitor.
+Single source of truth for both statusline and monitor. `HISTORY_RATE_SAMPLES`
+defaults to 120 — at ~1 statusline event/min this is a ~2-hour rolling window.
 
 ```python
-def load_history(sid, n=120, data_dir=None):
+def load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None):
     """Read last n JSONL history entries for session `sid`.
     
     Returns list of parsed dicts (best-effort — malformed lines skipped).

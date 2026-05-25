@@ -1,5 +1,84 @@
 # Changelog
 
+## v1.12.2 — 2026-05-25
+
+Audit-cleanup release: outstanding P2 + P3 findings from the 24.05.2026
+five-dimension audit (REPORT.md backed up to `D:\backups\audit-24.05.2026-cc-aio-mon.zip`).
+No new features, no user-visible behavior change beyond two niche edges
+(crash log always-rotates, `pulse.indicator_label` is now a public name).
+
+**Reliability:**
+- **Crash log always rotates (P3 ARCH).** `rotate_crash_log` gains an
+  `always=False` parameter; `monitor.py:_install_crash_logger` passes
+  `always=True` so the previous traceback is preserved (as `.log.1`) even
+  when both crashes are well under the 1 MB size threshold. Prevents
+  silent loss of diagnostics when two crashes happen in quick succession.
+  +2 regression tests.
+
+**API tidy-up:**
+- **`pulse.indicator_label` is public (P3 ARCH).** Renamed from
+  `_indicator_label` because `monitor.render_pulse_modal` was already
+  reaching across module boundaries to call it. The mapping
+  (Statuspage indicator → human label) is a stable contract; the leading
+  underscore was misleading.
+
+**Code hygiene — internal:**
+- **Named time constants (P3 STYLE-003).** `shared.SECONDS_1H` /
+  `SECONDS_5H` / `SECONDS_1D` / `SECONDS_7D` replace the bare `3600`
+  / `18000` / `86400` / `604800` magic numbers in `monitor.py` (rate-limit
+  windows, dead-snapshot cleanup, ago-time formatter, cross-session week
+  cutoff) and `pulse.py` (`LOG_AGE_CUTOFF`). No behavior change.
+- **`HISTORY_RATE_SAMPLES` constant (P3 ARCH).** The magic `n=120` default
+  in `load_history` (≈ a 2-hour rolling window at one statusline event per
+  minute) is now a named constant in `shared.py`, propagated to the
+  `monitor.load_history` and `statusline._load_history_for_rates` wrappers.
+- **`_MODELS` defined in one place (P3 ARCH).** The placeholder
+  `_MODELS = {}` at the top of the cost-breakdown section plus the
+  `_MODELS.update({...})` call 900 LOC later in the token-stats section
+  are gone — the model registry is now a single dict literal next to
+  `_DEFAULT_PRICING` where it is first used.
+- **`flush(cols)` is now a required arg (P3 ARCH).** The `cols=None`
+  default that fell back to `shutil.get_terminal_size()` was unreachable
+  in production (every call site already had the value); removed the dead
+  branch.
+- **`isinstance(..., bool)` exclusion (P3 STYLE-005).** `pulse.py`
+  `_classify_incident` now explicitly excludes `bool` from its
+  `isinstance(impact_override, (str, int, float))` check — `bool` is an
+  `int` subclass, so `True` / `False` would otherwise leak through into
+  the model-family string match.
+- **`# noqa: BLE001` on `_rls_maybe_check` swallow (P3 STYLE-004).** The
+  best-effort `except Exception` on `Thread().start()` failure is
+  intentional; the comment makes that explicit.
+
+**Security — defense in depth:**
+- **`.gitignore` extended (P3 SEC).** Added `id_ecdsa*`, `.ssh/`,
+  `known_hosts`, `service-account*.json`, `.netrc`, `*.kdbx`, and
+  `.aws/credentials` to the credentials block.
+
+**Tests:**
+- **`extract_changelog_entry` direct unit tests (P3 TEST).** Six new
+  cases in `test_shared.py`: middle entry extraction, last-entry-at-EOF
+  anchor, missing version, empty input, `max_lines` truncation, and
+  regex-metachar escaping in the version string.
+- **`strip_context_suffix` / `compact_context_suffix` direct tests
+  (P3 TEST).** Eight cases in `test_shared.py` covering 1M / 200k
+  suffixes, no-suffix passthrough, and empty input for both helpers.
+- **`update.check_python_version` test (P3 TEST).** Three cases pinning
+  the exit-on-too-old behavior, the at-minimum no-op, and the
+  newer-version no-op — using a `namedtuple` stand-in for the
+  non-constructible `sys.version_info` structseq.
+- **`safe_read` `PermissionError` path (P3 TEST).** Pins that any
+  `OSError`, not just `FileNotFoundError`, returns `None` cleanly.
+- **`TestApplyUpdateAction.test_syntax_check_uses_safe_read` no longer
+  patches `pathlib.Path.exists` globally (P2 T-P2-4).** Uses a real
+  tmpdir + real stub file, so unrelated `Path.exists` calls in the
+  test body are unaffected.
+- **`TestCalcRates.test_shared_module_identity` renamed (P2 T-P2-7)**
+  to `test_monitor_and_statusline_alias_shared_calc_rates` with a
+  docstring stating the SSoT invariant it guards.
+
+**Tests:** 605 passing (+20).
+
 ## v1.12.1 — 2026-05-25
 
 **Bug fixes — Windows / non-UTF-8 locale rendering:**

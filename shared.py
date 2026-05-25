@@ -38,12 +38,20 @@ MAX_FILE_SIZE = 1_048_576  # 1 MB
 HISTORY_READ_MAX = MAX_FILE_SIZE * 2   # 2 MB — per-session JSONL read cap (headroom over 1 MB trim target)
 HISTORY_AGGREGATE_MAX = MAX_FILE_SIZE * 10  # 10 MB — cross-session cost aggregation cap
 TRANSCRIPT_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB — cap on per-transcript reads
+
+# Named time constants — eliminate magic-number duplication across monitor/pulse/statusline.
+# All values are seconds (wall-clock or monotonic context depends on call site).
+SECONDS_1H = 3600
+SECONDS_5H = 5 * SECONDS_1H        # 18000 — Claude rate-limit "5-hour" window
+SECONDS_1D = 24 * SECONDS_1H       # 86400
+SECONDS_7D = 7 * SECONDS_1D        # 604800 — Claude rate-limit "7-day" window
+
 DATA_DIR_NAME = "claude-aio-monitor"
 DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.12.1"
+VERSION = "1.12.2"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor
@@ -51,6 +59,11 @@ VERSION = "1.12.1"
 # silently ignored — making the tag future-proof but advisory today. A future
 # monitor read site (e.g. read_session_snapshot) can gate on this value.
 SCHEMA_VERSION = 1
+
+# Default sample window for load_history(). At ~1 statusline event/min this
+# yields a ~2-hour rolling window — enough for BRN/CTR rate smoothing without
+# rereading the entire per-session JSONL.
+HISTORY_RATE_SAMPLES = 120
 
 
 def ensure_utf8_stdout():
@@ -125,7 +138,7 @@ def _num(v, default=0):
         return default
 
 
-def load_history(sid, n=120, data_dir=None):
+def load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None):
     """Read last n JSONL history entries for session `sid`.
 
     Single source of truth for both monitor.py (BRN/CTR dashboard rates) and
@@ -395,15 +408,23 @@ def parse_ahead_behind(rev_list_output):
     return int(parts[0]), int(parts[1])
 
 
-def rotate_crash_log(path, max_bytes=MAX_FILE_SIZE):
-    """Rotate ``path`` to ``path.1`` when its size exceeds ``max_bytes``.
+def rotate_crash_log(path, max_bytes=MAX_FILE_SIZE, always=False):
+    """Rotate ``path`` to ``path.1`` when size exceeds ``max_bytes``, or
+    unconditionally when ``always=True``.
+
+    ``always=True`` preserves the prior crash even when the current log is
+    well under ``max_bytes`` — otherwise two crashes in quick succession (both
+    small) would silently overwrite the first via ``open("w")``. Callers that
+    only care about disk-growth bounds keep the default.
 
     Best-effort: any OSError is silently swallowed so the calling crash-log
     writer never crashes the process it is trying to record. Drops any
-    pre-existing ``path.1`` before rotating. Idempotent on small files.
+    pre-existing ``path.1`` before rotating. Idempotent on missing files.
     """
     try:
-        if not path.exists() or path.stat().st_size <= max_bytes:
+        if not path.exists():
+            return
+        if not always and path.stat().st_size <= max_bytes:
             return
         backup = path.with_suffix(path.suffix + ".1")
         if backup.exists():
