@@ -273,13 +273,16 @@ Instead:
 
 1. Fix the issue in a new commit on `main`.
 2. Push the fix commit.
-3. Create a new patch tag: `git tag vX.Y.Z+1` (e.g. `v1.12.1` if `v1.12.0`
+3. Create a new patch tag: `git tag vX.Y.Z+1` (e.g. `v1.12.3` if `v1.12.2`
    was broken), push it.
 4. Update CHANGELOG with a brief PATCH entry describing the regression and fix.
 
 **Diagnostics for user-reported breakage:** the crash log lives at
-`$TMPDIR/claude-aio-monitor/monitor-crash.log` (rotated to
-`monitor-crash.log.1` at 1 MB via `shared.rotate_crash_log`). Ask users to
+`$TMPDIR/claude-aio-monitor/monitor-crash.log`. Since v1.12.2 the previous
+traceback is always preserved as `monitor-crash.log.1` (the rotation runs
+on every crash via `shared.rotate_crash_log(..., always=True)`; the 1 MB
+size guard still applies when callers use the default `always=False`).
+Ask users to
 share the last 50 lines. The log includes full traceback, platform,
 Python version, and encoding details.
 
