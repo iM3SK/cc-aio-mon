@@ -25,6 +25,7 @@ import time
 from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, DATA_DIR, RESERVED_SIDS,
+                    SCHEMA_VERSION,
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
                     R, B, C_RED, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
@@ -284,10 +285,12 @@ def write_shared_state(data: dict):
         return
     base = DATA_DIR
 
-    # Serialize once — same rules for snapshot and history (avoid TypeError mid-write)
+    # Serialize once — same rules for snapshot and history (avoid TypeError mid-write).
+    # _schema_version tags the file-IPC contract: monitor reads it; older snapshots
+    # already on disk after a `git pull` are tolerated (treated as v0 = pre-tag).
     try:
-        snapshot = json.dumps(data)
-        entry = json.dumps({**data, "t": time.time()})
+        snapshot = json.dumps({**data, "_schema_version": SCHEMA_VERSION})
+        entry = json.dumps({**data, "_schema_version": SCHEMA_VERSION, "t": time.time()})
     except (TypeError, ValueError):
         return
 

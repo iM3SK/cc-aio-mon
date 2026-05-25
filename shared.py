@@ -14,6 +14,12 @@ import tempfile
 import time
 import unicodedata
 
+# Platform-conditional lock primitives used by acquire_singleton_lock().
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
 MIN_EPOCH = 1_577_836_800  # 2020-01-01 — reject implausible timestamps
 
 # Session IDs / file stems reserved for internal use. Never valid session names.
@@ -37,7 +43,14 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.11.1"
+VERSION = "1.12.0"
+
+# File-IPC contract version. Statusline writes this field on every snapshot
+# and history entry; bumped when the JSON shape changes incompatibly. Monitor
+# currently reads snapshots via dict.get(), so an unknown _schema_version is
+# silently ignored — making the tag future-proof but advisory today. A future
+# monitor read site (e.g. read_session_snapshot) can gate on this value.
+SCHEMA_VERSION = 1
 
 
 def ensure_utf8_stdout():
@@ -314,6 +327,126 @@ def run_git(args, cwd, timeout=15):
         encoding="utf-8", errors="replace",
         timeout=timeout, env=_git_env(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Update / lifecycle helpers — extracted from monitor.py + update.py to remove
+# parallel implementations. CLI (update.py) and TUI (monitor.py) consume these
+# differently (CLI: sys.exit on error; TUI: warn-and-continue), but the
+# underlying parsing / IO is identical.
+# ---------------------------------------------------------------------------
+
+
+def check_syntax_after_pull(repo_root, py_files=None):
+    """Compile each .py file under ``repo_root`` to catch syntax errors after
+    a self-update. Returns a list of relative filenames that failed to compile
+    (empty when all files pass). Files missing from disk are silently skipped;
+    unreadable / oversized files (>MAX_FILE_SIZE) count as failures.
+
+    Shared by update.py:apply_update() (CLI) and monitor.py:_apply_update_worker()
+    (TUI background thread) — they used to carry byte-for-byte duplicate loops.
+    """
+    if py_files is None:
+        py_files = PY_FILES
+    bad = []
+    for f in py_files:
+        fp = repo_root / f
+        if not fp.exists():
+            continue
+        raw = safe_read(fp, MAX_FILE_SIZE)
+        if raw is None:
+            bad.append(f)
+            continue
+        try:
+            compile(raw.decode("utf-8", errors="replace"), str(fp), "exec")
+        except SyntaxError:
+            bad.append(f)
+    return bad
+
+
+def parse_ahead_behind(rev_list_output):
+    """Parse the output of ``git rev-list --left-right --count HEAD...origin/main``
+    and return ``(ahead, behind)``. Raises ValueError if the output cannot be
+    parsed into two integers.
+
+    Left side = HEAD = ahead. Right side = origin/main = behind.
+    Callers that need ``(behind, ahead)`` (e.g. update.py:get_ahead_behind)
+    can swap on the return — keeping the parser canonical here.
+    """
+    parts = rev_list_output.strip().split()
+    if len(parts) != 2:
+        raise ValueError(f"Unexpected rev-list output: {rev_list_output!r}")
+    return int(parts[0]), int(parts[1])
+
+
+def rotate_crash_log(path, max_bytes=MAX_FILE_SIZE):
+    """Rotate ``path`` to ``path.1`` when its size exceeds ``max_bytes``.
+
+    Best-effort: any OSError is silently swallowed so the calling crash-log
+    writer never crashes the process it is trying to record. Drops any
+    pre-existing ``path.1`` before rotating. Idempotent on small files.
+    """
+    try:
+        if not path.exists() or path.stat().st_size <= max_bytes:
+            return
+        backup = path.with_suffix(path.suffix + ".1")
+        if backup.exists():
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+        path.replace(backup)
+    except OSError:
+        pass
+
+
+def acquire_singleton_lock(lock_path):
+    """Try to acquire an exclusive non-blocking file lock at ``lock_path``.
+
+    Returns the open file handle on success — the caller MUST keep a strong
+    reference (typically a module-level variable) so the lock is held for the
+    process lifetime. The OS releases the lock when the process exits.
+
+    Returns None if another process already holds the lock, or if the lock
+    file cannot be opened. Cross-platform: msvcrt on Windows, fcntl elsewhere.
+    Best-effort PID write into the file for human inspection — failure to
+    write the PID does not invalidate the held lock.
+    """
+    try:
+        fh = open(lock_path, "a+")
+    except OSError:
+        return None
+    try:
+        if sys.platform == "win32":
+            # msvcrt.locking requires the byte range to actually exist in the
+            # file. On a fresh / empty lock file LK_NBLCK on byte 0 is OS-
+            # dependent; write a placeholder byte first so the lock has a
+            # region to grab regardless of prior file size.
+            try:
+                fh.seek(0, 2)  # end of file
+                if fh.tell() == 0:
+                    fh.write("\0")
+                    fh.flush()
+                fh.seek(0)
+            except OSError:
+                pass
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, IOError):
+        try:
+            fh.close()
+        except OSError:
+            pass
+        return None
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except OSError:
+        pass
+    return fh
 
 
 def calc_rates(hist):

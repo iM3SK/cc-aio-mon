@@ -39,6 +39,8 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     DATA_DIR, VERSION_RE, VERSION, PY_FILES,
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     extract_changelog_entry,
+                    check_syntax_after_pull, parse_ahead_behind,
+                    rotate_crash_log, acquire_singleton_lock,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
 
@@ -254,6 +256,7 @@ def _calc_streaks(active_days):
 # ---------------------------------------------------------------------------
 IS_WIN = platform.system() == "Windows"
 _term_state = None
+_orig_console_output_cp = None  # Windows: saved by _setup_term, restored by _restore_term
 
 if IS_WIN:
     import ctypes
@@ -269,15 +272,35 @@ if IS_WIN:
         return None
 
     def _setup_term():
-        """Enable VT/ANSI processing on Windows console.
+        """Enable VT/ANSI processing AND switch console output to UTF-8.
+
+        Without code-page 65001 (CP_UTF8), Slovak/Czech/etc. characters in
+        session names, AI titles, model labels — which `statusline.py` writes
+        as UTF-8 bytes — render as mojibake on Windows locales whose default
+        console code page isn't UTF-8 (e.g. CP1250 on SK Windows: `ť` displays
+        as `Ĺĺ`). Saves the original CP for _restore_term.
 
         If SetConsoleMode fails (pre-Win10, or redirected handle), ANSI
         sequences render as raw text — best-effort, can't recover here.
         """
         ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
         ENABLE_PROCESSED_OUTPUT = 0x0001
+        CP_UTF8 = 65001
+        global _orig_console_output_cp
         try:
             kernel32 = ctypes.windll.kernel32
+            # Save current output CP first so _restore_term can put it back
+            try:
+                _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
+            except Exception:
+                _orig_console_output_cp = None
+            # Switch console output to UTF-8 — `ensure_utf8_stdout()` makes
+            # Python write UTF-8 bytes, this makes the Windows console
+            # interpret them as UTF-8 instead of the locale default.
+            try:
+                kernel32.SetConsoleOutputCP(CP_UTF8)
+            except Exception:
+                pass
             handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
             if handle == -1 or handle == 0:
                 return
@@ -293,7 +316,16 @@ if IS_WIN:
             pass
 
     def _restore_term():
-        pass
+        """Restore the original console output code page on exit so we don't
+        leave the user's console in UTF-8 mode after monitor quits."""
+        global _orig_console_output_cp
+        if _orig_console_output_cp is None:
+            return
+        try:
+            ctypes.windll.kernel32.SetConsoleOutputCP(_orig_console_output_cp)
+        except Exception:
+            pass
+        _orig_console_output_cp = None
 
 else:
     import select
@@ -579,6 +611,31 @@ def _rls_blink():
     return _rls_blink_on
 
 
+def _baseline_delta(entries, cutoff_ts):
+    """Compute cost delta within a time window via baseline subtraction.
+
+    Walks ``entries`` (sorted ascending by ``t``) and partitions on ``cutoff_ts``:
+    baseline = last entry strictly before cutoff (or first entry at/after
+    cutoff if none precedes), final = last entry at/after cutoff. Returns
+    ``max(0.0, final - baseline)`` so negative deltas (CC bug or reset) clip
+    to zero. Returns 0.0 for an empty window.
+    """
+    baseline = None
+    final = 0.0
+    first_in_window = None
+    for e in entries:
+        cost = _num((e.get("cost") or {}).get("total_cost_usd"))
+        if _num(e.get("t"), 0) < cutoff_ts:
+            baseline = cost
+        else:
+            if first_in_window is None:
+                first_in_window = cost
+            final = cost
+    if baseline is None:
+        baseline = first_in_window or 0.0
+    return max(0.0, final - baseline)
+
+
 def calc_cross_session_costs():
     """Aggregate cost across all sessions for today and this week."""
     if not DATA_DIR.exists() or not is_safe_dir(DATA_DIR):
@@ -616,36 +673,8 @@ def calc_cross_session_costs():
         if not entries:
             continue
         entries.sort(key=lambda e: _num(e.get("t"), 0))
-        # Today cost = last entry today - baseline (last entry before today, or first entry today)
-        baseline_today = None
-        final_today = 0.0
-        first_today = None
-        for e in entries:
-            cost = _num((e.get("cost") or {}).get("total_cost_usd"))
-            if _num(e.get("t"), 0) < today_start:
-                baseline_today = cost
-            else:
-                if first_today is None:
-                    first_today = cost
-                final_today = cost
-        if baseline_today is None:
-            baseline_today = first_today or 0.0
-        today_total += max(0.0, final_today - baseline_today)
-        # Week cost
-        baseline_week = None
-        final_week = 0.0
-        first_week = None
-        for e in entries:
-            cost = _num((e.get("cost") or {}).get("total_cost_usd"))
-            if _num(e.get("t"), 0) < week_start:
-                baseline_week = cost
-            else:
-                if first_week is None:
-                    first_week = cost
-                final_week = cost
-        if baseline_week is None:
-            baseline_week = first_week or 0.0
-        week_total += max(0.0, final_week - baseline_week)
+        today_total += _baseline_delta(entries, today_start)
+        week_total += _baseline_delta(entries, week_start)
     return today_total, week_total
 
 
@@ -657,6 +686,30 @@ def cached_cross_session_costs(ttl=30.0):
     today, week = calc_cross_session_costs()
     _cost_cache.update({"t": now, "today": today, "week": week})
     return today, week
+
+
+# Session picker cache — main-thread only, mirrors _cost_cache contract.
+# Picker mode renders 20x/sec; list_sessions() does full DATA_DIR scan + per-session
+# JSON parse + AI-title extraction. 1 s TTL drops repeated scans to ~1 Hz while
+# remaining visually fresh (sessions don't appear or disappear faster than ~1 Hz
+# in practice). Audit P1-3 (24.05.2026).
+_sessions_cache = {"t": 0.0, "sessions": None}
+
+
+def cached_list_sessions(ttl=1.0):
+    """Cached version of list_sessions for the picker hot loop.
+
+    Returns the cached list (same reference) if within ttl; otherwise rescans.
+    Use this from the picker render loop; direct list_sessions() callers
+    (one-shot CLI --list, etc.) can stay direct to avoid stale-cache reads.
+    """
+    now = time.monotonic()
+    cached = _sessions_cache["sessions"]
+    if cached is not None and now - _sessions_cache["t"] < ttl:
+        return cached
+    sessions = list_sessions()
+    _sessions_cache.update({"t": now, "sessions": sessions})
+    return sessions
 
 
 # ---------------------------------------------------------------------------
@@ -1199,7 +1252,7 @@ def _safe_transcript_path(tp):
 _AI_TITLE_CACHE = OrderedDict()  # LRU: {sid: (ts, mtime, title_or_None)}
 _AI_TITLE_CACHE_MAX = 64
 _AI_TITLE_TTL = 30.0
-_AI_TITLE_SCAN_BYTES = 512 * 1024  # CC writes ai-title within first ~20 records (<50 KiB)
+_AI_TITLE_SCAN_BYTES = 64 * 1024  # CC writes ai-title within first ~20 records (<50 KiB); 64 KiB head suffices and is ~8x faster on cache miss than the prior 512 KiB cap
 
 
 def _scan_ai_title(transcript_path):
@@ -1737,6 +1790,16 @@ def render_menu(cols, rows):
 _update_result = None  # None=not run, str=output message
 _update_lock = threading.Lock()
 
+# Update modal git-helper cache — 30s TTL, invalidated on remote_ver change.
+# Eliminates per-tick (50ms) synchronous git subprocess spam from render path
+# while the update modal is open. See audit P0-1 (24.05.2026).
+_update_modal_cache = {
+    "commits_ts": 0.0, "commits_ver": None, "commits": [],
+    "changelog_ts": 0.0, "changelog_ver": None, "changelog": [],
+    "checks_ts": 0.0, "checks": [],
+}
+_UPDATE_MODAL_TTL = 30.0
+
 
 def _git_cmd(args, timeout=15):
     """Run git command in repo root, return (returncode, stdout, stderr).
@@ -1761,11 +1824,12 @@ def _update_checks():
         warns.append("Uncommitted changes in working tree")
     rc, out, _ = _git_cmd(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
     if rc == 0:
-        parts = out.split()
-        if len(parts) == 2:
-            ahead, behind = int(parts[0]), int(parts[1])
-            if ahead > 0 and behind > 0:
-                warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+        try:
+            ahead, behind = parse_ahead_behind(out)
+        except ValueError:
+            ahead = behind = 0
+        if ahead > 0 and behind > 0:
+            warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
     return warns
 
 
@@ -1788,6 +1852,64 @@ def _get_remote_changelog_preview(version, max_lines=15):
     return entry.split("\n")
 
 
+def _cached_get_new_commits(remote_ver, max_lines=10):
+    """30s TTL cache around _get_new_commits, invalidated on remote_ver change."""
+    now = time.monotonic()
+    with _update_lock:
+        if (_update_modal_cache["commits_ver"] == remote_ver
+                and now - _update_modal_cache["commits_ts"] < _UPDATE_MODAL_TTL):
+            return _update_modal_cache["commits"]
+    # Cache miss — release lock during git call to keep other render-path callers responsive
+    commits = _get_new_commits(max_lines=max_lines)
+    with _update_lock:
+        _update_modal_cache["commits_ts"] = now
+        _update_modal_cache["commits_ver"] = remote_ver
+        _update_modal_cache["commits"] = commits
+    return commits
+
+
+def _cached_get_remote_changelog_preview(version, max_lines=15):
+    """30s TTL cache around _get_remote_changelog_preview, invalidated on version change."""
+    now = time.monotonic()
+    with _update_lock:
+        if (_update_modal_cache["changelog_ver"] == version
+                and now - _update_modal_cache["changelog_ts"] < _UPDATE_MODAL_TTL):
+            return _update_modal_cache["changelog"]
+    cl = _get_remote_changelog_preview(version, max_lines=max_lines)
+    with _update_lock:
+        _update_modal_cache["changelog_ts"] = now
+        _update_modal_cache["changelog_ver"] = version
+        _update_modal_cache["changelog"] = cl
+    return cl
+
+
+def _cached_update_checks():
+    """30s TTL cache around _update_checks (3 git subprocess calls)."""
+    now = time.monotonic()
+    with _update_lock:
+        if now - _update_modal_cache["checks_ts"] < _UPDATE_MODAL_TTL:
+            return _update_modal_cache["checks"]
+    warns = _update_checks()
+    with _update_lock:
+        _update_modal_cache["checks_ts"] = now
+        _update_modal_cache["checks"] = warns
+    return warns
+
+
+def _invalidate_update_modal_cache():
+    """Drop cached update-modal git results — called after a successful pull
+    so the modal immediately reflects post-update state (no stale 'commits ahead')."""
+    with _update_lock:
+        _update_modal_cache["commits_ts"] = 0.0
+        _update_modal_cache["commits_ver"] = None
+        _update_modal_cache["commits"] = []
+        _update_modal_cache["changelog_ts"] = 0.0
+        _update_modal_cache["changelog_ver"] = None
+        _update_modal_cache["changelog"] = []
+        _update_modal_cache["checks_ts"] = 0.0
+        _update_modal_cache["checks"] = []
+
+
 def _set_update_result(value):
     global _update_result
     with _update_lock:
@@ -1804,20 +1926,12 @@ def _apply_update_worker():
     try:
         rc, out, err = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
         if rc == 0:
+            # Drop modal git cache so post-pull state (no commits ahead, etc.)
+            # is reflected immediately on the next render.
+            _invalidate_update_modal_cache()
             # Syntax check via compile() — avoids interpreter version mismatch.
-            # Uses shared.PY_FILES so update.py and this worker cover the same set.
-            bad = []
-            for f in PY_FILES:
-                fp = _REPO_ROOT / f
-                if fp.exists():
-                    raw = safe_read(fp, MAX_FILE_SIZE)
-                    if raw is None:
-                        bad.append(f)
-                        continue
-                    try:
-                        compile(raw.decode("utf-8", errors="replace"), str(fp), "exec")
-                    except SyntaxError:
-                        bad.append(f)
+            # Shared with update.py CLI so both paths cover identical file set.
+            bad = check_syntax_after_pull(_REPO_ROOT)
             if bad:
                 _set_update_result(f"Updated but syntax errors in: {', '.join(bad)}")
             else:
@@ -1870,8 +1984,8 @@ def render_update_modal(cols, rows):
     buf.append(f"{C_CYN}github.com/iM3SK/cc-aio-mon{R}")
 
     if rls_s == "update" and remote_ver:
-        # Show new commits
-        commits = _get_new_commits()
+        # Show new commits — cached so we don't spam git subprocess every 50ms tick
+        commits = _cached_get_new_commits(remote_ver)
         if commits:
             buf.append("")
             buf.append(f"{C_WHT}{B}NEW COMMITS{R}")
@@ -1879,8 +1993,8 @@ def render_update_modal(cols, rows):
             for c_line in commits:
                 buf.append(f"{C_DIM}{_sanitize(c_line)}{R}")
 
-        # Changelog preview
-        cl = _get_remote_changelog_preview(remote_ver)
+        # Changelog preview — cached
+        cl = _cached_get_remote_changelog_preview(remote_ver)
         if cl:
             buf.append("")
             buf.append(f"{C_WHT}{B}CHANGELOG{R}")
@@ -1888,8 +2002,8 @@ def render_update_modal(cols, rows):
             for c_line in cl:
                 buf.append(f"{C_DIM}{_sanitize(c_line)}{R}")
 
-        # Safety warnings
-        warns = _update_checks()
+        # Safety warnings — cached (3 git subprocess calls inside)
+        warns = _cached_update_checks()
         if warns:
             buf.append("")
             buf.append(f"{C_RED}{B}WARNINGS{R}")
@@ -2341,6 +2455,9 @@ def _install_crash_logger():
         try:
             if ensure_data_dir(DATA_DIR):
                 log_path = DATA_DIR / "monitor-crash.log"
+                # Rotate before each crash write so the log never grows unbounded
+                # across many crash cycles (keeps last large crash + current one).
+                rotate_crash_log(log_path)
                 with open(log_path, "w", encoding="utf-8") as f:
                     f.write(f"monitor v{VERSION} crashed at {time.ctime()}\n")
                     f.write(f"platform: {sys.platform}, python: {sys.version}\n")
@@ -2353,6 +2470,11 @@ def _install_crash_logger():
         sys.__excepthook__(exc_type, exc_value, tb)
 
     sys.excepthook = excepthook
+
+
+# Module-level handle for the singleton lock. MUST stay alive for the process
+# lifetime — Python would otherwise GC the file object and release the lock.
+_SINGLETON_LOCK_HANDLE = None
 
 
 def main():
@@ -2385,6 +2507,19 @@ def main():
             nm = s["session_name"] or s.get("ai_title") or "--"
             print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag}")
         return
+
+    # Singleton lock — interactive monitor only. Two concurrent dashboards
+    # would race on snapshot polling and corrupt the crash log; --list is
+    # exempt because it is a one-shot non-interactive read.
+    global _SINGLETON_LOCK_HANDLE
+    if ensure_data_dir(DATA_DIR):
+        _SINGLETON_LOCK_HANDLE = acquire_singleton_lock(DATA_DIR / "monitor.lock")
+        if _SINGLETON_LOCK_HANDLE is None:
+            sys.exit(
+                "Error: another monitor.py instance is already running.\n"
+                f"Lock file: {DATA_DIR / 'monitor.lock'} (inspect for PID)\n"
+                "Close the other instance, or delete the lock file if it is stale."
+            )
 
     # Terminal capability checks — must run before any ANSI output
     if not sys.stdout.isatty():
@@ -2579,9 +2714,10 @@ def main():
                 time.sleep(tick)
                 continue
 
-            # Auto-detect / pick session
+            # Auto-detect / pick session — cached so the 20Hz picker loop
+            # doesn't rescan DATA_DIR every tick (audit P1-3)
             if sid is None:
-                sessions = list_sessions()
+                sessions = cached_list_sessions()
                 active = [s for s in sessions if not s["stale"]]
                 if len(active) == 1 and len(sessions) == 1 and not force_picker:
                     sid = active[0]["id"]
