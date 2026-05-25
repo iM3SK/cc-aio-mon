@@ -48,12 +48,24 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         echo "BLOCKED: OpenAI API key pattern (sk-proj-*) in diff" >&2
         fail=1
     fi
-    if echo "$diff_text" | grep -qE -- 'AKIA[0-9A-Z]{16}'; then
-        echo "BLOCKED: AWS Access Key ID pattern in diff" >&2
+    if echo "$diff_text" | grep -qE -- '(AKIA|ASIA)[0-9A-Z]{16}'; then
+        echo "BLOCKED: AWS Access Key ID pattern (AKIA/ASIA) in diff" >&2
         fail=1
     fi
-    if echo "$diff_text" | grep -qE -- 'ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{40,}'; then
-        echo "BLOCKED: GitHub Personal Access Token pattern in diff" >&2
+    if echo "$diff_text" | grep -qE -- 'ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{40,}|gh[suor]_[a-zA-Z0-9]{36,}'; then
+        echo "BLOCKED: GitHub token pattern (ghp/ghs/ghu/gho/ghr/github_pat) in diff" >&2
+        fail=1
+    fi
+    if echo "$diff_text" | grep -qE -- 'AIza[0-9A-Za-z_-]{35}'; then
+        echo "BLOCKED: Google API key pattern (AIza...) in diff" >&2
+        fail=1
+    fi
+    if echo "$diff_text" | grep -qE -- 'xox[baprs]-[0-9]{10,}-[0-9]{10,}-[a-zA-Z0-9]{20,}'; then
+        echo "BLOCKED: Slack token pattern (xox[baprs]-...) in diff" >&2
+        fail=1
+    fi
+    if echo "$diff_text" | grep -qE -- '(sk|rk|pk)_(live|test)_[a-zA-Z0-9]{20,}'; then
+        echo "BLOCKED: Stripe key pattern (sk_live/sk_test/rk_live/pk_live) in diff" >&2
         fail=1
     fi
     if echo "$diff_text" | grep -qE -- '-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'; then

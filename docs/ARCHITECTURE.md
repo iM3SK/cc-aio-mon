@@ -1,0 +1,301 @@
+# CC AIO MON — Architecture Overview
+
+> v1.12.0 · Target reader: new contributor who just cloned the repo.
+> Goal: understand "where is what and how do things relate" in ~10 minutes.
+> For the full feature reference see [README.md](Archyv/cc-aio-mon/README.md).
+> For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
+
+---
+
+## 1. Project Shape
+
+**CC AIO MON is a real-time terminal monitor for Claude Code CLI.** It surfaces
+context-window usage, API rate limits, session cost, burn rate, and cache
+performance in a compact TUI dashboard. It is an independent community project —
+not affiliated with Anthropic — and interacts with Claude Code exclusively
+through the documented `statusLine` stdin hook and the user's own local files.
+
+The project exists because every alternative either scrapes log files or
+estimates from token counts. CC AIO MON reads the **official Claude Code
+statusline JSON** — the same data Claude Code uses internally — so the numbers
+are authoritative and real-time.
+
+Design center: five runtime Python files, stdlib only, no build step, no pip
+install. Python 3.8+ on Windows, macOS, and Linux.
+
+---
+
+## 2. Two Processes
+
+The architecture is split into two independent OS processes with deliberately
+separate lifecycles.
+
+**statusline.py — short-lived, N instances**
+
+Claude Code launches `statusline.py` as a subprocess on every statusline event
+(each assistant message, permission mode change, or vim mode toggle, with a
+300 ms debounce on Claude Code's side). The script reads one JSON payload from
+stdin, renders one ANSI status line to stdout, writes the IPC files, and exits.
+Multiple Claude Code sessions run simultaneously, each spawning their own
+`statusline.py` instance writing to a different `{session_id}.json` file.
+Claude Code owns this lifecycle entirely.
+
+**monitor.py — long-lived, 1 instance**
+
+The user launches `monitor.py` once in a separate terminal. It runs until the
+user presses `q` or kills the process. It polls the IPC files at a 500 ms
+data-refresh interval (50 ms tick for keyboard responsiveness) and renders a
+fullscreen TUI dashboard. A singleton lock (`monitor.lock`, acquired via
+`fcntl.flock` on Unix / `msvcrt.locking` on Windows, see `shared.acquire_singleton_lock`)
+prevents two concurrent dashboard instances from racing the same files.
+
+**Why split?** Claude Code can only hook into statusline.py (short-lived, per
+event). A persistent TUI cannot live inside that subprocess. The temp-file IPC
+lets both processes operate independently without sockets or shared memory.
+
+---
+
+## 3. Five Modules
+
+**statusline.py** — Entry point 1. Reads Claude Code's statusline JSON from
+stdin, renders the single-line ANSI status bar (Model, CTX, 5HL, 7DL, CST,
+BRN segments), and writes the IPC snapshot + history via `write_shared_state()`.
+Segment builders (`seg_model`, `seg_ctx`, `seg_5hl`, `seg_7dl`, `seg_cost`,
+`seg_brn`) each return `(text, visible_length)` and are dropped from the right
+by `build_line()` when the terminal is too narrow. On Windows, terminal width
+is queried via `CONOUT$` because Claude Code runs this script with all file
+descriptors piped (`_get_terminal_width`).
+
+**monitor.py** — Entry point 2 (interactive TUI). ~2 670 LOC. Owns the event
+loop, all `render_*` functions, the session picker, and three daemon worker
+threads (see Section 5). The crash logger (`_install_crash_logger`) writes
+uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
+otherwise swallow any traceback silently.
+
+**pulse.py** — Daemon thread module. Fetches `status.claude.com/api/v2/summary.json`
+and probes `api.anthropic.com/v1/messages` (any HTTP response counts as liveness).
+Computes a weighted 0–100 stability score (`compute_score`), smoothed via
+rolling median, and exposes the result via `get_pulse_snapshot()` (thread-safe
+read). Started idempotently from `monitor.main()` via `start_pulse_worker()`.
+Proxy env vars are scrubbed at import time via `install_opener` so Pulse
+fetches cannot be silently routed through an injected proxy.
+
+**update.py** — Entry point 3 (CLI self-updater). Read-only by default; add
+`--apply` to run `git pull --ff-only`. Guards: clean working tree, on `main`
+branch, no divergence. Creates a `pre-update-YYYYMMDD-HHMMSS` rollback tag
+before each pull. Runs `shared.check_syntax_after_pull()` on all five modules
+after the pull to catch broken updates before the user restarts. In-app update
+(`monitor.py` key `u` / `a`) uses the same shared logic (`_apply_update_worker`
+daemon thread).
+
+**shared.py** — The shared kernel. Single source of truth for: `VERSION`,
+`SCHEMA_VERSION`, `PY_FILES`, `DATA_DIR`, ANSI color palette, `WARN_PCT` /
+`CRIT_PCT` thresholds, `calc_rates()` (BRN/CTR computation from JSONL history),
+`load_history()`, `safe_read()`, `is_safe_dir()`, `ensure_data_dir()`,
+`run_git()` (minimal env whitelist), `acquire_singleton_lock()`,
+`rotate_crash_log()`, `check_syntax_after_pull()`, and `parse_ahead_behind()`.
+Imported by all four other modules; never run directly.
+
+---
+
+## 4. Data Flow
+
+```
+Claude Code
+    │
+    │  stdin JSON (one payload per event)
+    ▼
+statusline.py
+    │
+    ├─── stdout ──► single-line ANSI status bar (rendered in Claude Code's terminal)
+    │
+    └─── write_shared_state() ──► $TMPDIR/claude-aio-monitor/
+                                        ├── {session_id}.json    (atomic snapshot)
+                                        └── {session_id}.jsonl   (append-only history)
+                                                │
+                                                │  polled every 500 ms
+                                                ▼
+                                          monitor.py
+                                                │
+                                                └─── render_frame() ──► fullscreen TUI
+```
+
+```mermaid
+flowchart LR
+    CC["Claude Code\n(per-event subprocess)"]
+    SL["statusline.py\n(short-lived)"]
+    TMP[("$TMPDIR/claude-aio-monitor/\n{sid}.json  {sid}.jsonl")]
+    MON["monitor.py\n(long-running TUI)"]
+    TERM1["Claude Code terminal\n(single-line ANSI bar)"]
+    TERM2["Monitor terminal\n(fullscreen TUI)"]
+
+    CC -- "stdin JSON" --> SL
+    SL -- "stdout" --> TERM1
+    SL -- "atomic write\n(NamedTemporaryFile\n+ os.replace)" --> TMP
+    TMP -- "poll 500 ms" --> MON
+    MON -- "render_frame()" --> TERM2
+```
+
+The IPC contract: `statusline.write_shared_state()` serializes the full
+Claude Code payload plus `_schema_version` (= `shared.SCHEMA_VERSION`, currently
+`1`) and a Unix timestamp `t` into both the snapshot JSON and each JSONL history
+line. The schema version field is advisory today (monitor reads all fields via
+`dict.get()`) but exists to enable future non-backward-compatible changes.
+The canonical field list lives in `shared.py` constants and the v1.12.0
+CHANGELOG entry.
+
+`$TMPDIR` resolves to `/tmp` on macOS/Linux and `%TEMP%` on Windows
+(`pathlib.Path(tempfile.gettempdir()) / "claude-aio-monitor"`, defined as
+`shared.DATA_DIR`).
+
+---
+
+## 5. Threading Model in monitor.py
+
+`monitor.main()` runs a single-threaded event loop (the `while True:` at
+line ~2456). Three daemon threads run concurrently:
+
+| Thread | Spawned by | Purpose |
+|---|---|---|
+| `pulse-worker` | `pulse.start_pulse_worker()` | Fetch Anthropic status + ping API every 30 s |
+| `rls-check` (anonymous) | `_maybe_trigger_rls_check()` | Check GitHub for new release once per hour |
+| `update-apply` (anonymous) | `_start_apply_update()` | Run `git pull --ff-only` when user presses `a` |
+
+All three threads are `daemon=True`: they are killed automatically when the
+main thread exits, so they can never block the terminal restore or hang the
+process on `q`.
+
+**Lock inventory:**
+
+- `_rls_lock` (`threading.Lock`) — worker-spawn coordination; ensures only one
+  release-check thread runs at a time (acquired non-blocking in
+  `_maybe_trigger_rls_check`, released in `_rls_check_worker`).
+- `_rls_data_lock` (`threading.Lock`) — coherence for the three-field
+  `_rls_cache` dict (`version`, `status`, `checked_at`) accessed by both the
+  daemon writer and the main render thread.
+- `_update_lock` (`threading.Lock`) — protects `_update_result` (the shared
+  state between `_apply_update_worker` and `render_update_modal`).
+- `_SINGLETON_LOCK_HANDLE` (module-level file handle) — not a `threading.Lock`;
+  it is an OS-level file lock held via `msvcrt.locking` / `fcntl.flock` for
+  the process lifetime. Python must not GC it, hence the module-level reference.
+
+Inside `pulse.py`, `_snapshot_lock` and `_history_lock` guard the pulse
+snapshot dict and the rolling score/latency deques respectively.
+
+The main loop never blocks on network I/O. Every outbound call (status page,
+API ping, git fetch, git pull) is confined to a daemon thread, so the 50 ms
+keyboard tick is never delayed by a slow network.
+
+---
+
+## 6. External Dependencies
+
+All dependencies are runtime probes, not install-time requirements. Nothing
+in `requirements.txt` (there is none).
+
+| Dependency | Used by | Protocol | Required? |
+|---|---|---|---|
+| `git` CLI | `update.py`, `monitor.py` (`_rls_check_worker`, `_apply_update_worker`) | subprocess | Optional — update features degrade gracefully |
+| `status.claude.com` | `pulse.py:_fetch_summary()` | HTTPS (urllib) | Optional — disable with `CC_AIO_MON_NO_PULSE=1` |
+| `api.anthropic.com/v1/messages` | `pulse.py:_ping_api()` | HTTPS (urllib) | Optional — same opt-out |
+| GitHub (`origin/main`) | `_rls_check_worker`, `update.py` | HTTPS via `git fetch` | Optional — disable with `CC_AIO_MON_NO_UPDATE_CHECK=1` |
+| `~/.claude/projects/` | `monitor.py:scan_transcript_stats()` | local file | Optional — token stats modal reads transcripts |
+| `~/.claude/stats-cache.json` | `monitor.py` (lifetime stats panel) | local file | Optional — omitted silently when absent |
+
+`shared.run_git()` uses a minimal env whitelist (`_GIT_ENV_WHITELIST`) to strip
+injected `GIT_SSH_COMMAND`, `LD_PRELOAD`, and proxy vars before any subprocess
+invocation. `pulse.py` installs a no-proxy opener via `urllib.request.install_opener`
+at import time for the same reason.
+
+---
+
+## 7. Stdlib-Only Constraint
+
+The project ships zero third-party dependencies by design. This has two
+practical consequences:
+
+**No install friction.** Any Python 3.8+ installation can run the project
+immediately after `git clone`. No `pip install`, no venv activation, no version
+conflicts with other projects on the system.
+
+**Minimal security audit surface.** Supply-chain attacks via dependency confusion
+or compromised packages are not possible when there are no packages. The
+`Bandit` and `Scorecard` CI badges in the README cover the source itself.
+
+Trade-offs: no `pytest` (tests use `unittest`), no `httpx` / `aiohttp` (urllib
+is verbose but sufficient), no `rich` (ANSI rendering is hand-coded — see the
+`render_*` functions in `monitor.py` and the segment builders in `statusline.py`).
+The stdlib-only rule is enforced by convention and code review; there is no
+automated import check in CI.
+
+---
+
+## 8. Cross-Platform Notes
+
+The codebase runs on Windows, macOS, and Linux from a single source tree.
+Platform-specific code is isolated to a small number of call sites:
+
+**Terminal width** (`statusline._get_terminal_width`): on Windows, opens
+`CONOUT$` via `ctypes.windll.kernel32.CreateFileW` + `GetConsoleScreenBufferInfo`
+because Claude Code's subprocess context pipes all standard fds. On Unix, opens
+`/dev/tty` and calls `fcntl.ioctl(TIOCGWINSZ)`.
+
+**VT100 / ANSI enable** (`update._enable_vt_on_windows`, `monitor._setup_term`):
+on Windows, calls `SetConsoleMode` with the `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+flag. On Unix, no action needed.
+
+**Keyboard input** (`monitor._getch`): on Windows, uses `msvcrt.kbhit` +
+`msvcrt.getwch`. On Unix, puts the terminal in raw mode via `termios` +
+`tty.setraw` and reads one character.
+
+**Singleton lock** (`shared.acquire_singleton_lock`): on Windows, uses
+`msvcrt.locking(fd, LK_NBLCK, 1)`. On Unix, uses `fcntl.flock(fd, LOCK_EX | LOCK_NB)`.
+
+**Reparse-point / junction rejection** (`shared.is_safe_dir`): on Windows,
+checks `st.st_file_attributes & 0x400` (`FILE_ATTRIBUTE_REPARSE_POINT`).
+On Unix, `lstat` + `S_ISDIR` is sufficient because symlinks are not directories.
+
+CI tests run on Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12),
+and macOS (Python 3.12), as shown by the `Tests` badge in the README.
+
+---
+
+## 9. v1.12.0 Lifecycle Additions
+
+Three reliability features landed together in v1.12.0 (2026-05-22):
+
+**Singleton lock.** `monitor.main()` calls `shared.acquire_singleton_lock(DATA_DIR / "monitor.lock")`
+after the `--list` early-return. A second interactive instance exits immediately
+with a human-readable error pointing to the lock file. The lock file contains
+the holder's PID for diagnosis. `--list` mode is intentionally exempt because
+it is a one-shot non-interactive read.
+
+**Crash-log rotation.** `_install_crash_logger()` now calls
+`shared.rotate_crash_log(log_path)` before each crash write. This keeps
+`monitor-crash.log` bounded at 1 MB (rotated to `monitor-crash.log.1`),
+preventing unbounded growth across repeated crash cycles.
+
+**File-IPC schema version.** `shared.SCHEMA_VERSION = 1` is stamped into every
+snapshot and JSONL entry by `statusline.write_shared_state()`. Monitor reads all
+fields via `dict.get()` so old snapshots on disk are silently tolerated. The
+version field exists to make future incompatible shape changes detectable.
+
+Two duplicate code paths were also consolidated: `shared.check_syntax_after_pull()`
+replaces byte-for-byte copies in `monitor._apply_update_worker` and
+`update.apply_update`; `shared.parse_ahead_behind()` replaces duplicate parsers
+for `git rev-list --left-right --count` output in both files.
+
+---
+
+## 10. Where to Look for X
+
+| Goal | Start here |
+|---|---|
+| Change how burn rate or context rate is computed | `shared.calc_rates()` (shared.py:448) — reads last 120 JSONL history entries |
+| Change hardcoded model pricing | `monitor.py:_aggregate_session_cost()` (line 1269) and the per-model rate dicts above it |
+| Add a field to the IPC snapshot | `statusline.py:write_shared_state()` (line 278) → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` |
+| Add a new TUI modal | `monitor.py:render_frame()` (line 833) dispatches to `render_*` functions; add a new `render_xyz()` and wire a key in the event loop |
+| Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` (line 198) |
+| Change the Anthropic Pulse scoring weights | `pulse.py` constants `_W_INDICATOR`, `_W_INCIDENTS`, `_W_LATENCY` and `_INDICATOR_SCORE` / `_IMPACT_DEDUCT` dicts |
+| Add a new Python file to the project | Append the filename to `shared.PY_FILES` (shared.py:87) — this propagates to the post-update syntax check and the compile-check in the test suite |
+| Understand the session file format | `statusline.py:write_shared_state()` writes it; `monitor.py:load_state()` reads it; field names mirror the Claude Code statusline JSON protocol keys |

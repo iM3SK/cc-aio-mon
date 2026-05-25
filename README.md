@@ -41,9 +41,9 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 
 | Platform | Guide |
 |----------|-------|
-| [Windows](docs/setup-windows.md) | Python Launcher (`py`), Windows Terminal, PowerShell |
-| [macOS](docs/setup-macos.md) | python3, Terminal.app or iTerm2 |
-| [Linux](docs/setup-linux.md) | python3, any truecolor terminal |
+| [Windows](setup-windows.md) | Python Launcher (`py`), Windows Terminal, PowerShell |
+| [macOS](setup-macos.md) | python3, Terminal.app or iTerm2 |
+| [Linux](setup-linux.md) | python3, any truecolor terminal |
 
 ## Features
 
@@ -76,6 +76,10 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). Also shows cache savings percentage and burn rate over time bars. When non-zero, **WSR / WFR** rows surface server-side tool calls (`web_search_requests` / `web_fetch_requests` from `usage.server_tool_use`) and **TIE / T5M** rows split cache-creation tokens between the 1-hour and 5-minute ephemeral TTLs.
 - **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.claude.com` (indicator + incidents) + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku) — prefers `incidents[].components[]` array, falls back to regex on title. JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`) with Windows reserved-device-name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink/junction rejection on the temp data directory and `~/.claude/projects/`, transcript containment checks, and bounded reads for JSON, JSONL, transcripts, Pulse responses, and post-update source checks.
+- **Singleton lock** — only one interactive `py monitor.py` can run at a time; a second attempt exits with a clear error pointing at `$TMPDIR/claude-aio-monitor/monitor.lock`. The `--list` mode is exempt.
+- **Crash-log rotation** — `monitor-crash.log` rotates to `.log.1` at 1 MB so repeated crashes don't fill the disk.
+- **File-IPC schema versioning** — snapshots and history entries now carry `_schema_version` for forward-compatibility; see [docs/FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
+- **Test suite reorganization** — tests are now under `tests/`; existing `py tests.py` invocations still work via discovery.
 
 ## Session States
 
@@ -260,9 +264,9 @@ export CLAUDE_STATUS_CRIT=90
 
 Platform-specific troubleshooting is in the setup guides:
 
-- [Windows — Troubleshooting](docs/setup-windows.md#troubleshooting)
-- [macOS — Troubleshooting](docs/setup-macos.md#troubleshooting)
-- [Linux — Troubleshooting](docs/setup-linux.md#troubleshooting)
+- [Windows — Troubleshooting](setup-windows.md#troubleshooting)
+- [macOS — Troubleshooting](setup-macos.md#troubleshooting)
+- [Linux — Troubleshooting](setup-linux.md#troubleshooting)
 
 ## Updating
 
@@ -306,6 +310,13 @@ The path in `settings.json` does not change between versions — `git pull` upda
 
 After updating, restart Claude Code to pick up the new statusline. Optionally re-run `check-requirements.ps1` / `check-requirements.sh` from the repo directory to verify system requirements still pass.
 
+## Documentation
+
+- [docs/ARCHITECTURE.md](ARCHITECTURE.md) — contributor-oriented architecture overview
+- [docs/FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md) — schema of the two-process file IPC
+- [docs/RELEASE.md](RELEASE.md) — release process checklist
+- [.github/SECURITY.md](.github/SECURITY.md) — security policy
+
 ## Contributing
 
 Contributions welcome. Keep it stdlib only, ship `shared.py` alongside entry scripts, test on Windows and Unix. Before submitting, run the test suite and the compile check (`python3` on macOS/Linux, `py` on Windows):
@@ -315,13 +326,15 @@ python3 tests.py
 python3 -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
 ```
 
+Tests live in `tests/` (per-module split as of v1.12.0); `python3 tests.py` runs them all via `unittest discover`. See CONTRIBUTING.md for full guidelines.
+
 The file list comes from `shared.PY_FILES` (single source of truth since v1.10.2). `update.py`'s post-pull syntax check uses the same tuple, so a new runtime module added to the project only needs to be appended to `PY_FILES` in one place.
 
-Open an issue first for anything non-trivial so the approach can be discussed before work begins. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
+Open an issue first for anything non-trivial so the approach can be discussed before work begins. See [`CONTRIBUTING.md`](Archyv/cc-aio-mon/CONTRIBUTING.md) for full guidelines.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE.md) for details.
+MIT License. See [LICENSE](Archyv/cc-aio-mon/LICENSE.md) for details.
 
 ## Legal & Affiliation
 
@@ -337,4 +350,4 @@ See [NOTICE](NOTICE.md) for full provenance, third-party references, and tradema
 
 ---
 
-[Changelog](CHANGELOG.md)
+[Changelog](Archyv/cc-aio-mon/CHANGELOG.md)
