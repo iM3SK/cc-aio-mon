@@ -330,11 +330,11 @@ Tests live in `tests/` (per-module split as of v1.12.0); `python3 tests.py` runs
 
 The file list comes from `shared.PY_FILES` (single source of truth since v1.10.2). `update.py`'s post-pull syntax check uses the same tuple, so a new runtime module added to the project only needs to be appended to `PY_FILES` in one place.
 
-Open an issue first for anything non-trivial so the approach can be discussed before work begins. See [`CONTRIBUTING.md`](Archyv/cc-aio-mon/CONTRIBUTING.md) for full guidelines.
+Open an issue first for anything non-trivial so the approach can be discussed before work begins. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
 
 ## License
 
-MIT License. See [LICENSE](Archyv/cc-aio-mon/LICENSE.md) for details.
+MIT License. See [LICENSE](LICENSE.md) for details.
 
 ## Legal & Affiliation
 
@@ -350,4 +350,4 @@ See [NOTICE](NOTICE.md) for full provenance, third-party references, and tradema
 
 ---
 
-[Changelog](Archyv/cc-aio-mon/CHANGELOG.md)
+[Changelog](CHANGELOG.md)

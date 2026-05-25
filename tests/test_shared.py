@@ -173,6 +173,42 @@ class TestEnsureDataDir(unittest.TestCase):
         finally:
             shutil.rmtree(str(base), ignore_errors=True)
 
+    def test_foreign_uid_owner_rejected(self):
+        """S-P2-1: directory owned by another UID must be refused (CWE-377/732).
+
+        Cross-platform: mocks the Unix branch via `hasattr(os, "geteuid")`
+        + `os.geteuid` so the regression guard runs everywhere — Windows
+        runners would silently skip the Unix branch otherwise.
+        """
+        import pathlib, shutil
+        from unittest.mock import patch
+        base = pathlib.Path(tempfile.mkdtemp())
+        target = base / "foreign"
+        target.mkdir()
+        # Mock: pretend we are running as Unix with a *different* UID than
+        # the one that owns `target` (st_uid). os.stat is real; only
+        # geteuid is patched. On real Unix we'd also need sys.platform to
+        # be non-win32, which is patched via sys-module attribute below.
+        try:
+            real_uid = target.stat().st_uid
+            with patch.object(sys, "platform", "linux"), \
+                 patch("os.geteuid", return_value=real_uid + 1, create=True):
+                # ensure os.geteuid attribute exists on Windows test runs
+                import os as _os
+                if not hasattr(_os, "geteuid"):
+                    _os.geteuid = lambda: real_uid + 1  # pragma: no cover
+                try:
+                    result = ensure_data_dir(target)
+                finally:
+                    if hasattr(_os, "geteuid") and _os.geteuid.__module__ == "tests.test_shared":
+                        del _os.geteuid
+            self.assertFalse(
+                result,
+                "ensure_data_dir must refuse a directory owned by another UID",
+            )
+        finally:
+            shutil.rmtree(str(base), ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # TestSessionAutoConnect — auto-connect condition logic

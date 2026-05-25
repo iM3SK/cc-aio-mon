@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.12.1 — 2026-05-25
+
+**Bug fixes — Windows / non-UTF-8 locale rendering:**
+- **Diacritic mojibake fix for `statusline.py` stdin (NEW-002).** `statusline.py:main` previously called `sys.stdin.read()`, which on non-UTF-8 Windows locales (CP1250 on SK, CP1252 on US, CP852 on legacy DOS-derived) used the locale codec to decode the bytes Claude Code emits on stdin. Slovak / Czech / Polish session names and `aiTitle` strings were mangled (`Kompletný` → `KompletnĂ˝`, `Vytvoriť` → `VytvoriĹĄ`) before `json.loads` ever ran, then persisted into the IPC snapshot — so the `monitor.py` NEW-001 console code-page fix in v1.12.0 alone could not recover them. `statusline.py` now reads stdin at the byte level (`sys.stdin.buffer.read()`) and decodes UTF-8 explicitly. End-to-end UTF-8 pipeline restored without any user-side `PYTHONUTF8=1` requirement. New regression test `TestStatuslineMainE2E::test_main_utf8_session_name_preserved_through_pipeline` pins the round-trip.
+- **Diacritic mojibake fix for `monitor.py --list` non-interactive output (NEW-003).** The one-shot `--list` mode bailed before `_setup_term()` (which only runs for the interactive TUI), so it never switched the Windows console output code page to 65001. Python wrote correct UTF-8 bytes but the console reinterpreted them through the locale CP, mangling diacritics in the listing even though the underlying snapshot file was correct. Added a slim `_set_console_utf8()` helper (Windows: `SetConsoleOutputCP(65001)`; Unix: no-op) and `main()` now calls it for every entry point before any print. Discovered during self-audit of the v1.12.1 batch; same UTF-8 hardening category as NEW-001 / NEW-002 so it ships together.
+
+**Hardening — defence in depth:**
+- **TOCTOU mitigation on transcript reads (S-P2-2, CWE-367).** `_scan_ai_title` and `scan_transcript_stats` now compare `os.fstat(fh.fileno()).st_ino + st_dev` against the pre-open `lstat` after each `open()`. A symlink or hard-link flip between path resolution and read no longer lets a different inode slip through; the file is skipped instead.
+- **UID-ownership guard on the data dir (S-P2-1, CWE-377/732).** `shared.ensure_data_dir` now refuses to use `$TMPDIR/claude-aio-monitor/` on Unix if `st_uid` differs from `os.geteuid()`. Defeats the predictable-temp-path pre-create attack on multi-user hosts. Guarded by `hasattr(os, "geteuid")` so Windows behaviour is unchanged.
+- **Windows: explicit exit on missing ANSI / VT support (A-P2-4).** `monitor.py:_setup_term` no longer silently falls through when `SetConsoleMode` rejects `ENABLE_VIRTUAL_TERMINAL_PROCESSING` (pre-Win10 conhost). Users now get a clear diagnostic listing workarounds (Windows Terminal, ConEmu, Cmder, mintty, or a Windows upgrade) instead of a TUI of raw escape sequences.
+
+**Performance — render-path discipline:**
+- **Release check moved out of `render_frame` (A-P2-1).** `_rls_maybe_check` is now invoked from the main event loop, not the render function. Per-frame trigger is gone (the helper was internally rate-limited, but the call itself paid a Python function-call cost on every 50 ms tick). Test render assertions are now deterministic without requiring `CC_AIO_MON_NO_UPDATE_CHECK=1` in each setUp.
+- **Pulse opener no longer process-global (A-P2-2).** `pulse.py` used `urllib.request.install_opener(...)` to scrub `HTTP(S)_PROXY` env vars from its fetches — but the install was process-global, surprising any other module that touched urllib. Replaced with a module-local `_OPENER` used directly by `_fetch_summary` / `_ping_api`. The env-scrub guarantee is unchanged; the cross-module side effect is gone.
+
+**Refactor — readability:**
+- **Rate-limit rendering DRY'd up (SIZE-002).** `5HL` and `7DL` blocks in `render_frame` were byte-for-byte identical except for data key, label, and window length. Both call sites now go through a single closure `_render_rate_limit(data_obj, label, window_sec)` colocated with its only caller.
+- **`scan_transcript_stats` split into three pieces (SIZE-003).** The 148-LOC monolith is now an orchestrator + `_iter_safe_transcripts` (containment + symlink + size + cutoff filter, yields `None` as truncation sentinel) + `_aggregate_transcript` (per-file parse + in-place aggregate). Security-sensitive path resolution and data-aggregation arithmetic are independently testable.
+- **`update.py` ANSI palette exception documented (DUP-002).** The basic 16-color palette in `update.py` looks like a duplicate of `shared.C_*` Nord truecolor, but it is intentional: `update.py` runs before any TUI / VT enablement and must remain readable on legacy consoles without 24-bit truecolor. Both palettes are pinned with a comment block and a `CONTRIBUTING.md` "What to keep in sync" bullet.
+- **Platform detection unified (DRY-001).** `platform.system() == "Windows"` → `sys.platform == "win32"` in `monitor.py` and `statusline.py`; `import platform` removed from both. DEBT-014 regression tests guard `signal` / `subprocess` / `bisect` / `traceback` module-level binding, **not** `platform`, so the unification is safe.
+- **Test helpers consolidated (T-P2-2).** `tests/_helpers.py::_strip_ansi` now uses `shared._ANSI_RE` (same canonical pattern as `_vlen`). The local `_ANSI_STRIP_RE` duplicate and its `re` import are gone — the shared pattern covers OSC sequences too, so coverage strictly increases.
+
+**Documentation:**
+- **`docs/CONFIGURATION.md` added (A-P2-3).** Authoritative catalog of every environment variable the app reads (`CC_AIO_MON_NO_UPDATE_CHECK`, `CC_AIO_MON_NO_PULSE`, `CLAUDE_STATUS_WARN` / `_CRIT`, `CLAUDE_WARN_BRN`, `TERM`, `COLUMNS`, `TMPDIR` / `TMP` / `TEMP`, `HOME` / `USERPROFILE`, `PYTHONUTF8`, `PYTHONIOENCODING`) with type, default, read site, effect, and the naming convention for new vars (`CC_AIO_MON_*` prefix).
+
+**Tests:**
+- **`time.time()` mocked in flaky countdown tests (T-P2-1).** `TestSeg5hl` / `TestSeg7dl::test_future_resets_shows_countdown` and `TestStartupCleanup::test_cleanup_drops_old_entries` now freeze the clock via `patch("statusline.time.time", ...)` / `patch("pulse.time.time", ...)` so test setup and code under test observe the same epoch. Eliminates sub-second race that could flip `"2h"` → `"1h 59m"` on slow CI.
+- **`datetime.now()` mocked in `TestCalcStreaks` (T-P2-6).** Class-level `setUp` patches `monitor.datetime` to a frozen `2026-05-25 12:00:00`, with `.strptime` delegated to the real implementation. Streak arithmetic is now deterministic regardless of when the suite runs.
+
+**Tests:** 585 passing (+2).
+
 ## v1.12.0 — 2026-05-25
 
 **New features — operational reliability:**

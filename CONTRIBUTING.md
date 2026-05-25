@@ -25,7 +25,7 @@
    `unittest discover tests/`, so the `py tests.py` invocation continues to work
    unchanged.
 
-   **Baseline: 583 tests passing (3 skipped on platforms missing optional artifacts).**
+   **Baseline: 585 tests passing (3 skipped on platforms missing optional artifacts).**
    Contributions must not reduce the passing count without explanation. If you add
    tests, put them in the file that matches the module under test — helpers go in
    `test_shared.py`, TUI logic in `test_monitor.py`, and so on.
@@ -50,6 +50,7 @@
   - **Helpers:** `_num`, `_sanitize`, `safe_read`, `f_tok`, `f_cost`, `f_dur`, `f_cd`, `char_width`, `is_safe_dir`, `ensure_data_dir`, `ensure_utf8_stdout`, `load_history`, `strip_context_suffix`, `compact_context_suffix`, `extract_changelog_entry`, `run_git`, `calc_rates`.
   - If you add a helper or constant that is (or could be) used by more than one module, put it in `shared.py` from day one.
   - **No parallel implementations** — a regression-guard test (`tests/test_shared.py::TestPyFilesSingleSourceOfTruth`) fails if the post-pull syntax-check loop reappears inline in `monitor.py` or `update.py` instead of delegating to `shared.check_syntax_after_pull`. Apply the same discipline to any future helper: extract to `shared.py`, have both consumers delegate.
+  - **Documented SSoT exception — `update.py` ANSI palette.** `update.py` defines its own basic 16-color palette (`GRN`, `YEL`, `RED`, `CYN`, `DIM`, `R`) instead of importing the Nord 24-bit truecolor `C_*` set from `shared.py`. Reason: `update.py` runs *before* any TUI / VT enablement and must remain readable on minimal terminals without 24-bit truecolor support (legacy Windows console, recovery shells). Truecolor escapes would render as garbled sequences there. If you change either palette, keep them independently consistent and update the comment block above `GRN = YEL = RED = ...` in `update.py`.
 - **`DATA_DIR`-dependent helpers need per-module wrappers.** If you add a helper to `shared.py` that resolves a path inside `DATA_DIR`, expose a thin wrapper in `monitor.py` and (if relevant) `statusline.py` that forwards `data_dir=DATA_DIR`. This preserves test monkey-patchability of the consumer module's `DATA_DIR` constant. Current examples: `monitor.load_history` and `statusline._load_history_for_rates`, both forwarding to `shared.load_history(sid, n, data_dir=DATA_DIR)`.
 
 ## File-IPC schema changes
@@ -72,9 +73,9 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 
 ## See also
 
-- [README.md](Archyv/cc-aio-mon/README.md) — feature overview, metrics, keyboard shortcuts, architecture
-- [docs/ARCHITECTURE.md](ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~2 670 LOC)
-- [docs/FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md) — canonical field schema for the statusline→monitor JSON contract and JSONL history entries
-- [CHANGELOG.md](Archyv/cc-aio-mon/CHANGELOG.md) — release history
+- [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~2 670 LOC)
+- [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md) — canonical field schema for the statusline→monitor JSON contract and JSONL history entries
+- [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting
 - [NOTICE](NOTICE.md) — legal notice and affiliation disclaimer

@@ -257,7 +257,7 @@ class TestPulseNetwork(unittest.TestCase):
             "components": [{"name": "API", "status": "operational"}],
             "incidents": [],
         }).encode("utf-8")
-        with patch("pulse.urllib.request.urlopen",
+        with patch("pulse._OPENER.open",
                    return_value=self._mock_response(payload)):
             data, err = pulse._fetch_summary()
         self.assertIsNone(err)
@@ -267,7 +267,7 @@ class TestPulseNetwork(unittest.TestCase):
     def test_fetch_summary_http_error(self):
         import urllib.error as ue
         err = ue.HTTPError(pulse.SUMMARY_URL, 503, "Service Unavailable", {}, None)
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             data, tag = pulse._fetch_summary()
         self.assertIsNone(data)
         self.assertEqual(tag, "HTTP 503")
@@ -275,7 +275,7 @@ class TestPulseNetwork(unittest.TestCase):
     def test_fetch_summary_http_404(self):
         import urllib.error as ue
         err = ue.HTTPError(pulse.SUMMARY_URL, 404, "Not Found", {}, None)
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             _, tag = pulse._fetch_summary()
         self.assertEqual(tag, "HTTP 404")
 
@@ -283,7 +283,7 @@ class TestPulseNetwork(unittest.TestCase):
         import urllib.error as ue
         import socket as sk
         err = ue.URLError(sk.timeout("timed out"))
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             _, tag = pulse._fetch_summary()
         self.assertEqual(tag, "timeout")
 
@@ -291,47 +291,47 @@ class TestPulseNetwork(unittest.TestCase):
         import urllib.error as ue
         import socket as sk
         err = ue.URLError(sk.gaierror(8, "Name or service not known"))
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             _, tag = pulse._fetch_summary()
         self.assertEqual(tag, "DNS fail")
 
     def test_fetch_summary_url_other(self):
         import urllib.error as ue
         err = ue.URLError(ConnectionRefusedError(111, "refused"))
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             _, tag = pulse._fetch_summary()
         self.assertTrue(tag.startswith("net: "), f"got {tag!r}")
 
     def test_fetch_summary_direct_socket_timeout(self):
         import socket as sk
-        with patch("pulse.urllib.request.urlopen", side_effect=sk.timeout("slow")):
+        with patch("pulse._OPENER.open", side_effect=sk.timeout("slow")):
             _, tag = pulse._fetch_summary()
         self.assertEqual(tag, "timeout")
 
     def test_fetch_summary_oversized_response(self):
         huge = b"x" * (pulse.MAX_RESPONSE_BYTES + 2)
-        with patch("pulse.urllib.request.urlopen",
+        with patch("pulse._OPENER.open",
                    return_value=self._mock_response(huge)):
             data, tag = pulse._fetch_summary()
         self.assertIsNone(data)
         self.assertEqual(tag, "response too large")
 
     def test_fetch_summary_json_decode_error(self):
-        with patch("pulse.urllib.request.urlopen",
+        with patch("pulse._OPENER.open",
                    return_value=self._mock_response(b"not json at all {broken")):
             data, tag = pulse._fetch_summary()
         self.assertIsNone(data)
         self.assertTrue(tag.startswith("parse: "), f"got {tag!r}")
 
     def test_fetch_summary_os_error(self):
-        with patch("pulse.urllib.request.urlopen",
+        with patch("pulse._OPENER.open",
                    side_effect=OSError(5, "I/O error")):
             _, tag = pulse._fetch_summary()
         self.assertEqual(tag, "OSError")
 
     # --- _ping_api -------------------------------------------------------
     def test_ping_api_success(self):
-        with patch("pulse.urllib.request.urlopen",
+        with patch("pulse._OPENER.open",
                    return_value=self._mock_response(b"{}")):
             lat = pulse._ping_api()
         self.assertIsNotNone(lat)
@@ -341,31 +341,31 @@ class TestPulseNetwork(unittest.TestCase):
         # Any HTTP status = endpoint alive — should return latency, not None
         import urllib.error as ue
         err = ue.HTTPError(pulse.PROBE_URL, 401, "Unauthorized", {}, None)
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             lat = pulse._ping_api()
         self.assertIsNotNone(lat)
 
     def test_ping_api_http_405_is_alive(self):
         import urllib.error as ue
         err = ue.HTTPError(pulse.PROBE_URL, 405, "Method Not Allowed", {}, None)
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             lat = pulse._ping_api()
         self.assertIsNotNone(lat)
 
     def test_ping_api_timeout(self):
         import socket as sk
-        with patch("pulse.urllib.request.urlopen", side_effect=sk.timeout()):
+        with patch("pulse._OPENER.open", side_effect=sk.timeout()):
             self.assertIsNone(pulse._ping_api())
 
     def test_ping_api_dns_fail(self):
         import urllib.error as ue
         import socket as sk
         err = ue.URLError(sk.gaierror(8, "no dns"))
-        with patch("pulse.urllib.request.urlopen", side_effect=err):
+        with patch("pulse._OPENER.open", side_effect=err):
             self.assertIsNone(pulse._ping_api())
 
     def test_ping_api_os_error(self):
-        with patch("pulse.urllib.request.urlopen", side_effect=OSError(111, "refused")):
+        with patch("pulse._OPENER.open", side_effect=OSError(111, "refused")):
             self.assertIsNone(pulse._ping_api())
 
     # --- _refresh_once end-to-end ---------------------------------------
@@ -377,7 +377,7 @@ class TestPulseNetwork(unittest.TestCase):
             "components": [{"name": "API", "status": "operational"}],
             "incidents": [],
         }).encode("utf-8")
-        with patch("pulse.urllib.request.urlopen",
+        with patch("pulse._OPENER.open",
                    return_value=self._mock_response(payload)), \
              patch("pulse._append_log"):  # skip disk I/O
             pulse._refresh_once()
@@ -391,7 +391,7 @@ class TestPulseNetwork(unittest.TestCase):
         """When fetch fails, error tag propagates into snapshot.error."""
         import urllib.error as ue
         err = ue.HTTPError(pulse.SUMMARY_URL, 503, "X", {}, None)
-        with patch("pulse.urllib.request.urlopen", side_effect=err), \
+        with patch("pulse._OPENER.open", side_effect=err), \
              patch("pulse._append_log"):
             pulse._refresh_once()
         snap = pulse.get_pulse_snapshot()
@@ -409,7 +409,7 @@ class TestPulseNetwork(unittest.TestCase):
                 "incident_updates": ["not a dict"],  # malformed
             }],
         }).encode("utf-8")
-        with patch("pulse.urllib.request.urlopen",
+        with patch("pulse._OPENER.open",
                    return_value=self._mock_response(payload)), \
              patch("pulse._append_log"):
             try:
@@ -653,12 +653,16 @@ class TestPulseLog(unittest.TestCase):
 
     # --- startup cleanup ------------------------------------------------
     def test_cleanup_drops_old_entries(self):
-        now = time.time()
-        self._write_record(now - 48 * 3600)       # 48h ago — drop
-        self._write_record(now - 25 * 3600)       # 25h ago — drop
-        self._write_record(now - 1 * 3600)        # 1h ago — keep
-        self._write_record(now - 60)              # 1min ago — keep
-        pulse.cleanup_log_startup()
+        # T-P2-1: freeze time so the same epoch is used for record timestamps
+        # in the test setup and for the LOG_AGE_CUTOFF math inside
+        # cleanup_log_startup. Eliminates clock-skew flakiness on slow CI.
+        FROZEN = 1_700_000_000.0
+        with patch("pulse.time.time", return_value=FROZEN):
+            self._write_record(FROZEN - 48 * 3600)       # 48h ago — drop
+            self._write_record(FROZEN - 25 * 3600)       # 25h ago — drop
+            self._write_record(FROZEN - 1 * 3600)        # 1h ago — keep
+            self._write_record(FROZEN - 60)              # 1min ago — keep
+            pulse.cleanup_log_startup()
         with open(pulse.LOG_PATH, encoding="utf-8") as f:
             lines = f.readlines()
         self.assertEqual(len(lines), 2)

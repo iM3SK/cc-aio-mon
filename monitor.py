@@ -18,7 +18,6 @@ import bisect
 import json
 import os
 import pathlib
-import platform
 import re
 import shutil
 import signal
@@ -74,12 +73,130 @@ def _parse_ts(ts_str):
         return 0
 
 
+def _iter_safe_transcripts(claude_root, cutoff):
+    """Yield `(jl, st, sid, is_subagent)` for each transcript that passes
+    containment, symlink, size, and cutoff filtering. After
+    MAX_TRANSCRIPT_FILES candidates have been seen, yields the sentinel
+    value `None` to signal truncation, then stops.
+
+    SIZE-003 split: this is the security-sensitive path-resolution half
+    of `scan_transcript_stats`. Keeping it separate from the aggregation
+    arithmetic in `_aggregate_transcript` lets each half be reasoned
+    about (and tested) in isolation.
+    """
+    file_count = 0
+    for jl in _CLAUDE_DIR.glob("**/*.jsonl"):
+        file_count += 1
+        if file_count > MAX_TRANSCRIPT_FILES:
+            yield None
+            return
+        is_subagent = "subagents" in str(jl)
+        try:
+            st = jl.lstat()
+            # Reject symlinked transcript files: resolve must land inside
+            # claude_root, and the lstat must be a regular file.
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            try:
+                resolved = jl.resolve(strict=True)
+                resolved.relative_to(claude_root)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            if st.st_size > TRANSCRIPT_MAX_BYTES:
+                continue
+            if cutoff and st.st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        yield (jl, st, jl.stem, is_subagent)
+
+
+def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
+                          models, active_days, daily_tokens, session_times):
+    """Parse one transcript and mutate the four aggregate containers
+    in place. Returns silently on OS / UnicodeDecodeError — caller
+    treats partial data as best-effort.
+
+    S-P2-2 (CWE-367): TOCTOU guard via `os.fstat(fh.fileno())` vs the
+    pre-open `lstat` (`st`); if the inode/device pair diverged between
+    the iterator's path resolution and this open, the file was swapped
+    and we skip it rather than aggregate from an unverified inode.
+    """
+    try:
+        with open(jl, encoding="utf-8") as f:
+            try:
+                fst = os.fstat(f.fileno())
+            except OSError:
+                return
+            if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+                return
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                ts_str = obj.get("timestamp", "")
+                ts = _parse_ts(ts_str)
+
+                if cutoff and ts > 0 and ts < cutoff:
+                    continue
+
+                # Track session timestamps for duration calc
+                if ts > 0 and not is_subagent:
+                    if sid not in session_times:
+                        session_times[sid] = [ts, ts]
+                    else:
+                        if ts < session_times[sid][0]:
+                            session_times[sid][0] = ts
+                        if ts > session_times[sid][1]:
+                            session_times[sid][1] = ts
+
+                if obj.get("type") != "assistant":
+                    continue
+                msg = obj.get("message")
+                if not msg or "usage" not in msg:
+                    continue
+
+                model = msg.get("model") or "unknown"
+                if model.startswith("<"):
+                    continue  # skip synthetic/internal entries
+                u = msg["usage"]
+                inp = int(_num(u.get("input_tokens", 0)))
+                out = int(_num(u.get("output_tokens", 0)))
+                cr = int(_num(u.get("cache_read_input_tokens", 0)))
+                cw = int(_num(u.get("cache_creation_input_tokens", 0)))
+                if model not in models:
+                    models[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
+                models[model]["input"] += inp
+                models[model]["output"] += out
+                models[model]["cache_read"] += cr
+                models[model]["cache_write"] += cw
+                models[model]["calls"] += 1
+
+                if ts > 0:
+                    day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    active_days.add(day)
+                    daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
+    except (OSError, UnicodeDecodeError):
+        return
+
+
 def scan_transcript_stats(period="all", ttl=30.0):
     """Scan CC session transcripts, return (models, overview) tuple.
 
     models: {model_id: {"input": int, "output": int, "cache_read": int, "cache_write": int, "calls": int}}
     overview: {"sessions": int, "active_days": set, "longest_dur_ms": float,
                "first_date": str, "daily_tokens": {date_str: int}}
+
+    SIZE-003: the original 148-LOC monolith was split into three pieces:
+    this orchestrator, `_iter_safe_transcripts` (containment + symlink +
+    size + cutoff filtering, yields `None` as the truncation sentinel),
+    and `_aggregate_transcript` (per-file parse + in-place aggregate
+    mutation). The split keeps the security-sensitive path-resolution
+    logic separately testable from the data-aggregation arithmetic.
     """
     mono = time.monotonic()
     cached = _usage_cache.get(period)
@@ -114,92 +231,18 @@ def scan_transcript_stats(period="all", ttl=30.0):
                      "first_date": None, "daily_tokens": {}, "truncated": False}
         return models, empty_ov
 
-    _file_count = 0
     _truncated = False
-    for jl in _CLAUDE_DIR.glob("**/*.jsonl"):
-        _file_count += 1
-        if _file_count > MAX_TRANSCRIPT_FILES:
+    for item in _iter_safe_transcripts(claude_root, cutoff):
+        if item is None:
             _truncated = True
             break
-        # Skip subagent transcripts for session counting
-        is_subagent = "subagents" in str(jl)
-        try:
-            st = jl.lstat()
-            # Reject symlinked transcript files: resolve must land inside claude_root,
-            # and the lstat must be a regular file (not a symlink itself).
-            if stat.S_ISLNK(st.st_mode):
-                continue
-            if not stat.S_ISREG(st.st_mode):
-                continue
-            try:
-                resolved = jl.resolve(strict=True)
-                resolved.relative_to(claude_root)
-            except (OSError, ValueError, RuntimeError):
-                continue
-            if st.st_size > TRANSCRIPT_MAX_BYTES:
-                continue
-            if cutoff and st.st_mtime < cutoff:
-                continue
-        except OSError:
-            continue
-
-        sid = jl.stem
+        jl, st, sid, is_subagent = item
         if not is_subagent:
             session_count += 1
-
-        try:
-            with open(jl, encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    ts_str = obj.get("timestamp", "")
-                    ts = _parse_ts(ts_str)
-
-                    if cutoff and ts > 0 and ts < cutoff:
-                        continue
-
-                    # Track session timestamps for duration calc
-                    if ts > 0 and not is_subagent:
-                        if sid not in session_times:
-                            session_times[sid] = [ts, ts]
-                        else:
-                            if ts < session_times[sid][0]:
-                                session_times[sid][0] = ts
-                            if ts > session_times[sid][1]:
-                                session_times[sid][1] = ts
-
-                    if obj.get("type") != "assistant":
-                        continue
-                    msg = obj.get("message")
-                    if not msg or "usage" not in msg:
-                        continue
-
-                    model = msg.get("model") or "unknown"
-                    if model.startswith("<"):
-                        continue  # skip synthetic/internal entries
-                    u = msg["usage"]
-                    inp = int(_num(u.get("input_tokens", 0)))
-                    out = int(_num(u.get("output_tokens", 0)))
-                    cr = int(_num(u.get("cache_read_input_tokens", 0)))
-                    cw = int(_num(u.get("cache_creation_input_tokens", 0)))
-                    if model not in models:
-                        models[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
-                    models[model]["input"] += inp
-                    models[model]["output"] += out
-                    models[model]["cache_read"] += cr
-                    models[model]["cache_write"] += cw
-                    models[model]["calls"] += 1
-
-                    # Track active days and daily tokens
-                    if ts > 0:
-                        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-                        active_days.add(day)
-                        daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
-        except (OSError, UnicodeDecodeError):
-            continue
+        _aggregate_transcript(
+            jl, st, sid, is_subagent, cutoff,
+            models, active_days, daily_tokens, session_times,
+        )
 
     # Compute longest session duration
     longest_dur_ms = 0
@@ -254,7 +297,7 @@ def _calc_streaks(active_days):
 # ---------------------------------------------------------------------------
 # Platform — keyboard input abstraction
 # ---------------------------------------------------------------------------
-IS_WIN = platform.system() == "Windows"
+IS_WIN = sys.platform == "win32"
 _term_state = None
 _orig_console_output_cp = None  # Windows: saved by _setup_term, restored by _restore_term
 
@@ -271,6 +314,40 @@ if IS_WIN:
             return ch.decode("utf-8", errors="ignore")
         return None
 
+    def _set_console_utf8():
+        """NEW-003: switch Windows console output CP to 65001 (UTF-8) without
+        touching VT mode or alt-screen state. Used by `--list` and any other
+        non-interactive mode that emits diacritics but does not call the
+        full `_setup_term`. Safe to call standalone — Python's
+        `sys.stdout.encoding=utf-8` (set by `ensure_utf8_stdout`) is
+        necessary but not sufficient on Windows: the byte stream is
+        UTF-8 but the console reinterprets it through the locale CP
+        (CP1250 on SK, CP1252 on US) and renders mojibake unless we
+        switch CP here. Original CP is saved into the same global so
+        `_restore_term` (registered by interactive setup) puts it back."""
+        global _orig_console_output_cp
+        try:
+            kernel32 = ctypes.windll.kernel32
+        except Exception:
+            return
+        try:
+            _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
+        except Exception:
+            _orig_console_output_cp = None
+        try:
+            kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+
+    _WIN10_ANSI_REQUIRED_MSG = (
+        "Error: this console does not support ANSI / VT escape sequences.\n"
+        "Windows 10 build 10586 (Threshold 2, Nov 2015) or later is required —\n"
+        "older Windows (7/8/8.1, early Win10) and the legacy `conhost.exe` host\n"
+        "without ConPTY render the TUI as raw escape text and it is unusable.\n"
+        "Workarounds: run monitor.py inside Windows Terminal, ConEmu, Cmder,\n"
+        "Git Bash (mintty), or upgrade to a current Windows build."
+    )
+
     def _setup_term():
         """Enable VT/ANSI processing AND switch console output to UTF-8.
 
@@ -280,8 +357,10 @@ if IS_WIN:
         console code page isn't UTF-8 (e.g. CP1250 on SK Windows: `ť` displays
         as `Ĺĺ`). Saves the original CP for _restore_term.
 
-        If SetConsoleMode fails (pre-Win10, or redirected handle), ANSI
-        sequences render as raw text — best-effort, can't recover here.
+        If the console handle is invalid or the kernel rejects
+        SetConsoleMode (pre-Win10 conhost / unsupported terminal), exit
+        with a clear diagnostic instead of falling through to a broken
+        TUI rendering as raw escape sequences (A-P2-4).
         """
         ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
         ENABLE_PROCESSED_OUTPUT = 0x0001
@@ -289,31 +368,32 @@ if IS_WIN:
         global _orig_console_output_cp
         try:
             kernel32 = ctypes.windll.kernel32
-            # Save current output CP first so _restore_term can put it back
-            try:
-                _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
-            except Exception:
-                _orig_console_output_cp = None
-            # Switch console output to UTF-8 — `ensure_utf8_stdout()` makes
-            # Python write UTF-8 bytes, this makes the Windows console
-            # interpret them as UTF-8 instead of the locale default.
-            try:
-                kernel32.SetConsoleOutputCP(CP_UTF8)
-            except Exception:
-                pass
-            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-            if handle == -1 or handle == 0:
-                return
-            mode = ctypes.c_ulong(0)
-            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-                return
-            new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT
-            if not kernel32.SetConsoleMode(handle, new_mode):
-                # SetConsoleMode returned 0 — likely pre-Win10 or unsupported handle.
-                # Fall through: caller's ANSI output may render as raw escape sequences.
-                return
+        except Exception:
+            sys.exit(_WIN10_ANSI_REQUIRED_MSG)
+        # Save current output CP first so _restore_term can put it back
+        try:
+            _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
+        except Exception:
+            _orig_console_output_cp = None
+        # Switch console output to UTF-8 — `ensure_utf8_stdout()` makes
+        # Python write UTF-8 bytes, this makes the Windows console
+        # interpret them as UTF-8 instead of the locale default.
+        try:
+            kernel32.SetConsoleOutputCP(CP_UTF8)
         except Exception:
             pass
+        try:
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        except Exception:
+            sys.exit(_WIN10_ANSI_REQUIRED_MSG)
+        if handle == -1 or handle == 0:
+            sys.exit(_WIN10_ANSI_REQUIRED_MSG)
+        mode = ctypes.c_ulong(0)
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            sys.exit(_WIN10_ANSI_REQUIRED_MSG)
+        new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT
+        if not kernel32.SetConsoleMode(handle, new_mode):
+            sys.exit(_WIN10_ANSI_REQUIRED_MSG)
 
     def _restore_term():
         """Restore the original console output code page on exit so we don't
@@ -337,6 +417,13 @@ else:
         if r:
             return sys.stdin.read(1)
         return None
+
+    def _set_console_utf8():
+        """Unix counterpart — no-op. Unix terminals get encoding from
+        LANG/LC_ALL locale and the user's terminal emulator; there is no
+        Windows-style console CP API to flip. `ensure_utf8_stdout`
+        already handles the Python side."""
+        return
 
     def _setup_term():
         global _term_state
@@ -997,35 +1084,31 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn}")
     buf.append(sep(SW))
 
-    # ── 5HL ──
+    # ── 5HL / 7DL ──
     if rl is not None:
+        def _render_rate_limit(data_obj, label, window_sec):
+            """SIZE-002: shared renderer for 5-hour and 7-day rate-limit
+            blocks. Both differ only in the data key, label, and reset
+            window length; rendering logic (pct, expired tag, color,
+            countdown) is identical. Closure over `buf`, `c`, `mkbar`
+            keeps the helper colocated with its only caller."""
+            if not data_obj:
+                return
+            pct = round(_num(data_obj.get("used_percentage")), 1)
+            resets = _num(data_obj.get("resets_at"), 0)
+            expired = resets > 0 and resets < time.time()
+            if expired:
+                pct = 0.0
+            lc = c(_limit_color(pct))
+            expired_tag = f"  {C_DIM}(expired){R}" if expired else ""
+            buf.append(f"{lc}{B}{label}{R} {mkbar(pct, lc)}{expired_tag}")
+            rc = c(_reset_color(resets, window_sec))
+            buf.append(f"    {C_DIM}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
+
         fh = rl.get("five_hour")
-        if fh:
-            pct = round(_num(fh.get("used_percentage")), 1)
-            resets = _num(fh.get("resets_at"), 0)
-            expired = resets > 0 and resets < time.time()
-            if expired:
-                pct = 0.0
-            lc = c(_limit_color(pct))
-            expired_tag = f"  {C_DIM}(expired){R}" if expired else ""
-            buf.append(f"{lc}{B}5HL{R} {mkbar(pct, lc)}{expired_tag}")
-            rc = c(_reset_color(resets, 18000))  # 5h window
-            buf.append(f"    {C_DIM}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
-
-        # ── 7DL ──
         sd = rl.get("seven_day")
-        if sd:
-            pct = round(_num(sd.get("used_percentage")), 1)
-            resets = _num(sd.get("resets_at"), 0)
-            expired = resets > 0 and resets < time.time()
-            if expired:
-                pct = 0.0
-            lc = c(_limit_color(pct))
-            expired_tag = f"  {C_DIM}(expired){R}" if expired else ""
-            buf.append(f"{lc}{B}7DL{R} {mkbar(pct, lc)}{expired_tag}")
-            rc = c(_reset_color(resets, 604800))  # 7d window
-            buf.append(f"    {C_DIM}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
-
+        _render_rate_limit(fh, "5HL", 18000)   # 5 h window
+        _render_rate_limit(sd, "7DL", 604800)  # 7 d window
         if not fh and not sd:
             buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
@@ -1069,7 +1152,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"{C_DIM}LNS:{R} {c(C_GRN)}{added:,}{R} {c(C_RED)}{removed:,}{R}")
 
     # ── RLS (release check) ──
-    _rls_maybe_check()
+    # NOTE: _rls_maybe_check() is invoked from the main event loop, NOT here.
+    # Keeping the trigger out of the render path (A-P2-1) avoids spawning a
+    # background git fetch on every frame and lets test render assertions
+    # stay deterministic without setting CC_AIO_MON_NO_UPDATE_CHECK env-flag
+    # in each setUp.
     rls = _rls_snapshot()  # atomic read: status + remote_ver coherent
     rls_s = rls["status"]
     if rls_s == "update" and rls["remote_ver"]:
@@ -1286,7 +1373,23 @@ def _scan_ai_title(transcript_path):
     title = None
     try:
         with open(path, "rb") as fh:
-            raw = fh.read(_AI_TITLE_SCAN_BYTES)
+            # S-P2-2 (CWE-367): TOCTOU mitigation — re-stat the *open*
+            # file descriptor and require (st_ino, st_dev) to match the
+            # pre-open stat. If they differ, the underlying inode was
+            # swapped between resolve() (line ~1250) and open(), which on
+            # a shared filesystem could let another user point us at a
+            # different file via fast unlink/link or symlink-flip races.
+            # st_dev guard ensures the swap can't move us to a different
+            # mount either.
+            try:
+                fst = os.fstat(fh.fileno())
+            except OSError:
+                raw = None
+            else:
+                if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+                    raw = None
+                else:
+                    raw = fh.read(_AI_TITLE_SCAN_BYTES)
     except OSError:
         raw = None
     if raw:
@@ -2500,6 +2603,14 @@ def main():
     args.refresh = max(100, min(60000, args.refresh))
 
     ensure_utf8_stdout()
+    # NEW-003: --list emits diacritics from session_name / ai_title and
+    # needs Windows console CP 65001 even though it skips the full TUI
+    # _setup_term. Restore is handled by atexit cleanup only when set
+    # for the interactive path; for the one-shot --list we deliberately
+    # leave the console in UTF-8 mode since the process exits right
+    # after the listing — no chance for follow-up commands to be
+    # affected within this process.
+    _set_console_utf8()
 
     if args.list:
         for s in list_sessions():
@@ -2770,6 +2881,10 @@ def main():
                 last_hist = load_history(sid)
                 last_hist_mt = hmt
             is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
+            # A-P2-1: release-check trigger lives in the event loop, not in
+            # render_frame. _rls_maybe_check is rate-limited internally
+            # (_RLS_TTL) so per-tick invocation here is cheap.
+            _rls_maybe_check()
             try:
                 flush(
                     render_frame(

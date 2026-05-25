@@ -15,7 +15,6 @@ Config env vars:
 import json
 import os
 import pathlib
-import platform
 import signal
 import struct
 import sys
@@ -31,7 +30,7 @@ from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, f_tok
 
 
 
-_IS_WIN = platform.system() == "Windows"
+_IS_WIN = sys.platform == "win32"
 
 if _IS_WIN:
     import ctypes
@@ -234,11 +233,19 @@ def main():
     ensure_utf8_stdout()
 
     try:
-        raw = sys.stdin.read(MAX_FILE_SIZE)
-        if not raw.strip():
+        # Read stdin at byte level and decode UTF-8 explicitly. Claude Code
+        # emits JSON as UTF-8 bytes; sys.stdin.read() would use the locale
+        # encoding (e.g. cp1250 on SK Windows) when PYTHONUTF8=1 is not set
+        # in Claude Code's subprocess env, mangling diacritics in
+        # `session_name` / `aiTitle` fields before they ever reach
+        # write_shared_state (NEW-002 fix, complements NEW-001 which only
+        # covered monitor.py console output).
+        raw_bytes = sys.stdin.buffer.read(MAX_FILE_SIZE)
+        if not raw_bytes.strip():
             return
+        raw = raw_bytes.decode("utf-8", errors="replace")
         data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
         return
 
     sid = data.get("session_id") or "default"
