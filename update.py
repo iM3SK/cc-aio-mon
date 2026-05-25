@@ -42,7 +42,13 @@ def _init_terminal():
     _enable_vt_on_windows()
 
 
-# Colors are set lazily after _init_terminal() — defaults for import safety
+# Colors are set lazily after _init_terminal() — defaults for import safety.
+# Intentional SSoT exception vs shared.C_* Nord truecolor palette:
+# update.py runs before any TUI setup and must remain readable on minimal
+# terminals without 24-bit truecolor (e.g. legacy Windows console, error
+# recovery scenarios where _enable_vt_on_windows() has not been called yet).
+# Basic 16-color ANSI degrades gracefully; shared.C_* would render as garbled
+# escape sequences on those terminals. See CONTRIBUTING.md "What to keep in sync".
 GRN = YEL = RED = CYN = DIM = R = ""
 
 

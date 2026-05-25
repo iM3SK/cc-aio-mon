@@ -55,18 +55,18 @@ Work through these in order before creating any tag.
   python3 tests.py     # macOS / Linux
   ```
   `tests.py` is a thin wrapper that runs `unittest discover tests/`
-  (`tests.py:main()`). Current baseline: **583 passing** (v1.12.0). The new
+  (`tests.py:main()`). Current baseline: **585 passing** (v1.12.1). The new
   release's count must be >= this number unless tests were intentionally
   removed (document the removal in CHANGELOG).
 
 - [ ] **CHANGELOG entry drafted** (see Section 3 for exact format).
   Write the entry for the new version at the top of `CHANGELOG.md`, above the
-  current `## v1.12.0` block. Do not push yet.
+  current `## v1.12.1` block. Do not push yet.
 
 - [ ] **VERSION constant bumped in `shared.py` only.**
   The constant lives at `shared.py:46`:
   ```python
-  VERSION = "1.12.0"
+  VERSION = "1.12.1"
   ```
   Change this string to the new version. Do not touch `monitor.py`,
   `pulse.py`, or `update.py` for the version — all three import from

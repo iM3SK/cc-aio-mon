@@ -647,12 +647,25 @@ class TestParseTs(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestCalcStreaks(unittest.TestCase):
 
+    # Frozen "now" so streak math is deterministic regardless of when the
+    # suite runs (T-P2-6). _calc_streaks calls both datetime.now() and
+    # datetime.strptime; setUp patches monitor.datetime so .now() returns
+    # FROZEN_NOW while .strptime keeps delegating to the real implementation.
+    FROZEN_NOW = __import__("datetime").datetime(2026, 5, 25, 12, 0, 0)
+
+    def setUp(self):
+        from datetime import datetime as _real_dt
+        patcher = patch("monitor.datetime")
+        self.mock_dt = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mock_dt.now.return_value = self.FROZEN_NOW
+        self.mock_dt.strptime = _real_dt.strptime
+
     def test_empty_returns_0_0(self):
         self.assertEqual(_calc_streaks(set()), (0, 0))
 
     def test_single_day_today(self):
-        from datetime import datetime
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = self.FROZEN_NOW.strftime("%Y-%m-%d")
         current, longest = _calc_streaks({today})
         self.assertEqual(current, 1)
         self.assertEqual(longest, 1)
@@ -663,16 +676,16 @@ class TestCalcStreaks(unittest.TestCase):
         self.assertEqual(longest, 1)
 
     def test_consecutive_3_days_ending_today(self):
-        from datetime import datetime, timedelta
-        today = datetime.now().date()
+        from datetime import timedelta
+        today = self.FROZEN_NOW.date()
         days = {(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)}
         current, longest = _calc_streaks(days)
         self.assertEqual(current, 3)
         self.assertEqual(longest, 3)
 
     def test_gap_breaks_streak(self):
-        from datetime import datetime, timedelta
-        today = datetime.now().date()
+        from datetime import timedelta
+        today = self.FROZEN_NOW.date()
         # today + 3 days ago (gap at yesterday)
         days = {
             today.strftime("%Y-%m-%d"),
@@ -683,8 +696,8 @@ class TestCalcStreaks(unittest.TestCase):
         self.assertEqual(longest, 1)
 
     def test_longest_in_past_not_current(self):
-        from datetime import datetime, timedelta
-        today = datetime.now().date()
+        from datetime import timedelta
+        today = self.FROZEN_NOW.date()
         # 5-day streak in past, 1-day current
         past = {(today - timedelta(days=20 + i)).strftime("%Y-%m-%d") for i in range(5)}
         current_day = {today.strftime("%Y-%m-%d")}
@@ -2708,7 +2721,10 @@ class TestSigpipeHandler(unittest.TestCase):
         import statusline
         with patch("sys.stdin") as mock_stdin, \
              patch.object(_signal, "signal") as mock_sig:
-            mock_stdin.read.return_value = ""  # empty → statusline.main() returns early
+            # NEW-002: statusline.main reads via sys.stdin.buffer.read() at
+            # byte level. Empty bytes → main() returns early after the
+            # SIGPIPE handler is installed (which is what this test asserts).
+            mock_stdin.buffer.read.return_value = b""
             statusline.main()
         # Among all signal.signal calls, at least one must be SIGPIPE -> SIG_DFL
         calls = [(c.args[0], c.args[1]) for c in mock_sig.call_args_list if len(c.args) >= 2]
@@ -3076,27 +3092,29 @@ class TestAuditRegressionV1105(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_sec010_pulse_proxy_env_scrubbed(self):
-        """SEC-010: pulse.py installs a proxy-scrubbed opener at import time
+        """SEC-010: pulse.py builds a proxy-scrubbed opener at import time
         so HTTP(S)_PROXY env vars do not silently route Anthropic Pulse
         fetches through an attacker-controlled intermediary.
 
         `build_opener(ProxyHandler({}))` creates an opener where no
         ProxyHandler remains in `.handlers` (CPython filters handlers that
         register no open-methods — an empty ProxyHandler has none). The
-        invariant we lock in: after `import pulse`, `urllib.request._opener`
-        is installed AND contains no ProxyHandler — so urlopen never consults
-        HTTP(S)_PROXY env vars.
+        invariant we lock in: after `import pulse`, the module-local
+        `pulse._OPENER` exists AND contains no ProxyHandler — so its
+        `.open(...)` never consults HTTP(S)_PROXY env vars. A-P2-2
+        moved the opener from process-global (`install_opener`) to
+        module-local to avoid surprising other modules' urllib calls.
         """
-        import pulse  # noqa: F401 — import triggers install_opener
+        import pulse
         import urllib.request
-        self.assertIsNotNone(
-            urllib.request._opener,
-            "urllib.request._opener should be set by pulse.py import",
+        self.assertTrue(
+            hasattr(pulse, "_OPENER"),
+            "pulse must define a module-local _OPENER",
         )
         self.assertFalse(
             any(isinstance(h, urllib.request.ProxyHandler)
-                for h in urllib.request._opener.handlers),
-            "pulse.py opener must contain NO ProxyHandler (env-proxy scrub)",
+                for h in pulse._OPENER.handlers),
+            "pulse._OPENER must contain NO ProxyHandler (env-proxy scrub)",
         )
 
 

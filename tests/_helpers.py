@@ -9,7 +9,6 @@ sys.path shim those modules install (parent of `tests/` on sys.path).
 
 import json
 import pathlib
-import re
 import sys
 
 # Ensure source modules in repo root are importable even when this helper
@@ -20,18 +19,16 @@ from shared import _ANSI_RE
 
 
 # ---- ANSI helpers ---------------------------------------------------------
+# Both helpers delegate to shared._ANSI_RE (single canonical pattern, T-P2-2).
 
 def _vlen(text):
     """Strip ANSI escapes and return visible length."""
     return len(_ANSI_RE.sub("", text))
 
 
-_ANSI_STRIP_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
 def _strip_ansi(lines):
     """Strip ANSI escapes from each string in *lines*; returns a list."""
-    return [_ANSI_STRIP_RE.sub("", ln) for ln in lines]
+    return [_ANSI_RE.sub("", ln) for ln in lines]
 
 
 # ---- Statusline data ------------------------------------------------------
