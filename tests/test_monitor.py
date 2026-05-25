@@ -2721,7 +2721,10 @@ class TestSigpipeHandler(unittest.TestCase):
         import statusline
         with patch("sys.stdin") as mock_stdin, \
              patch.object(_signal, "signal") as mock_sig:
-            mock_stdin.read.return_value = ""  # empty → statusline.main() returns early
+            # NEW-002: statusline.main reads via sys.stdin.buffer.read() at
+            # byte level. Empty bytes → main() returns early after the
+            # SIGPIPE handler is installed (which is what this test asserts).
+            mock_stdin.buffer.read.return_value = b""
             statusline.main()
         # Among all signal.signal calls, at least one must be SIGPIPE -> SIG_DFL
         calls = [(c.args[0], c.args[1]) for c in mock_sig.call_args_list if len(c.args) >= 2]
