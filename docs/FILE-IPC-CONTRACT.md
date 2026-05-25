@@ -426,7 +426,7 @@ def excepthook(exc_type, exc_value, tb):
     try:
         if ensure_data_dir(DATA_DIR):
             log_path = DATA_DIR / "monitor-crash.log"
-            rotate_crash_log(log_path)  # rotate to .log.1 if > 1 MB
+            rotate_crash_log(log_path, always=True)  # always preserve prior traceback
             with open(log_path, "w", encoding="utf-8") as f:
                 f.write(f"monitor v{VERSION} crashed at {time.ctime()}\n")
                 f.write(f"PID {os.getpid()}\n")
@@ -439,23 +439,25 @@ def excepthook(exc_type, exc_value, tb):
 
 ### Rotation Policy
 
-**Function**: `rotate_crash_log(path, max_bytes=MAX_FILE_SIZE)` (`shared.py:376-394`)
+**Function**: `rotate_crash_log(path, max_bytes=MAX_FILE_SIZE, always=False)` (`shared.py`)
 
-Before writing a new crash, rotate the old log if it exceeds 1 MB:
+Two rotation modes, selected by the caller:
 
-1. Check `path.stat().st_size > max_bytes`
-2. If yes: `path.replace(path.with_suffix(path.suffix + ".1"))` (atomic rename)
-3. Drop any pre-existing `.log.1` to keep only 2 entries on disk
-4. Best-effort: OSError silently swallowed
+- `always=False` (default): size-gated — rotate only when `path.stat().st_size > max_bytes`. Suitable for callers that only care about bounding disk growth.
+- `always=True` (used by `_install_crash_logger` since v1.12.2): rotate on every call regardless of size. Used by the crash logger so that two crashes in quick succession do not silently overwrite each other.
 
-| Scenario | Result |
+Both modes:
+1. `path.replace(path.with_suffix(path.suffix + ".1"))` (atomic rename)
+2. Drop any pre-existing `.log.1` to keep only 2 entries on disk
+3. Best-effort: any OSError silently swallowed
+
+| Scenario (v1.12.2+, monitor crash logger) | Result |
 |---|---|
 | 1st crash | `monitor-crash.log` created |
-| 2nd crash (log < 1 MB) | Overwrites existing file (open mode `"w"`, single-snapshot semantics) |
-| 2nd crash (log ≥ 1 MB) | Existing file rotated to `monitor-crash.log.1`, new crash written to fresh `monitor-crash.log` |
-| 3rd crash (log > 1 MB) | Drop old `.log.1`, rename current → `.log.1`, create fresh `monitor-crash.log` |
+| 2nd crash (any size) | Previous traceback preserved as `monitor-crash.log.1`; new crash written to fresh `monitor-crash.log` |
+| 3rd crash | Drop old `.log.1`, rename current → `.log.1`, create fresh `monitor-crash.log` |
 
-The crash log retains **only the most recent crash**. Rotation is a defensive size guard (prevents unbounded growth across many crash cycles), not an audit trail.
+The crash log retains **the two most recent crashes** (current + `.log.1`). Rotation is now both a disk-growth guard (default behavior) and a diagnostic preservation guarantee (when called with `always=True`).
 
 ### Content Format
 
@@ -715,7 +717,7 @@ No deprecated fields yet. When a field is retired:
 | `<sid>.json` | Session snapshot | statusline | monitor | Atomic replace | Until session expires (~1h idle in monitor) |
 | `<sid>.jsonl` | Session history | statusline | statusline (rates), monitor (trends) | Atomic trim; non-atomic append | Trimmed to 1000 lines @ 1 MB |
 | `pulse.jsonl` | API stability log | pulse.py (worker) | monitor (display), external tools | Atomic trim; non-atomic append | Trimmed to 500 lines @ 1 MB; startup cleanup drops >24h entries |
-| `monitor-crash.log` | Crash traceback | monitor (excepthook) | User (post-mortem) | None (diagnostic only) | Rotated to `.log.1` @ 1 MB |
+| `monitor-crash.log` | Crash traceback | monitor (excepthook) | User (post-mortem) | None (diagnostic only) | Rotated to `.log.1` on every crash (v1.12.2+); size guard still applies for non-crash callers |
 | `monitor.lock` | Singleton lock | monitor | monitor (check at startup) | Atomic fcntl/msvcrt | Process lifetime; auto-released on exit |
 
 ---
