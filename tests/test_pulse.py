@@ -909,6 +909,41 @@ class TestWorkerLoopCrashRecovery(unittest.TestCase):
         self.assertEqual(snap.get("reason"), "worker crashed")
 
 
+class TestAtomicReplaceLogOSErrorCleanup(unittest.TestCase):
+    """Audit P3-4: pulse._atomic_replace_log has an OSError handler that
+    closes and unlinks the temp file. The branch was not exercised by any
+    test, so a regression (e.g. leaking the temp file or raising) would
+    go undetected."""
+
+    def setUp(self):
+        import pulse
+        self._p = pulse
+        self._tmpdir = tempfile.mkdtemp()
+        self._orig_data = pulse.DATA_DIR
+        self._orig_log = pulse.LOG_PATH
+        pulse.DATA_DIR = pathlib.Path(self._tmpdir)
+        pulse.LOG_PATH = pulse.DATA_DIR / "pulse.jsonl"
+
+    def tearDown(self):
+        import shutil
+        self._p.DATA_DIR = self._orig_data
+        self._p.LOG_PATH = self._orig_log
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_replace_oserror_cleans_temp_and_does_not_raise(self):
+        """When Path.replace raises OSError, the OSError handler must
+        unlink the temp file and swallow the exception (best-effort).
+        Verify no .tmp files leak into DATA_DIR."""
+        # Patch pathlib.Path.replace to raise — exercises the except branch.
+        with patch("pathlib.Path.replace", side_effect=OSError("simulated rename failure")):
+            # Must not raise — the function is best-effort.
+            self._p._atomic_replace_log(["one\n", "two\n"])
+        # Temp file must be cleaned up; LOG_PATH must not exist (replace failed).
+        leftovers = list(self._p.DATA_DIR.glob("*.tmp"))
+        self.assertEqual(leftovers, [], f"temp files leaked: {leftovers}")
+        self.assertFalse(self._p.LOG_PATH.exists(), "LOG_PATH must not exist after failed replace")
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

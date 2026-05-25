@@ -276,7 +276,7 @@ class TestUpdate(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestGitCmd(unittest.TestCase):
 
-    def test_success(self):
+    def test_returns_stripped_stdout_on_zero_rc(self):
         import subprocess as sp
         completed = sp.CompletedProcess(args=["git"], returncode=0, stdout="ok\n", stderr="")
         with patch("monitor.run_git", return_value=completed):
@@ -350,12 +350,12 @@ class TestUpdateChecks(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestGetNewCommits(unittest.TestCase):
 
-    def test_success(self):
+    def test_splits_stdout_into_commit_lines_on_zero_rc(self):
         with patch("monitor._git_cmd", return_value=(0, "abc feat\ndef fix", "")):
             result = _get_new_commits()
         self.assertEqual(result, ["abc feat", "def fix"])
 
-    def test_failure(self):
+    def test_returns_empty_list_on_nonzero_rc(self):
         with patch("monitor._git_cmd", return_value=(1, "", "error")):
             result = _get_new_commits()
         self.assertEqual(result, [])
@@ -427,7 +427,7 @@ class TestApplyUpdateAction(unittest.TestCase):
         else:
             os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = self._orig_env
 
-    def test_success(self):
+    def test_zero_rc_with_valid_syntax_marks_complete(self):
         # Test the synchronous worker directly (not the thread-spawning wrapper)
         with patch("monitor._git_cmd", return_value=(0, "ok", "")):
             with patch("pathlib.Path.exists", return_value=True):
@@ -458,7 +458,7 @@ class TestApplyUpdateAction(unittest.TestCase):
             mock_safe_read.assert_called_once()
             self.assertIn("syntax errors", monitor._update_result)
 
-    def test_failure(self):
+    def test_nonzero_rc_marks_failed_with_stderr(self):
         with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
             _apply_update_worker()
 

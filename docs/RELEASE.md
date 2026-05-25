@@ -55,13 +55,13 @@ Work through these in order before creating any tag.
   python3 tests.py     # macOS / Linux
   ```
   `tests.py` is a thin wrapper that runs `unittest discover tests/`
-  (`tests.py:main()`). Current baseline: **605 passing** (v1.12.2). The new
+  (`tests.py:main()`). Current baseline: **608 passing** (v1.12.3). The new
   release's count must be >= this number unless tests were intentionally
   removed (document the removal in CHANGELOG).
 
 - [ ] **CHANGELOG entry drafted** (see Section 3 for exact format).
   Write the entry for the new version at the top of `CHANGELOG.md`, above the
-  current `## v1.12.2` block. Do not push yet.
+  current `## v1.12.3` block. Do not push yet.
 
 - [ ] **VERSION constant bumped in `shared.py` only.**
   The constant lives at `shared.py:46`:

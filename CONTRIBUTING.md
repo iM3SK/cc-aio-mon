@@ -25,7 +25,7 @@
    `unittest discover tests/`, so the `py tests.py` invocation continues to work
    unchanged.
 
-   **Baseline: 605 tests passing (3 skipped on platforms missing optional artifacts).**
+   **Baseline: 608 tests passing (3 skipped on platforms missing optional artifacts).**
    Contributions must not reduce the passing count without explanation. If you add
    tests, put them in the file that matches the module under test — helpers go in
    `test_shared.py`, TUI logic in `test_monitor.py`, and so on.

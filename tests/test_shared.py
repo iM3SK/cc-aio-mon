@@ -145,6 +145,33 @@ class TestIsSafeDir(unittest.TestCase):
         finally:
             p.unlink(missing_ok=True)
 
+    def test_windows_junction_rejected_via_reparse_point_bit(self):
+        """Audit P3-3: shared.py:269-274 has a Windows-only branch that
+        rejects junction-style reparse points (FILE_ATTRIBUTE_REPARSE_POINT
+        = 0x400). Native testing requires admin to create a junction, so
+        mock sys.platform + the lstat result instead. Runs cross-platform."""
+        import pathlib
+        # Mock stat result: directory mode + reparse point attribute set.
+        fake_st = MagicMock()
+        fake_st.st_mode = 0o040000  # S_IFDIR — passes the directory check
+        fake_st.st_file_attributes = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+        fake_path = MagicMock(spec=pathlib.Path)
+        fake_path.lstat.return_value = fake_st
+        with patch("shared.sys.platform", "win32"):
+            self.assertFalse(shared.is_safe_dir(fake_path))
+
+    def test_windows_real_directory_without_reparse_bit_accepted(self):
+        """Complement to the junction test — same Windows branch must
+        return True when the reparse-point bit is clear."""
+        import pathlib
+        fake_st = MagicMock()
+        fake_st.st_mode = 0o040000  # S_IFDIR
+        fake_st.st_file_attributes = 0  # no reparse point
+        fake_path = MagicMock(spec=pathlib.Path)
+        fake_path.lstat.return_value = fake_st
+        with patch("shared.sys.platform", "win32"):
+            self.assertTrue(shared.is_safe_dir(fake_path))
+
 
 # ---------------------------------------------------------------------------
 # TestEnsureDataDir — shared.ensure_data_dir()
