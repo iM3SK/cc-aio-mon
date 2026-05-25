@@ -287,7 +287,9 @@ class TestCalcRates(unittest.TestCase):
         self.assertIsNotNone(brn)
         self.assertIsNone(ctr)
 
-    def test_shared_module_identity(self):
+    def test_monitor_and_statusline_alias_shared_calc_rates(self):
+        """SSoT regression guard: both monitor and statusline must re-export
+        shared.calc_rates by identity (not a wrapped/forked copy)."""
         from monitor import calc_rates as m_cr
         self.assertIs(m_cr, shared.calc_rates)
         self.assertIs(sl_calc_rates, shared.calc_rates)

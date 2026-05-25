@@ -34,8 +34,11 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     char_width, is_safe_dir, ensure_data_dir, ensure_utf8_stdout, run_git,
                     load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
+                    SECONDS_1H, SECONDS_5H, SECONDS_1D, SECONDS_7D,
+                    HISTORY_RATE_SAMPLES,
                     WARN_PCT, CRIT_PCT,
-                    DATA_DIR, VERSION_RE, VERSION, PY_FILES,
+                    DATA_DIR, VERSION_RE, VERSION,
+                    PY_FILES,  # noqa: F401 — pinned by TestPyFilesSingleSourceOfTruth (SSoT regression guard)
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind,
@@ -206,9 +209,9 @@ def scan_transcript_stats(period="all", ttl=30.0):
     cutoff = 0
     wall = time.time()
     if period == "7d":
-        cutoff = wall - 7 * 86400
+        cutoff = wall - SECONDS_7D
     elif period == "30d":
-        cutoff = wall - 30 * 86400
+        cutoff = wall - 30 * SECONDS_1D
 
     models = {}
     active_days = set()
@@ -606,7 +609,7 @@ _cost_cache = {"t": 0.0, "today": 0.0, "week": 0.0}
 # RLS — background release check
 # ---------------------------------------------------------------------------
 _REPO_ROOT = pathlib.Path(__file__).parent.resolve()
-_RLS_TTL = 3600  # check once per hour
+_RLS_TTL = SECONDS_1H  # check once per hour
 _RLS_BLINK_INTERVAL = 0.5
 _rls_cache = {"t": -_RLS_TTL, "status": None, "remote_ver": None}
 _rls_lock = threading.Lock()       # worker-spawn coordination (one check at a time)
@@ -684,7 +687,7 @@ def _rls_maybe_check():
     try:
         t = threading.Thread(target=_rls_check_worker, daemon=True)
         t.start()
-    except Exception:
+    except Exception:  # noqa: BLE001 — RLS check is best-effort; must not crash main loop
         _rls_lock.release()
 
 
@@ -728,7 +731,7 @@ def calc_cross_session_costs():
     if not DATA_DIR.exists() or not is_safe_dir(DATA_DIR):
         return 0.0, 0.0
     today_start = datetime.combine(datetime.today().date(), datetime.min.time()).timestamp()
-    week_start = today_start - 6 * 86400
+    week_start = today_start - 6 * SECONDS_1D
     today_total = 0.0
     week_total = 0.0
     for jl in DATA_DIR.glob("*.jsonl"):
@@ -853,7 +856,7 @@ def list_sessions():
             display_name = _sanitize((d.get("model") or {}).get("display_name", "")).strip()
             if not display_name:
                 # Cleanup: dead artifact older than 1 hour
-                if (now - mt) > 3600:
+                if (now - mt) > SECONDS_1H:
                     try:
                         f.unlink()
                         f.with_suffix(".jsonl").unlink(missing_ok=True)
@@ -890,7 +893,7 @@ def load_state(sid):
 
 # Thin wrapper — shared.load_history is the single source of truth (v1.10.5+).
 # Passes monitor.DATA_DIR explicitly so tests that monkey-patch it still hit the fixture.
-def load_history(sid, n=120):
+def load_history(sid, n=HISTORY_RATE_SAMPLES):
     return _shared_load_history(sid, n, data_dir=DATA_DIR)
 
 
@@ -1107,8 +1110,8 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
 
         fh = rl.get("five_hour")
         sd = rl.get("seven_day")
-        _render_rate_limit(fh, "5HL", 18000)   # 5 h window
-        _render_rate_limit(sd, "7DL", 604800)  # 7 d window
+        _render_rate_limit(fh, "5HL", SECONDS_5H)
+        _render_rate_limit(sd, "7DL", SECONDS_7D)
         if not fh and not sd:
             buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
@@ -1271,10 +1274,34 @@ def render_legend(cols, rows):
 # Prices per 1M tokens (USD). Sources: official Anthropic pricing page.
 # cache_write = 5-minute TTL price. 1h cache write adds ~60% — documented separately.
 _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}  # Sonnet-tier fallback
-# Single source of truth for model metadata (display name, short code, pricing).
-# Adding a new model = one entry here, not three. _MODELS is populated after
-# the helpers are defined below (line ~1800) to keep model-related data colocated.
-_MODELS = {}
+
+# Single source of truth for model metadata — keyed by Anthropic model ID.
+# Each entry: {"name": "...", "code": ("XX", "V.v"), "pricing": {...} | None}
+# Pricing is per-1M-token USD (input / output / cache_read / cache_write).
+# Adding a new model = one entry here, not three. Used by _get_pricing (below),
+# _model_code / _model_label (token-stats modal section, ~line 2200).
+_MODELS = {
+    "claude-opus-4-7": {"name": "Opus 4.7", "code": ("OP", "4.7"),
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    "claude-opus-4-6": {"name": "Opus 4.6", "code": ("OP", "4.6"),
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"),
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"),
+                        "pricing": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}},
+    "claude-sonnet-4-6": {"name": "Sonnet 4.6", "code": ("SO", "4.6"),
+                          "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
+    "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"),
+                          "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
+    "claude-haiku-4-5-20251001": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
+                                   "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
+    "claude-haiku-3-5": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
+                         "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
+    # Short-ID fallbacks (some transcript entries use abbreviated IDs). No pricing.
+    "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": None},
+    "sonnet": {"name": "Sonnet", "code": ("SO", ""), "pricing": None},
+    "opus":   {"name": "Opus",   "code": ("OP", ""), "pricing": None},
+}
 
 
 def _get_pricing(model_id):
@@ -1706,9 +1733,9 @@ def _pulse_age(snap):
     age_s = max(0, int(time.time() - wall_t))
     if age_s < 60:
         return f"{age_s}s ago"
-    if age_s < 3600:
+    if age_s < SECONDS_1H:
         return f"{age_s // 60}m ago"
-    return f"{age_s // 3600}h ago"
+    return f"{age_s // SECONDS_1H}h ago"
 
 
 def render_pulse_modal(cols, rows):
@@ -1744,7 +1771,7 @@ def render_pulse_modal(cols, rows):
     # Details
     indicator = snap.get("indicator")
     if indicator:
-        ind_label = pulse._indicator_label(indicator)
+        ind_label = pulse.indicator_label(indicator)
         if indicator == "none":
             ind_color = C_GRN
         elif indicator in ("minor", "maintenance"):
@@ -2078,10 +2105,10 @@ def render_update_modal(cols, rows):
         age_s = max(0, int(time.monotonic() - rls.get("t", 0)))
         if age_s < 60:
             age_str = f"{age_s}s ago"
-        elif age_s < 3600:
+        elif age_s < SECONDS_1H:
             age_str = f"{age_s // 60}m ago"
         else:
-            age_str = f"{age_s // 3600}h ago"
+            age_str = f"{age_s // SECONDS_1H}h ago"
         buf.append(f"{C_DIM}Checked {age_str}{R}")
 
     buf.append(f"{C_CYN}github.com/iM3SK/cc-aio-mon{R}")
@@ -2165,32 +2192,6 @@ def render_update_modal(cols, rows):
 # ---------------------------------------------------------------------------
 _PERIOD_LABELS = {"all": "All Time", "7d": "Last 7 Days", "30d": "Last 30 Days"}
 _PERIOD_CYCLE = ["all", "7d", "30d"]
-
-# Single source of truth for model metadata — keyed by Anthropic model ID.
-# Each entry: {"name": "...", "code": ("XX", "V.v"), "pricing": {...} | None}
-# Pricing is per-1M-token USD (input / output / cache_read / cache_write).
-_MODELS.update({
-    "claude-opus-4-7": {"name": "Opus 4.7", "code": ("OP", "4.7"),
-                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
-    "claude-opus-4-6": {"name": "Opus 4.6", "code": ("OP", "4.6"),
-                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
-    "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"),
-                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
-    "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"),
-                        "pricing": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}},
-    "claude-sonnet-4-6": {"name": "Sonnet 4.6", "code": ("SO", "4.6"),
-                          "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
-    "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"),
-                          "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
-    "claude-haiku-4-5-20251001": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
-                                   "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
-    "claude-haiku-3-5": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
-                         "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
-    # Short-ID fallbacks (some transcript entries use abbreviated IDs). No pricing.
-    "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": None},
-    "sonnet": {"name": "Sonnet", "code": ("SO", ""), "pricing": None},
-    "opus":   {"name": "Opus",   "code": ("OP", ""), "pricing": None},
-})
 
 _MODEL_ID_RE = re.compile(r"^claude-(opus|sonnet|haiku)-(\d+)-(\d+)")
 # Match human-readable display names (e.g. "Opus 4.6 (1M context)") — used by render_picker
@@ -2526,9 +2527,7 @@ def render_picker(sessions, cols, rows):
 # ---------------------------------------------------------------------------
 # Screen flush
 # ---------------------------------------------------------------------------
-def flush(buf, cols=None):
-    if cols is None:
-        cols = shutil.get_terminal_size((80, 24)).columns
+def flush(buf, cols):
     out = [SYNC_ON, HOME]
     for i, line in enumerate(buf):
         out.append(truncate(line, cols))
@@ -2558,9 +2557,10 @@ def _install_crash_logger():
         try:
             if ensure_data_dir(DATA_DIR):
                 log_path = DATA_DIR / "monitor-crash.log"
-                # Rotate before each crash write so the log never grows unbounded
-                # across many crash cycles (keeps last large crash + current one).
-                rotate_crash_log(log_path)
+                # Always rotate so two crashes in quick succession don't
+                # silently overwrite each other (open("w") below truncates).
+                # Previous crash → .log.1, current crash → .log.
+                rotate_crash_log(log_path, always=True)
                 with open(log_path, "w", encoding="utf-8") as f:
                     f.write(f"monitor v{VERSION} crashed at {time.ctime()}\n")
                     f.write(f"platform: {sys.platform}, python: {sys.version}\n")
