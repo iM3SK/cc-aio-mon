@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from typing import IO, Iterable, List, Optional, Tuple
 
 # Platform-conditional lock primitives used by acquire_singleton_lock().
 if sys.platform == "win32":
@@ -51,7 +52,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.12.2"
+VERSION = "1.12.3"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor
@@ -121,12 +122,12 @@ C_DIM = E + "38;2;76;86;106m"
 _CONTEXT_SUFFIX_RE = re.compile(r"\s*\((\d+\w?)\s*context\)")
 
 
-def strip_context_suffix(name):
+def strip_context_suffix(name: str) -> str:
     """Remove '(Nk context)' / '(NM context)' entirely. 'Opus 4.7 (1M context)' -> 'Opus 4.7'."""
     return _CONTEXT_SUFFIX_RE.sub("", name).strip()
 
 
-def compact_context_suffix(name):
+def compact_context_suffix(name: str) -> str:
     """Compact to trailing unit. 'Opus 4.7 (1M context)' -> 'Opus 4.7 1M'."""
     return _CONTEXT_SUFFIX_RE.sub(r" \1", name).strip()
 
@@ -138,7 +139,7 @@ def _num(v, default=0):
         return default
 
 
-def load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None):
+def load_history(sid: str, n: int = HISTORY_RATE_SAMPLES, data_dir: Optional[pathlib.Path] = None) -> List[dict]:
     """Read last n JSONL history entries for session `sid`.
 
     Single source of truth for both monitor.py (BRN/CTR dashboard rates) and
@@ -172,7 +173,7 @@ def load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None):
     return out
 
 
-def safe_read(path, max_bytes):
+def safe_read(path, max_bytes: int) -> Optional[bytes]:
     """Bounded read — returns bytes or None. Never reads more than max_bytes + 1.
 
     Closes the size TOCTOU gap: caller doesn't have to stat first, and even if
@@ -316,7 +317,7 @@ def ensure_data_dir(d):
 _CHANGELOG_ENTRY_RE_TEMPLATE = r"## v{}\b.*?(?=\n## v|\Z)"
 
 
-def extract_changelog_entry(text, version, max_lines=None):
+def extract_changelog_entry(text: str, version: str, max_lines: Optional[int] = None) -> str:
     """Extract single '## v{version}' section from CHANGELOG text."""
     pattern = _CHANGELOG_ENTRY_RE_TEMPLATE.format(re.escape(version))
     m = re.search(pattern, text, re.DOTALL)
@@ -347,7 +348,7 @@ def _git_env():
     return env
 
 
-def run_git(args, cwd, timeout=15):
+def run_git(args: Iterable[str], cwd, timeout: float = 15) -> "subprocess.CompletedProcess[str]":
     """Safe git invocation with minimal env whitelist.
     Returns subprocess.CompletedProcess. Raises FileNotFoundError if git missing."""
     return subprocess.run(
@@ -366,7 +367,7 @@ def run_git(args, cwd, timeout=15):
 # ---------------------------------------------------------------------------
 
 
-def check_syntax_after_pull(repo_root, py_files=None):
+def check_syntax_after_pull(repo_root: pathlib.Path, py_files: Optional[Iterable[str]] = None) -> List[str]:
     """Compile each .py file under ``repo_root`` to catch syntax errors after
     a self-update. Returns a list of relative filenames that failed to compile
     (empty when all files pass). Files missing from disk are silently skipped;
@@ -393,7 +394,7 @@ def check_syntax_after_pull(repo_root, py_files=None):
     return bad
 
 
-def parse_ahead_behind(rev_list_output):
+def parse_ahead_behind(rev_list_output: str) -> Tuple[int, int]:
     """Parse the output of ``git rev-list --left-right --count HEAD...origin/main``
     and return ``(ahead, behind)``. Raises ValueError if the output cannot be
     parsed into two integers.
@@ -408,7 +409,7 @@ def parse_ahead_behind(rev_list_output):
     return int(parts[0]), int(parts[1])
 
 
-def rotate_crash_log(path, max_bytes=MAX_FILE_SIZE, always=False):
+def rotate_crash_log(path: pathlib.Path, max_bytes: int = MAX_FILE_SIZE, always: bool = False) -> None:
     """Rotate ``path`` to ``path.1`` when size exceeds ``max_bytes``, or
     unconditionally when ``always=True``.
 
@@ -437,7 +438,7 @@ def rotate_crash_log(path, max_bytes=MAX_FILE_SIZE, always=False):
         pass
 
 
-def acquire_singleton_lock(lock_path):
+def acquire_singleton_lock(lock_path) -> Optional[IO]:
     """Try to acquire an exclusive non-blocking file lock at ``lock_path``.
 
     Returns the open file handle on success — the caller MUST keep a strong
@@ -486,7 +487,7 @@ def acquire_singleton_lock(lock_path):
     return fh
 
 
-def calc_rates(hist):
+def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:
     """Return (brn $/min, ctr %/min) from history, or (None, None) if insufficient data."""
     if len(hist) < 2:
         return None, None
