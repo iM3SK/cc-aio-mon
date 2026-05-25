@@ -83,7 +83,7 @@ python3 update.py             # check only
 python3 update.py --apply     # check + apply
 ```
 
-Restart Claude Code after updating. See [README — Updating](Archyv/cc-aio-mon/README.md#updating) for full details.
+Restart Claude Code after updating. See [README — Updating](../README.md#updating) for full details.
 
 ## Troubleshooting
 

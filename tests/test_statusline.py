@@ -162,9 +162,14 @@ class TestSeg5hl(unittest.TestCase):
         self.assertNotIn("\u2192", plain)  # no arrow when expired
 
     def test_future_resets_shows_countdown(self):
-        d = _full_data()
-        d["rate_limits"]["five_hour"]["resets_at"] = time.time() + 7260  # ~2h 1m
-        text, vl = seg_5hl(d)
+        # T-P2-1: freeze time so test setup and seg_5hl observe the same
+        # epoch; otherwise sub-second race between time.time() here and
+        # time.time() inside seg_5hl can flip "2h" \u2192 "1h 59m" intermittently.
+        FROZEN = 1_700_000_000.0
+        with patch("statusline.time.time", return_value=FROZEN):
+            d = _full_data()
+            d["rate_limits"]["five_hour"]["resets_at"] = FROZEN + 7260  # ~2h 1m
+            text, vl = seg_5hl(d)
         plain = _ANSI_RE.sub("", text)
         self.assertIn("\u2192", plain)
         self.assertIn("2h", plain)
@@ -200,9 +205,12 @@ class TestSeg7dl(unittest.TestCase):
         self.assertIsNone(seg_7dl({}))
 
     def test_future_resets_shows_countdown(self):
-        d = _full_data()
-        d["rate_limits"]["seven_day"]["resets_at"] = time.time() + 86400 * 6 + 3600 * 12
-        text, vl = seg_7dl(d)
+        # T-P2-1: freeze time (see comment in TestSeg5hl with same name).
+        FROZEN = 1_700_000_000.0
+        with patch("statusline.time.time", return_value=FROZEN):
+            d = _full_data()
+            d["rate_limits"]["seven_day"]["resets_at"] = FROZEN + 86400 * 6 + 3600 * 12
+            text, vl = seg_7dl(d)
         plain = _ANSI_RE.sub("", text)
         self.assertIn("\u2192", plain)
         self.assertIn("6d", plain)
@@ -519,6 +527,18 @@ class TestStatuslineMainE2E(unittest.TestCase):
         statusline.DATA_DIR = self._orig_data_dir
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @staticmethod
+    def _fake_stdin(payload_bytes):
+        """Build a stdin stand-in exposing .buffer.read() returning bytes.
+
+        NEW-002 fix switched statusline.main() to read via
+        `sys.stdin.buffer.read()` for encoding independence; tests need a
+        binary-capable mock instead of StringIO.
+        """
+        import io
+        from types import SimpleNamespace
+        return SimpleNamespace(buffer=io.BytesIO(payload_bytes))
+
     def test_main_writes_snapshot_and_prints_line(self):
         import io, json as _json
         import statusline as _sl
@@ -533,7 +553,7 @@ class TestStatuslineMainE2E(unittest.TestCase):
                 "total_lines_removed": 0,
             },
         }
-        fake_stdin = io.StringIO(_json.dumps(payload))
+        fake_stdin = self._fake_stdin(_json.dumps(payload).encode("utf-8"))
         fake_stdout = io.StringIO()
         with patch.object(_sl.sys, "stdin", fake_stdin), \
              patch.object(_sl.sys, "stdout", fake_stdout), \
@@ -552,7 +572,7 @@ class TestStatuslineMainE2E(unittest.TestCase):
     def test_main_empty_stdin_returns_silently(self):
         import io
         import statusline as _sl
-        fake_stdin = io.StringIO("")
+        fake_stdin = self._fake_stdin(b"")
         fake_stdout = io.StringIO()
         with patch.object(_sl.sys, "stdin", fake_stdin), \
              patch.object(_sl.sys, "stdout", fake_stdout), \
@@ -564,12 +584,41 @@ class TestStatuslineMainE2E(unittest.TestCase):
     def test_main_invalid_json_returns_silently(self):
         import io
         import statusline as _sl
-        fake_stdin = io.StringIO("{not valid json")
+        fake_stdin = self._fake_stdin(b"{not valid json")
         fake_stdout = io.StringIO()
         with patch.object(_sl.sys, "stdin", fake_stdin), \
              patch.object(_sl.sys, "stdout", fake_stdout), \
              patch.object(_sl, "ensure_utf8_stdout", lambda: None):
             _sl.main()  # must not raise
+
+    def test_main_utf8_session_name_preserved_through_pipeline(self):
+        """NEW-002 regression: Slovak diacritics in session_name must
+        survive stdin -> json -> write_shared_state -> snapshot file.
+
+        Pre-NEW-002, sys.stdin.read() used the locale codec (cp1250 on
+        SK Windows) and mangled `ý`, `š`, `č` etc. into mojibake byte
+        pairs before json.loads ever saw them.
+        """
+        import io, json as _json
+        import statusline as _sl
+        sid = "utf8test"
+        title = "Kompletný audit — diakritika: š č ť ž ý á í é"
+        payload = {
+            "session_id": sid,
+            "model": {"id": "claude-opus-4-5", "display_name": "Opus 4.5"},
+            "session_name": title,
+        }
+        # Emulate Claude Code: emits JSON as raw UTF-8 bytes on stdin.
+        fake_stdin = self._fake_stdin(_json.dumps(payload).encode("utf-8"))
+        fake_stdout = io.StringIO()
+        with patch.object(_sl.sys, "stdin", fake_stdin), \
+             patch.object(_sl.sys, "stdout", fake_stdout), \
+             patch.object(_sl, "ensure_utf8_stdout", lambda: None):
+            _sl.main()
+        snap = self._base / f"{sid}.json"
+        parsed = _json.loads(snap.read_text(encoding="utf-8"))
+        # Title must round-trip unchanged — no `Ă˝` / `Ĺˇ` mojibake.
+        self.assertEqual(parsed["session_name"], title)
 
 
 class TestIPCForwardCompatNoSchemaVersion(unittest.TestCase):

@@ -43,7 +43,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.12.0"
+VERSION = "1.12.1"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor
@@ -263,7 +263,15 @@ def is_safe_dir(p):
 
 
 def ensure_data_dir(d):
-    """Create data dir with 0o700 and verify safety. Returns True if usable."""
+    """Create data dir with 0o700 and verify safety. Returns True if usable.
+
+    Unix only: verifies the directory is owned by the current effective UID
+    (S-P2-1, CWE-377/732). On a multi-user host, an attacker who can predict
+    `$TMPDIR/claude-aio-monitor/` could pre-create the directory under their
+    own UID; subsequent writes by the legitimate user would then create
+    files inside an attacker-owned dir, exposing IPC snapshots and JSONL
+    history. We refuse to use the dir if ownership doesn't match.
+    """
     try:
         d.mkdir(mode=0o700, exist_ok=True)
     except OSError:
@@ -281,6 +289,14 @@ def ensure_data_dir(d):
                 os.chmod(d, 0o700)
         except OSError:
             pass
+        # UID ownership guard (S-P2-1): refuse to use a directory created by
+        # another user. `os.geteuid` is Unix-only and platform-guarded.
+        if hasattr(os, "geteuid"):
+            try:
+                if d.stat().st_uid != os.geteuid():
+                    return False
+            except OSError:
+                return False
     return True
 
 

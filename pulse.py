@@ -54,14 +54,15 @@ FETCH_INTERVAL = 30.0  # seconds between background fetches
 USER_AGENT = f"cc-aio-mon-pulse/{VERSION} (+https://github.com/iM3SK/cc-aio-mon)"
 MAX_RESPONSE_BYTES = 512 * 1024  # 512 KB cap on status.json response
 
-# Scrub proxy env vars for urllib.request.urlopen calls. Mirrors the env-scrub
-# rationale in shared._GIT_ENV_WHITELIST: a pre-injected HTTP(S)_PROXY should
-# not silently route Pulse fetches through an attacker-controlled intermediary.
-# install_opener is process-global, but urlopen is only used by pulse.py in this
-# codebase (verified by grep).
-urllib.request.install_opener(
-    urllib.request.build_opener(urllib.request.ProxyHandler({}))
-)
+# Scrub proxy env vars for the pulse-specific URL fetches. Mirrors the
+# env-scrub rationale in shared._GIT_ENV_WHITELIST: a pre-injected
+# HTTP(S)_PROXY should not silently route Pulse fetches through an
+# attacker-controlled intermediary. A *local* opener (A-P2-2) avoids the
+# process-global side effect of urllib.request.install_opener — other
+# modules (or future ones) keep their normal urllib behaviour and the
+# proxy-scrub is scoped to the two _fetch_summary / _ping_api callers
+# that go through `_OPENER.open(...)` below.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 # Persistence + cleanup
 LOG_PATH = DATA_DIR / "pulse.jsonl"
@@ -282,8 +283,8 @@ def _fetch_summary():
     """Fetch status.claude.com summary.json. Returns (data, error_tag)."""
     req = urllib.request.Request(SUMMARY_URL, headers={"User-Agent": USER_AGENT})
     try:
-        # SUMMARY_URL is a hardcoded HTTPS constant; proxy env scrubbed via install_opener
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # nosec B310
+        # SUMMARY_URL is a hardcoded HTTPS constant; proxy env scrubbed via module-local _OPENER
+        with _OPENER.open(req, timeout=HTTP_TIMEOUT) as resp:  # nosec B310
             # Guard against oversized responses
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
@@ -321,8 +322,8 @@ def _ping_api():
     )
     start = time.monotonic()
     try:
-        # PROBE_URL is a hardcoded HTTPS constant; proxy env scrubbed via install_opener
-        with urllib.request.urlopen(req, timeout=PING_TIMEOUT) as resp:  # nosec B310
+        # PROBE_URL is a hardcoded HTTPS constant; proxy env scrubbed via module-local _OPENER
+        with _OPENER.open(req, timeout=PING_TIMEOUT) as resp:  # nosec B310
             resp.read(1)  # drain minimally; context manager guarantees close on exit
     except urllib.error.HTTPError:
         # Any HTTP status = endpoint responded (401/405/429 all fine as liveness signal)

@@ -2,7 +2,7 @@
 
 > v1.12.0 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
-> For the full feature reference see [README.md](Archyv/cc-aio-mon/README.md).
+> For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
 
 ---
