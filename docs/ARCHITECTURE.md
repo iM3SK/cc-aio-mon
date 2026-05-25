@@ -270,10 +270,13 @@ with a human-readable error pointing to the lock file. The lock file contains
 the holder's PID for diagnosis. `--list` mode is intentionally exempt because
 it is a one-shot non-interactive read.
 
-**Crash-log rotation.** `_install_crash_logger()` now calls
-`shared.rotate_crash_log(log_path)` before each crash write. This keeps
-`monitor-crash.log` bounded at 1 MB (rotated to `monitor-crash.log.1`),
-preventing unbounded growth across repeated crash cycles.
+**Crash-log rotation.** `_install_crash_logger()` calls
+`shared.rotate_crash_log(log_path, always=True)` before each crash write.
+The previous traceback is always preserved as `monitor-crash.log.1` even
+when both crashes are well under 1 MB (since v1.12.2) — two crashes in
+quick succession no longer overwrite each other. The default
+`always=False` branch keeps the original size-gated rotation behavior for
+any caller that only cares about disk-growth bounds.
 
 **File-IPC schema version.** `shared.SCHEMA_VERSION = 1` is stamped into every
 snapshot and JSONL entry by `statusline.write_shared_state()`. Monitor reads all
