@@ -38,13 +38,13 @@ Two long-running processes communicate solely via the filesystem—no sockets, p
 > - macOS: per-user `/var/folders/<hash>/T/`
 > - Windows: `%TEMP%` (e.g. `C:\Users\<user>\AppData\Local\Temp\`)
 
-**Constants** (source: `shared.py:35-36`):
+**Constants** (source: `shared.py:50-51`):
 - `DATA_DIR_NAME` = `"claude-aio-monitor"`
 - `DATA_DIR` = `pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME`
 
 ### Creator
 
-**Function**: `ensure_data_dir(d)` (`shared.py:259-278`)
+**Function**: `ensure_data_dir(d)` (`shared.py:279`)
 
 | Attribute | Value |
 |---|---|
@@ -54,7 +54,7 @@ Two long-running processes communicate solely via the filesystem—no sockets, p
 | Return value | `True` if created/verified; `False` if symlink/junction/unsafe |
 | Idempotent | Yes (mkdir exists_ok=True) |
 
-**Safety Check**: `is_safe_dir(p)` (`shared.py:241-256`)
+**Safety Check**: `is_safe_dir(p)` (`shared.py:261`)
 
 Rejects symlinks and reparse points (Windows junctions). Uses `lstat()` (TOCTOU-resistant):
 - Unix: `not S_ISDIR(st_mode) → False`
@@ -68,7 +68,7 @@ Callers must call `ensure_data_dir()` once at startup, then all file operations 
 
 ### Regex Pattern
 
-**Source**: `shared.py:27-29`
+**Source**: `shared.py:34-36`
 
 ```python
 _SID_RE = re.compile(
@@ -85,7 +85,7 @@ _SID_RE = re.compile(
 
 ### Reserved Session IDs
 
-**Source**: `shared.py:20`
+**Source**: `shared.py:27`
 
 ```python
 RESERVED_SIDS = frozenset({"rls", "stats", "pulse"})
@@ -202,7 +202,7 @@ def load_state(sid):
 
 ### Schema Version
 
-**Current Value**: 1 (`shared.py:47`)
+**Current Value**: 1 (`shared.py:62`)
 
 **Semantics**:
 - Added to snapshot at write time by statusline: `{..., "_schema_version": 1}`
@@ -255,7 +255,7 @@ After successful snapshot write:
 
 ### Reading (shared.py + monitor.py)
 
-**Function**: `load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None)` (`shared.py:122-153`)
+**Function**: `load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None)` (`shared.py:142`)
 
 Single source of truth for both statusline and monitor. `HISTORY_RATE_SAMPLES`
 defaults to 120 — at ~1 statusline event/min this is a ~2-hour rolling window.
@@ -496,7 +496,7 @@ Lock file mechanism introduced to prevent multiple monitors from corrupting the 
 
 ### Acquisition
 
-**Function**: `acquire_singleton_lock(lock_path)` (`shared.py:397-445`)
+**Function**: `acquire_singleton_lock(lock_path)` (`shared.py:441`)
 
 ```python
 def acquire_singleton_lock(lock_path):
@@ -646,7 +646,7 @@ Multiple `--list` invocations can run concurrently with monitor or each other.
 
 ### Current State
 
-- **`SCHEMA_VERSION`** = 1 (`shared.py:47`)
+- **`SCHEMA_VERSION`** = 1 (`shared.py:62`)
 - **Version in file**: `_schema_version: 1` added to every snapshot & history entry by statusline.py
 
 ### Backward Compatibility
@@ -768,7 +768,7 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 - [Error Handling](#error-cases--silent-failures)
 
 **Functions** (with source)
-- `ensure_data_dir()` – `shared.py:259-278`
+- `ensure_data_dir()` – `shared.py:279`
 - `is_safe_dir()` – `shared.py:241-256`
 - `safe_read()` – `shared.py:156-173`
 - `load_history()` – `shared.py:122-153`
