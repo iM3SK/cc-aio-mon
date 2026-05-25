@@ -294,11 +294,11 @@ for `git rev-list --left-right --count` output in both files.
 
 | Goal | Start here |
 |---|---|
-| Change how burn rate or context rate is computed | `shared.calc_rates()` (shared.py:448) — reads last 120 JSONL history entries |
+| Change how burn rate or context rate is computed | `shared.calc_rates()` (shared.py:490) — reads last HISTORY_RATE_SAMPLES JSONL history entries |
 | Change hardcoded model pricing | `monitor.py:_aggregate_session_cost()` (line 1269) and the per-model rate dicts above it |
 | Add a field to the IPC snapshot | `statusline.py:write_shared_state()` (line 278) → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` |
 | Add a new TUI modal | `monitor.py:render_frame()` (line 833) dispatches to `render_*` functions; add a new `render_xyz()` and wire a key in the event loop |
 | Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` (line 198) |
 | Change the Anthropic Pulse scoring weights | `pulse.py` constants `_W_INDICATOR`, `_W_INCIDENTS`, `_W_LATENCY` and `_INDICATOR_SCORE` / `_IMPACT_DEDUCT` dicts |
-| Add a new Python file to the project | Append the filename to `shared.PY_FILES` (shared.py:87) — this propagates to the post-update syntax check and the compile-check in the test suite |
+| Add a new Python file to the project | Append the filename to `shared.PY_FILES` (shared.py:107) — this propagates to the post-update syntax check and the compile-check in the test suite |
 | Understand the session file format | `statusline.py:write_shared_state()` writes it; `monitor.py:load_state()` reads it; field names mirror the Claude Code statusline JSON protocol keys |

@@ -64,16 +64,16 @@ Work through these in order before creating any tag.
   current `## v1.12.3` block. Do not push yet.
 
 - [ ] **VERSION constant bumped in `shared.py` only.**
-  The constant lives at `shared.py:46`:
+  The constant lives at `shared.py:55`:
   ```python
-  VERSION = "1.12.1"
+  VERSION = "1.12.3"
   ```
   Change this string to the new version. Do not touch `monitor.py`,
   `pulse.py`, or `update.py` for the version — all three import from
   `shared.py` (`from shared import VERSION` or similar). `update.py`'s
   `get_local_version()` and `get_remote_version()` both regex-scan
   `shared.py` via `VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']',
-  re.MULTILINE)` (`shared.py:43`). If you put the version anywhere else,
+  re.MULTILINE)` (`shared.py:52`). If you put the version anywhere else,
   the release-check worker silently reports `error`.
 
 - [ ] **Re-run tests after the VERSION and CHANGELOG edits.**
@@ -164,7 +164,7 @@ headers, bullet list under each, blank line, trailing test count line.
   them via `unittest discover`.
 
 - [ ] **Syntax check covers all five modules.**
-  `shared.PY_FILES` (`shared.py:93`) lists every file the post-pull syntax
+  `shared.PY_FILES` (`shared.py:107`) lists every file the post-pull syntax
   check verifies:
   ```python
   PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
@@ -238,10 +238,10 @@ following are true after your push:
 
 | What the code checks | Where it reads | Failure mode if wrong |
 |---|---|---|
-| Remote VERSION string | `git show origin/main:shared.py` → `VERSION_RE` (`shared.py:43`) | Reports `error` in release indicator; `RuntimeError: VERSION constant not found in remote shared.py` on `--apply` |
-| Remote CHANGELOG entry | `git show origin/main:CHANGELOG.md` → `extract_changelog_entry(text, version, max_lines=None)` (`shared.py:290`) | Update modal shows no changelog preview; not fatal |
+| Remote VERSION string | `git show origin/main:shared.py` → `VERSION_RE` (`shared.py:52`) | Reports `error` in release indicator; `RuntimeError: VERSION constant not found in remote shared.py` on `--apply` |
+| Remote CHANGELOG entry | `git show origin/main:CHANGELOG.md` → `extract_changelog_entry(text, version, max_lines=None)` (`shared.py:320`) | Update modal shows no changelog preview; not fatal |
 | `git pull --ff-only` succeeds | Requires `main` is linear (no force-push, no rebase of published history) | `git pull` exits non-zero; user is left on old version with the rollback tag as recovery point |
-| Post-pull syntax check passes | `shared.check_syntax_after_pull(repo_root)` iterates `PY_FILES` (`shared.py:93`) | Warns user `Syntax errors in: <file>` and shows rollback hint |
+| Post-pull syntax check passes | `shared.check_syntax_after_pull(repo_root)` iterates `PY_FILES` (`shared.py:107`) | Warns user `Syntax errors in: <file>` and shows rollback hint |
 
 **Critical constraint:** `git pull --ff-only` requires that `origin/main` is a
 fast-forward ancestor of the user's local `main`. If you ever rebase or
