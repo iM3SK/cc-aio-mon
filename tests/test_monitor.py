@@ -243,7 +243,7 @@ class TestCalcRates(unittest.TestCase):
     def _entry(self, t, cost, ctx_pct):
         return {"t": t, "cost": {"total_cost_usd": cost}, "context_window": {"used_percentage": ctx_pct}}
 
-    def test_basic(self):
+    def test_two_entries_compute_per_minute_rates(self):
         hist = [self._entry(1_600_000_000, 0.0, 10.0), self._entry(1_600_000_060, 0.06, 20.0)]
         cpm, xpm = calc_rates(hist)
         self.assertAlmostEqual(cpm, 0.06, places=5)
@@ -1315,6 +1315,14 @@ class TestRenderCostBreakdown(unittest.TestCase):
 class TestAggregateSessionCost(unittest.TestCase):
 
     def setUp(self):
+        _SESSION_COST_CACHE.clear()
+
+    def tearDown(self):
+        # Defensive guard for module-level cache state (audit T-P2-5):
+        # if a test mid-run inserts entries into _SESSION_COST_CACHE and
+        # raises after the assertion fails, the next class in the same
+        # process would inherit them. unittest runs tearDown even on
+        # failure, so this guarantees a clean slate.
         _SESSION_COST_CACHE.clear()
 
     def test_aggregate_session_cost_via_transcript_path(self):
@@ -2535,6 +2543,10 @@ class TestScanTranscriptCacheOnly(unittest.TestCase):
 class TestAggregateSessionCostSecurity(unittest.TestCase):
 
     def setUp(self):
+        _SESSION_COST_CACHE.clear()
+
+    def tearDown(self):
+        # Audit T-P2-5 defensive guard — see TestAggregateSessionCost.tearDown.
         _SESSION_COST_CACHE.clear()
 
     def test_transcript_path_traversal_rejected(self):

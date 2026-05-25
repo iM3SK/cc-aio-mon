@@ -1508,15 +1508,17 @@ def _aggregate_session_cost(data):
                 u = msg.get("usage") or {}
                 mid = msg.get("model") or ""
                 pricing = _get_pricing(mid)
-                i = _num(u.get("input_tokens", 0))
-                o = _num(u.get("output_tokens", 0))
-                r = _num(u.get("cache_read_input_tokens", 0))
-                w = _num(u.get("cache_creation_input_tokens", 0))
-                inp += i; out += o; cr += r; cw += w
-                ci += i * pricing["input"] / 1_000_000
-                co += o * pricing["output"] / 1_000_000
-                ccr += r * pricing["cache_read"] / 1_000_000
-                ccw += w * pricing["cache_write"] / 1_000_000
+                # Per-record token deltas — name with cr_inc/cw_inc (not r/w)
+                # to avoid visual collision with module-level `R` ANSI reset.
+                in_inc = _num(u.get("input_tokens", 0))
+                out_inc = _num(u.get("output_tokens", 0))
+                cr_inc = _num(u.get("cache_read_input_tokens", 0))
+                cw_inc = _num(u.get("cache_creation_input_tokens", 0))
+                inp += in_inc; out += out_inc; cr += cr_inc; cw += cw_inc
+                ci += in_inc * pricing["input"] / 1_000_000
+                co += out_inc * pricing["output"] / 1_000_000
+                ccr += cr_inc * pricing["cache_read"] / 1_000_000
+                ccw += cw_inc * pricing["cache_write"] / 1_000_000
                 stu = u.get("server_tool_use") or {}
                 if isinstance(stu, dict):
                     wsr += int(_num(stu.get("web_search_requests", 0)))

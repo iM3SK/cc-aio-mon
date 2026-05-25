@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.12.3 — 2026-05-25
+
+Second audit-cleanup release. Closes the remaining actionable P2/P3
+findings from the 24.05.2026 audit; the rest stay DEFER with explicit
+triggers (per the audit's own "Nepriorita" / "OK ako je" verdicts on
+those items). No new features, no user-visible behavior change.
+
+**Tests:**
+- **Vague test names renamed (T-P2-3).** 13 occurrences of `test_basic`
+  / `test_success` / `test_failure` across `test_update.py`,
+  `test_statusline.py`, and `test_monitor.py` are now
+  `test_<subject>_<condition>_<expectation>` per the project convention
+  (e.g. `TestGitCmd.test_success` → `test_returns_stripped_stdout_on_zero_rc`).
+  Failure messages are now self-describing.
+- **Defensive `tearDown` for module-level cache state (T-P2-5).**
+  `TestAggregateSessionCost` and `TestAggregateSessionCostSecurity` now
+  explicitly clear `_SESSION_COST_CACHE` in `tearDown` in addition to
+  `setUp`. Closes the audit-noted "drobné riziko" where a mid-test
+  failure could leak cache entries into the next class in the same
+  process.
+- **`pulse._atomic_replace_log` OSError cleanup test (P3-4).** Pins
+  that a simulated `Path.replace` failure swallows the exception
+  (best-effort contract) and unlinks the `.tmp` file so it doesn't
+  leak into `DATA_DIR`.
+- **`is_safe_dir` Windows junction mock tests (P3-3).** Two new tests
+  that mock `st_file_attributes` to exercise the Windows-only reparse-
+  point branch (`shared.py:269-274`) cross-platform: one verifies a
+  junction is rejected, the complement verifies a real directory
+  without the bit is accepted. Previously only native symlinks were
+  exercised, leaving the junction code path unverified on CI.
+
+**Code hygiene:**
+- **`r` / `w` → `cr_inc` / `cw_inc` in `_aggregate_session_cost`
+  (P3 STYLE-002).** The single-letter loop locals visually collided
+  with the module-level `R = "\033[0m"` ANSI reset. Renamed to
+  `in_inc` / `out_inc` / `cr_inc` / `cw_inc` to make the per-record
+  semantics explicit.
+
+**Documentation:**
+- **Type hints on `shared.py` public API (P3 DOC-001).** Added
+  annotations to the helpers the audit specifically called out as
+  "would improve IDE autocomplete for contributors":
+  `safe_read`, `run_git`, `acquire_singleton_lock`, `load_history`,
+  `calc_rates`, plus `extract_changelog_entry`, `parse_ahead_behind`,
+  `check_syntax_after_pull`, `rotate_crash_log`,
+  `strip_context_suffix`, `compact_context_suffix`. Imports
+  `Optional` / `Tuple` / `List` / `Iterable` / `IO` from `typing`
+  (Python 3.8 compatible — no PEP 585 `list[dict]` syntax).
+  No `mypy --strict` in CI; the annotations are documentary.
+
+**Tests:** 608 passing (+3 from this batch).
+
 ## v1.12.2 — 2026-05-25
 
 Audit-cleanup release: outstanding P2 + P3 findings from the 24.05.2026

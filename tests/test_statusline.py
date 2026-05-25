@@ -95,7 +95,7 @@ class TestGetTerminalWidth(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestSegModel(unittest.TestCase):
 
-    def test_basic(self):
+    def test_renders_display_name_with_consistent_vlen(self):
         text, vl = seg_model(_full_data())
         self.assertEqual(vl, _vlen(text))
         self.assertIn("Opus 4", _ANSI_RE.sub("", text))
@@ -114,7 +114,7 @@ class TestSegModel(unittest.TestCase):
 
 class TestSegCtx(unittest.TestCase):
 
-    def test_basic(self):
+    def test_renders_ctx_pct_with_token_count(self):
         text, vl = seg_ctx(_full_data())
         self.assertEqual(vl, _vlen(text))
         plain = _ANSI_RE.sub("", text)
@@ -132,7 +132,7 @@ class TestSegCtx(unittest.TestCase):
 
 class TestSeg5hl(unittest.TestCase):
 
-    def test_basic(self):
+    def test_renders_5hl_label_with_consistent_vlen(self):
         text, vl = seg_5hl(_full_data())
         self.assertEqual(vl, _vlen(text))
         self.assertIn("5HL", _ANSI_RE.sub("", text))
@@ -190,7 +190,7 @@ class TestSeg5hl(unittest.TestCase):
 
 class TestSeg7dl(unittest.TestCase):
 
-    def test_basic(self):
+    def test_renders_7dl_label_with_consistent_vlen(self):
         text, vl = seg_7dl(_full_data())
         self.assertEqual(vl, _vlen(text))
         self.assertIn("7DL", _ANSI_RE.sub("", text))
@@ -225,7 +225,7 @@ class TestSeg7dl(unittest.TestCase):
 
 class TestSegCost(unittest.TestCase):
 
-    def test_basic(self):
+    def test_renders_cst_label_with_dollar_amount(self):
         text, vl = seg_cost(_full_data())
         self.assertEqual(vl, _vlen(text))
         self.assertIn("CST", _ANSI_RE.sub("", text))
@@ -243,7 +243,7 @@ class TestSegCost(unittest.TestCase):
 
 class TestSegBrn(unittest.TestCase):
 
-    def test_basic(self):
+    def test_renders_brn_label_with_consistent_vlen(self):
         text, vl = seg_brn(0.0512)
         self.assertEqual(vl, _vlen(text))
         self.assertIn("BRN", _ANSI_RE.sub("", text))
