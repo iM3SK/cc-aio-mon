@@ -24,6 +24,6 @@ jobs:
         # File list sourced from shared.PY_FILES (single source of truth — see tests.yml compile step).
         run: bandit -r $(python -c "from shared import PY_FILES; print(' '.join(PY_FILES))") -f sarif -o bandit.sarif --severity-level medium || true
       - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           sarif_file: bandit.sarif
