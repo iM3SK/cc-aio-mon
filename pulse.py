@@ -28,19 +28,18 @@ Snapshot schema (keys may be None during warm-up or on errors):
 """
 
 import json
-import os
-import pathlib
 import re
 import socket
 import statistics
-import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections import deque
+from typing import List, Optional, TypedDict
 
-from shared import DATA_DIR, MAX_FILE_SIZE, SECONDS_1D, ensure_data_dir, safe_read, VERSION
+from shared import (DATA_DIR, MAX_FILE_SIZE, SECONDS_1D, atomic_write_text,
+                    ensure_data_dir, safe_read, VERSION)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -104,7 +103,28 @@ _W_LATENCY = 0.20
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
-_snapshot = {
+class PulseSnapshot(TypedDict):
+    """Typed view of the pulse snapshot — the public IPC contract returned by
+    get_pulse_snapshot() and consumed by monitor.render_pulse_modal. Codifies
+    the field list documented in the module docstring; the runtime value stays
+    a plain dict (TypedDict adds no runtime overhead or validation)."""
+    t: float
+    wall_t: float
+    score: Optional[int]
+    raw_score: Optional[int]
+    verdict: str
+    level: str
+    reason: str
+    indicator: Optional[str]
+    incidents: List[dict]
+    components: List[dict]
+    latency_ms: Optional[float]
+    latency_p50_ms: Optional[int]
+    latency_p95_ms: Optional[int]
+    error: Optional[str]
+
+
+_snapshot: PulseSnapshot = {
     "t": 0.0,
     "wall_t": 0.0,
     "score": None,
@@ -146,7 +166,7 @@ def _latency_score(latency_ms):
     return 10
 
 
-def indicator_label(indicator):
+def indicator_label(indicator: Optional[str]) -> str:
     """Map Statuspage indicator value to human-readable label. Public API
     so monitor.render_pulse_modal can format it without reaching into a
     private symbol."""
@@ -213,7 +233,7 @@ def _reset_history():
         _latency_history.clear()
 
 
-def compute_score(raw):
+def compute_score(raw: dict) -> dict:
     """Pure scoring fn. Input: raw fetch dict. Output: snapshot dict (partial).
 
     raw = {
@@ -336,15 +356,6 @@ def _ping_api():
     return (time.monotonic() - start) * 1000.0
 
 
-# Regex patterns to detect affected model(s) in incident titles.
-# Word-boundary match to avoid false positives (e.g. "opus" in unrelated words).
-_MODEL_PATTERNS = {
-    "opus":   re.compile(r"\bopus\b",   re.IGNORECASE),
-    "sonnet": re.compile(r"\bsonnet\b", re.IGNORECASE),
-    "haiku":  re.compile(r"\bhaiku\b",  re.IGNORECASE),
-}
-
-
 def _tag_models_from_incident(inc):
     """Return sorted model tags for an incident.
 
@@ -420,25 +431,7 @@ def _atomic_replace_log(lines):
     """Atomically rewrite LOG_PATH with `lines` (iterable of strings with \\n)."""
     if not ensure_data_dir(DATA_DIR):
         return
-    fd = None
-    try:
-        fd = tempfile.NamedTemporaryFile(
-            dir=str(DATA_DIR), suffix=".tmp", delete=False,
-            mode="w", encoding="utf-8",
-        )
-        fd.writelines(lines)
-        fd.close()
-        pathlib.Path(fd.name).replace(LOG_PATH)
-    except OSError:
-        if fd is not None:
-            try:
-                fd.close()
-            except OSError:
-                pass
-            try:
-                os.unlink(fd.name)
-            except OSError:
-                pass
+    atomic_write_text(LOG_PATH, lines, writelines=True)
 
 
 def cleanup_log_startup():
@@ -598,25 +591,45 @@ def _refresh_once():
     _append_log(new_snap)
 
 
+def _crash_snapshot() -> PulseSnapshot:
+    """Snapshot payload for the worker last-resort crash handler.
+
+    Resets every data-bearing field (indicator/incidents/components/latency/
+    scores) to its neutral init value so a 'PULSE ERROR' state can never
+    surface stale data captured before the crash — otherwise a crash right
+    after a healthy fetch would render "PULSE ERROR" alongside the previous
+    "all green" incidents/components, masking a real outage (M-cross-3).
+    Aligned with the initial `_snapshot` literal above.
+    """
+    return {
+        "t": time.monotonic(),
+        "wall_t": time.time(),
+        "score": None,
+        "raw_score": None,
+        "verdict": "PULSE ERROR",
+        "level": "error",
+        "reason": "worker crashed",
+        "indicator": None,
+        "incidents": [],
+        "components": [],
+        "latency_ms": None,
+        "latency_p50_ms": None,
+        "latency_p95_ms": None,
+        "error": "worker crash",
+    }
+
+
 def _worker_loop():
     while True:
         try:
             _refresh_once()
         except Exception:  # last-resort guard — daemon must not die
             with _snapshot_lock:
-                _snapshot.update({
-                    "t": time.monotonic(),
-                    "wall_t": time.time(),
-                    "score": None,
-                    "verdict": "PULSE ERROR",
-                    "level": "error",
-                    "reason": "worker crashed",
-                    "error": "worker crash",
-                })
+                _snapshot.update(_crash_snapshot())
         time.sleep(FETCH_INTERVAL)
 
 
-def start_pulse_worker():
+def start_pulse_worker() -> None:
     """Start the background fetcher. Idempotent.
 
     Runs startup cleanup on pulse.jsonl before launching the worker thread.
@@ -641,7 +654,7 @@ def start_pulse_worker():
         raise
 
 
-def get_pulse_snapshot():
+def get_pulse_snapshot() -> PulseSnapshot:
     """Return a shallow copy of the latest snapshot."""
     with _snapshot_lock:
         return dict(_snapshot)

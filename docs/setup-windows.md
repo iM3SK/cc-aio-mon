@@ -114,6 +114,7 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 
 **Diacritics show as `Ĺĺ` / `ĂĄ` / `Ăľ` mojibake**
 - `monitor.py` already switches the console output code page to UTF-8 (CP 65001) on startup and restores it on exit. If you still see mojibake, you are likely either (a) on a Windows version that does not honour `SetConsoleOutputCP` from Python (rare), or (b) viewing the screen of a `monitor.py` instance started **before** v1.12.1 — quit (`q`) and relaunch.
+- Diacritics in **session names / titles** are handled on the input side too: `statusline.py` reads Claude Code's stdin JSON as UTF-8 bytes rather than the locale code page, so accented `session_name` / auto-titles survive even when Claude Code's subprocess environment lacks `PYTHONUTF8=1` (fixed in v1.12.1). If an older session still shows a garbled title, switch session (`s`) to re-read a fresh snapshot.
 - Manual fallback: `chcp 65001` before launching, or enable the system-wide UTF-8 locale (Settings → Time & Language → Language & region → Administrative language settings → "Beta: Use Unicode UTF-8 for worldwide language support").
 
 **Raw escape codes visible**

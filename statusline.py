@@ -18,10 +18,10 @@ import pathlib
 import signal
 import struct
 import sys
-import tempfile
 import time
 
-from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_cd,
+from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, atomic_write_text,
+                    f_tok, f_cost, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
                     DATA_DIR, RESERVED_SIDS, SCHEMA_VERSION,
@@ -293,7 +293,8 @@ def write_shared_state(data: dict):
     base = DATA_DIR
 
     # Serialize once — same rules for snapshot and history (avoid TypeError mid-write).
-    # _schema_version tags the file-IPC contract: monitor reads it; older snapshots
+    # _schema_version tags the file-IPC contract: monitor.load_state() gates on
+    # it (newer-than-known snapshots degrade to None); older/untagged snapshots
     # already on disk after a `git pull` are tolerated (treated as v0 = pre-tag).
     try:
         snapshot = json.dumps({**data, "_schema_version": SCHEMA_VERSION})
@@ -301,28 +302,9 @@ def write_shared_state(data: dict):
     except (TypeError, ValueError):
         return
 
-    # Atomic write of current state via unpredictable temp file
+    # Atomic write of current state via unpredictable temp file (shared helper)
     target = base / f"{sid}.json"
-    snapshot_ok = False
-    fd = None
-    try:
-        fd = tempfile.NamedTemporaryFile(
-            dir=base, suffix=".tmp", delete=False, mode="w", encoding="utf-8"
-        )
-        fd.write(snapshot)
-        fd.close()
-        pathlib.Path(fd.name).replace(target)
-        snapshot_ok = True
-    except OSError:
-        if fd is not None:
-            try:
-                fd.close()
-            except OSError:
-                pass
-            try:
-                os.unlink(fd.name)
-            except OSError:
-                pass
+    snapshot_ok = atomic_write_text(target, snapshot)
 
     # History must stay aligned with the latest snapshot (avoid BRN/CTR vs stale JSON)
     if not snapshot_ok:
@@ -341,31 +323,13 @@ def write_shared_state(data: dict):
 
 
 def _trim_history(path: pathlib.Path):
-    fd = None
     raw = safe_read(path, HISTORY_READ_MAX)
     if raw is None:
         return
-    try:
-        lines = raw.decode("utf-8", errors="replace").splitlines()
-        if len(lines) > HISTORY_TRIM_TO:
-            trimmed = "\n".join(lines[-HISTORY_TRIM_TO:]) + "\n"
-            fd = tempfile.NamedTemporaryFile(
-                dir=path.parent, suffix=".tmp", delete=False,
-                mode="w", encoding="utf-8",
-            )
-            fd.write(trimmed)
-            fd.close()
-            pathlib.Path(fd.name).replace(path)
-    except OSError:
-        if fd is not None:
-            try:
-                fd.close()
-            except OSError:
-                pass
-            try:
-                os.unlink(fd.name)
-            except OSError:
-                pass
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if len(lines) > HISTORY_TRIM_TO:
+        trimmed = "\n".join(lines[-HISTORY_TRIM_TO:]) + "\n"
+        atomic_write_text(path, trimmed)
 
 
 if __name__ == "__main__":
