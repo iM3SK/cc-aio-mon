@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.12.4 — 2026-05-30
+
+**Bug fixes:**
+- **`calc_rates` no longer crashes the render loop on an explicit JSON `null`
+  `cost` / `context_window`.** `shared.calc_rates` read these via
+  `.get(key, {})`, which only substitutes the default for a *missing* key — an
+  explicit `"cost": null` / `"context_window": null` in a corrupt or
+  hand-edited `.jsonl` reached `None.get(...)` and raised `AttributeError`
+  inside `monitor.main()`'s per-frame render. The lookups now coalesce with
+  `or {}`, so an explicit null degrades to the same default-zero path as a
+  missing key (`shared.py:calc_rates`).
+- **Monitor render loop now also catches `AttributeError`.** The per-frame
+  `except` in `monitor.main()` adds `AttributeError` to the existing
+  `TypeError`/`ValueError`/`KeyError`/… set, so any future null-shape
+  regression degrades to a counted render error instead of tearing down the
+  alt-screen TUI.
+
+**Tests:** 611 passing (+3).
+
 ## v1.12.3 — 2026-05-25
 
 Second audit-cleanup release. Closes the remaining actionable P2/P3
