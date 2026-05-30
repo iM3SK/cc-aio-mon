@@ -66,7 +66,7 @@ by `build_line()` when the terminal is too narrow. On Windows, terminal width
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~2 670 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~2 900 LOC. Owns the event
 loop, all `render_*` functions, the session picker, and three daemon worker
 threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
