@@ -501,10 +501,11 @@ def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:
     dt = t1 - t0
     if dt < 10:
         return None, None
-    c0 = _num(hist[0].get("cost", {}).get("total_cost_usd"))
-    c1 = _num(hist[-1].get("cost", {}).get("total_cost_usd"))
-    x0 = _num(hist[0].get("context_window", {}).get("used_percentage"))
-    x1 = _num(hist[-1].get("context_window", {}).get("used_percentage"))
+    # `or {}` handles explicit JSON null on disk (default {} only triggers on missing key).
+    c0 = _num((hist[0].get("cost") or {}).get("total_cost_usd"))
+    c1 = _num((hist[-1].get("cost") or {}).get("total_cost_usd"))
+    x0 = _num((hist[0].get("context_window") or {}).get("used_percentage"))
+    x1 = _num((hist[-1].get("context_window") or {}).get("used_percentage"))
     brn = (c1 - c0) / dt * 60 if c1 >= c0 else None
     ctr = (x1 - x0) / dt * 60 if x1 >= x0 else None
     return brn, ctr

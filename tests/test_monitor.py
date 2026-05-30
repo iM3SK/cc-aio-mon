@@ -294,6 +294,40 @@ class TestCalcRates(unittest.TestCase):
         self.assertIs(m_cr, shared.calc_rates)
         self.assertIs(sl_calc_rates, shared.calc_rates)
 
+    # H-1 regression: explicit JSON null on cost/context_window must not
+    # AttributeError. Statusline.write_shared_state always emits dict shapes,
+    # but a corrupt or manually-edited .jsonl can carry `"cost": null` — the
+    # render loop must keep running, so calc_rates degrades to the same
+    # default-zero path as a missing key (None becomes 0 via _num default).
+    def test_explicit_null_cost_does_not_crash(self):
+        hist = [
+            {"t": 1_600_000_000, "cost": None, "context_window": {"used_percentage": 10.0}},
+            {"t": 1_600_000_060, "cost": None, "context_window": {"used_percentage": 20.0}},
+        ]
+        brn, ctr = calc_rates(hist)
+        self.assertEqual(brn, 0.0)
+        self.assertAlmostEqual(ctr, 10.0, places=5)
+
+    def test_explicit_null_context_window_does_not_crash(self):
+        hist = [
+            {"t": 1_600_000_000, "cost": {"total_cost_usd": 0.0}, "context_window": None},
+            {"t": 1_600_000_060, "cost": {"total_cost_usd": 0.06}, "context_window": None},
+        ]
+        brn, ctr = calc_rates(hist)
+        self.assertAlmostEqual(brn, 0.06, places=5)
+        self.assertEqual(ctr, 0.0)
+
+    def test_mixed_null_and_present_cost_does_not_crash(self):
+        # Most realistic corruption: only one endpoint is null. Pre-fix this
+        # path triggered `None.get(...)` AttributeError on the null side.
+        hist = [
+            {"t": 1_600_000_000, "cost": None, "context_window": None},
+            {"t": 1_600_000_060, "cost": {"total_cost_usd": 0.06}, "context_window": {"used_percentage": 20.0}},
+        ]
+        brn, ctr = calc_rates(hist)
+        self.assertAlmostEqual(brn, 0.06, places=5)
+        self.assertAlmostEqual(ctr, 20.0, places=5)
+
 
 # ---------------------------------------------------------------------------
 # _num

@@ -2895,7 +2895,7 @@ def main():
                     ),
                     cols,
                 )
-            except (TypeError, ValueError, KeyError, ZeroDivisionError, OverflowError, OSError) as e:
+            except (TypeError, ValueError, KeyError, AttributeError, ZeroDivisionError, OverflowError, OSError) as e:
                 _render_errors += 1
                 if _render_errors <= 3:
                     sys.stderr.write(f"render error #{_render_errors}: {e}\n")
