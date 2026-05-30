@@ -16,10 +16,12 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [FILE-IPC-CONT
 - Changing the public Python import API (functions/classes that external code
   could import from `shared.py`).
 - Removing CLI flags from `update.py` or `statusline.py`.
-- Bumping `SCHEMA_VERSION` in `shared.py` in a way that older monitor versions
-  cannot silently ignore. (The current `dict.get()` pattern in snapshot readers
-  means the tag is forward-compatible and advisory only — a MAJOR bump is not
-  needed unless you remove existing fields or change their types.)
+- Bumping `SCHEMA_VERSION` in `shared.py`. `monitor.load_state()` refuses a
+  snapshot tagged newer than the running build (it degrades to `None` = "no
+  data" until that monitor self-updates), so a bump causes a transient blind
+  spot for already-running older monitors rather than a crash or hard break.
+  Treat a bump as MINOR when existing fields stay readable; reserve MAJOR for
+  removing or retyping existing fields.
 
 **MINOR** — new features, new env-var knobs, new modals, new segments. Recent
 examples: v1.12.0 (singleton lock, crash-log rotation, schema version tag,
@@ -42,6 +44,11 @@ from wrong file, null-payload dashboard crash).
 
 Work through these in order before creating any tag.
 
+> Tip: `scripts/release.sh X.Y.Z` runs the mechanical gate of this checklist
+> (VERSION bump match, CHANGELOG entry, compile check, full test suite) and then
+> prints the PR push sequence from Section 5. It performs no irreversible action
+> — it never pushes, tags, or merges.
+
 - [ ] **Branch is `main`, working tree is clean.**
   ```
   git status --porcelain -uno
@@ -55,25 +62,25 @@ Work through these in order before creating any tag.
   python3 tests.py     # macOS / Linux
   ```
   `tests.py` is a thin wrapper that runs `unittest discover tests/`
-  (`tests.py:main()`). Current baseline: **608 passing** (v1.12.3). The new
+  (`tests.py:main()`). Current baseline: **617 passing** (v1.12.5). The new
   release's count must be >= this number unless tests were intentionally
   removed (document the removal in CHANGELOG).
 
 - [ ] **CHANGELOG entry drafted** (see Section 3 for exact format).
   Write the entry for the new version at the top of `CHANGELOG.md`, above the
-  current `## v1.12.3` block. Do not push yet.
+  current `## v1.12.4` block. Do not push yet.
 
 - [ ] **VERSION constant bumped in `shared.py` only.**
-  The constant lives at `shared.py:55`:
+  The constant lives at `shared.py`:
   ```python
-  VERSION = "1.12.3"
+  VERSION = "1.12.4"
   ```
   Change this string to the new version. Do not touch `monitor.py`,
   `pulse.py`, or `update.py` for the version — all three import from
   `shared.py` (`from shared import VERSION` or similar). `update.py`'s
   `get_local_version()` and `get_remote_version()` both regex-scan
   `shared.py` via `VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']',
-  re.MULTILINE)` (`shared.py:52`). If you put the version anywhere else,
+  re.MULTILINE)` (`shared.py`). If you put the version anywhere else,
   the release-check worker silently reports `error`.
 
 - [ ] **Re-run tests after the VERSION and CHANGELOG edits.**
@@ -164,7 +171,7 @@ headers, bullet list under each, blank line, trailing test count line.
   them via `unittest discover`.
 
 - [ ] **Syntax check covers all five modules.**
-  `shared.PY_FILES` (`shared.py:107`) lists every file the post-pull syntax
+  `shared.PY_FILES` (`shared.py`) lists every file the post-pull syntax
   check verifies:
   ```python
   PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
@@ -197,27 +204,39 @@ headers, bullet list under each, blank line, trailing test count line.
 Order matters. The self-update mechanism is commit-driven, not tag-driven
 (see Section 6). Follow this sequence exactly:
 
+`main` is protected (`enforce_admins` is on), so the version bump lands via a
+PR — direct `git push origin main` is rejected even for the maintainer. The tag
+is still applied to the merge commit *after* it is on `main`:
+
 ```bash
-# 1. Stage and commit (CHANGELOG + shared.py version bump only)
+# 1. Create a release branch and commit (CHANGELOG + shared.py version bump only)
+git switch -c release/vX.Y.Z
 git add CHANGELOG.md shared.py
 git commit -m "chore(release): bump to vX.Y.Z"
 
-# 2. Push the commit to main FIRST
-git push origin main
+# 2. Push the branch and open a PR against main
+git push origin release/vX.Y.Z
+gh pr create --fill --base main
 
-# 3. Tag the commit (after push, not before)
+# 3. Once CI is green (incl. release-smoke), squash-merge — this lands the
+#    version bump on main HEAD, which is what self-update reads
+gh pr merge --squash --delete-branch
+
+# 4. Sync local main to the merge commit, THEN tag it (after it is on main)
+git switch main && git pull --ff-only origin main
 git tag vX.Y.Z
 
-# 4. Push the tag separately
+# 5. Push the tag separately
 git push origin vX.Y.Z
 ```
 
 **Why this order:** `update.py:get_remote_version()` reads
 `origin/main:shared.py` via `git show` — it compares against the remote
 branch HEAD, not against tags. Users who run `py update.py` (no `--apply`)
-immediately after you push the commit will see the new version as available.
-If you tag before pushing the commit, the tag exists but the release-check
-worker cannot see the version bump yet (it only reads `origin/main`).
+after the PR merges will see the new version as available. The tag must point
+at a commit that is already on `main`; tagging before the merge lands would
+leave the release-check worker blind to the version bump (it only reads
+`origin/main`).
 
 **Signed tags** (`git tag -s vX.Y.Z`) are optional but encouraged for
 releases that touch security-sensitive code paths. The tag message should
@@ -238,10 +257,10 @@ following are true after your push:
 
 | What the code checks | Where it reads | Failure mode if wrong |
 |---|---|---|
-| Remote VERSION string | `git show origin/main:shared.py` → `VERSION_RE` (`shared.py:52`) | Reports `error` in release indicator; `RuntimeError: VERSION constant not found in remote shared.py` on `--apply` |
-| Remote CHANGELOG entry | `git show origin/main:CHANGELOG.md` → `extract_changelog_entry(text, version, max_lines=None)` (`shared.py:320`) | Update modal shows no changelog preview; not fatal |
+| Remote VERSION string | `git show origin/main:shared.py` → `VERSION_RE` (`shared.py`) | Reports `error` in release indicator; `RuntimeError: VERSION constant not found in remote shared.py` on `--apply` |
+| Remote CHANGELOG entry | `git show origin/main:CHANGELOG.md` → `extract_changelog_entry(text, version, max_lines=None)` (`shared.py`) | Update modal shows no changelog preview; not fatal |
 | `git pull --ff-only` succeeds | Requires `main` is linear (no force-push, no rebase of published history) | `git pull` exits non-zero; user is left on old version with the rollback tag as recovery point |
-| Post-pull syntax check passes | `shared.check_syntax_after_pull(repo_root)` iterates `PY_FILES` (`shared.py:107`) | Warns user `Syntax errors in: <file>` and shows rollback hint |
+| Post-pull syntax check passes | `shared.check_syntax_after_pull(repo_root)` iterates `PY_FILES` (`shared.py`) | Warns user `Syntax errors in: <file>` and shows rollback hint |
 
 **Critical constraint:** `git pull --ff-only` requires that `origin/main` is a
 fast-forward ancestor of the user's local `main`. If you ever rebase or
@@ -255,13 +274,32 @@ history on `main`.
 a new `.py` module to the project, add it to `PY_FILES` in `shared.py` so
 post-pull checks catch syntax errors in it.
 
+**Blast radius — there is no staged rollout (by design).** Self-update is
+trunk-based: every commit that lands on `main` reaches *all* auto-updating
+installs at once (the in-monitor release check polls `origin/main` hourly).
+There is no `next`/`beta` channel or canary cohort — a single maintainer does
+not have the operational capacity to soak releases, and adding channels would
+complicate the update path for a marginal cohort. The accepted mitigations are:
+
+- **Pre-merge gate:** `release-smoke.yml` runs the *real* `update.py --apply`
+  path from the previous tag on every push to `main`, so a broken self-update
+  is caught in CI before users pull it.
+- **Per-user rollback:** `update.py --apply` writes a `pre-update-*` tag before
+  pulling (see Section 7), so any user can revert in one command.
+- **Fast-forward-only safety:** `git pull --ff-only` refuses to apply a
+  non-linear update rather than corrupting a working tree.
+
+If the project ever grows beyond a single maintainer or adds higher-risk
+self-modifying paths, revisit this with a `next`-branch soak step before the
+`main` merge.
+
 ---
 
 ## 7. Rollback — if a release breaks something after tagging
 
 `update.py --apply` automatically creates a local rollback tag on the user's
-machine (`pre-update-YYYYMMDD-HHMMSS`, `update.py:186-194`) before running
-`git pull`. Users can recover with:
+machine (`pre-update-YYYYMMDD-HHMMSS`, in `update.py:apply_update()`) before
+running `git pull`. Users can recover with:
 
 ```bash
 git reset --hard pre-update-20260522-143000
@@ -271,9 +309,9 @@ On the maintainer side, **do not delete the broken tag**. Users who already
 pulled may have it in their local repo. Deleting it breaks their reference.
 Instead:
 
-1. Fix the issue in a new commit on `main`.
-2. Push the fix commit.
-3. Create a new patch tag: `git tag vX.Y.Z+1` (e.g. `v1.12.3` if `v1.12.2`
+1. Fix the issue in a new commit on a branch.
+2. Merge it to `main` via PR (direct push is blocked — see Section 5).
+3. Create a new patch tag: `git tag vX.Y.Z+1` (e.g. `v1.12.5` if `v1.12.4`
    was broken), push it.
 4. Update CHANGELOG with a brief PATCH entry describing the regression and fix.
 

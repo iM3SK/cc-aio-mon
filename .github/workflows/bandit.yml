@@ -23,6 +23,10 @@ jobs:
       - name: Run Bandit
         # File list sourced from shared.PY_FILES (single source of truth — see tests.yml compile step).
         run: bandit -r $(python -c "from shared import PY_FILES; print(' '.join(PY_FILES))") -f sarif -o bandit.sarif --severity-level medium || true
+      - name: Verify Bandit produced a report
+        # `|| true` above keeps findings non-fatal (triaged via code-scanning),
+        # but must not mask a scanner crash — fail if no SARIF was written.
+        run: test -s bandit.sarif
       - name: Upload to code-scanning
         uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:

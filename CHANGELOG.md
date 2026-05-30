@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.12.5 — 2026-05-30
+
+**Bug fixes:**
+- **Pulse "PULSE ERROR" no longer shows stale "all green" data.** When the
+  background Pulse worker hits an unexpected exception, its last-resort handler
+  now clears the volatile snapshot fields (incidents, components, latency,
+  scores, indicator) instead of leaving values from the last healthy fetch in
+  place. A crash during a real outage no longer renders an error verdict next
+  to stale "operational" incidents/components (`pulse.py:_crash_snapshot`).
+- **Self-update can no longer be interrupted mid-pull.** Pressing `q` while a
+  self-update is applying is now ignored until the worker finishes its
+  post-pull syntax check, so quitting can't kill the daemon after
+  `git pull --ff-only` has rewritten files but before the integrity check runs
+  (`monitor.py` event loop + `_apply_update_action`).
+
+**Security hardening:**
+- **IPC schema gate.** `monitor.load_state()` now refuses a session snapshot
+  tagged with a newer `_schema_version` than the running build understands
+  (degrades to "no data") rather than risk misreading an incompatible shape;
+  missing or older tags stay readable (`monitor.py:load_state`).
+
+**Tests:** 617 passing (+6).
+
 ## v1.12.4 — 2026-05-30
 
 **Bug fixes:**

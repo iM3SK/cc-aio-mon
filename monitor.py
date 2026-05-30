@@ -37,7 +37,7 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     SECONDS_1H, SECONDS_5H, SECONDS_1D, SECONDS_7D,
                     HISTORY_RATE_SAMPLES,
                     WARN_PCT, CRIT_PCT,
-                    DATA_DIR, VERSION_RE, VERSION,
+                    DATA_DIR, VERSION_RE, VERSION, SCHEMA_VERSION,
                     PY_FILES,  # noqa: F401 — pinned by TestPyFilesSingleSourceOfTruth (SSoT regression guard)
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     extract_changelog_entry,
@@ -676,7 +676,7 @@ def _rls_maybe_check():
 
     Lock ownership: acquired here, released by _rls_check_worker's `finally`
     OR here if the Thread spawn itself fails. Worker must not return
-    without releasing. Keep in sync with _rls_check_worker:524.
+    without releasing. Keep in sync with `_rls_check_worker` finally block.
     """
     if os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK") == "1":
         return
@@ -886,9 +886,19 @@ def load_state(sid):
     if raw is None:
         return None
     try:
-        return json.loads(raw.decode("utf-8"))
+        d = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+    # IPC schema gate (M-cross-2): statusline tags every snapshot with
+    # _schema_version. A snapshot written by a NEWER build than this one —
+    # possible briefly mid self-update before the monitor restarts — may have
+    # an incompatible shape, so treat it as unreadable (degrade to None) rather
+    # than risk misreading fields. A missing/older tag (pre-versioning snapshots
+    # left on disk after a git pull) defaults to 0 and stays readable.
+    if (isinstance(d, dict) and isinstance(d.get("_schema_version"), int)
+            and d["_schema_version"] > SCHEMA_VERSION):
+        return None
+    return d
 
 
 # Thin wrapper — shared.load_history is the single source of truth (v1.10.5+).
@@ -1921,6 +1931,11 @@ def render_menu(cols, rows):
 # ---------------------------------------------------------------------------
 _update_result = None  # None=not run, str=output message
 _update_lock = threading.Lock()
+# Handle to the in-flight self-update worker (set by _apply_update_action).
+# Read by the main loop's `q` handler to refuse quitting mid git-pull, which
+# would kill the daemon before its post-pull syntax check runs (M-cross-1).
+# Written and read only on the main thread; is_alive() is thread-safe.
+_update_thread = None
 
 # Update modal git-helper cache — 30s TTL, invalidated on remote_ver change.
 # Eliminates per-tick (50ms) synchronous git subprocess spam from render path
@@ -2076,9 +2091,12 @@ def _apply_update_worker():
 
 def _apply_update_action():
     """Spawn background thread for update. Non-blocking."""
+    global _update_thread
     _set_update_result("Updating...")
-    t = threading.Thread(target=_apply_update_worker, daemon=True)
-    t.start()
+    _update_thread = threading.Thread(
+        target=_apply_update_worker, name="update-apply", daemon=True
+    )
+    _update_thread.start()
 
 
 def render_update_modal(cols, rows):
@@ -2698,7 +2716,15 @@ def main():
             # Always poll keyboard
             k = poll_key()
             if k == "q":
-                break
+                if _update_thread is not None and _update_thread.is_alive():
+                    # Self-update worker is mid git-pull / post-pull syntax
+                    # check: refuse to quit so we don't kill the daemon and
+                    # leave the repo fast-forwarded but never integrity-checked
+                    # (M-cross-1). Falls through to a normal render tick; quit
+                    # works again once the worker finishes (a few seconds).
+                    pass
+                else:
+                    break
             # ── Modal-specific handlers first (priority) ──
             elif show_update and k == "a" and _get_update_result() is None:
                 _apply_update_action()

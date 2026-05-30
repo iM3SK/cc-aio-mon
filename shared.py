@@ -52,13 +52,14 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.12.4"
+VERSION = "1.12.5"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
-# and history entry; bumped when the JSON shape changes incompatibly. Monitor
-# currently reads snapshots via dict.get(), so an unknown _schema_version is
-# silently ignored — making the tag future-proof but advisory today. A future
-# monitor read site (e.g. read_session_snapshot) can gate on this value.
+# and history entry; bumped when the JSON shape changes incompatibly. Monitor's
+# load_state() gates on it: a snapshot tagged NEWER than this constant is
+# treated as unreadable (degrades to None) rather than risk misreading an
+# incompatible shape. Missing/older tags default to 0 and stay readable, so
+# pre-versioning snapshots left on disk after a git pull are tolerated.
 SCHEMA_VERSION = 1
 
 # Default sample window for load_history(). At ~1 statusline event/min this
@@ -243,8 +244,8 @@ def f_cd(epoch):
     diff = int(epoch - time.time())
     if diff <= 0:
         return "now"
-    d, rem = divmod(diff, 86400)
-    h, rem = divmod(rem, 3600)
+    d, rem = divmod(diff, SECONDS_1D)
+    h, rem = divmod(rem, SECONDS_1H)
     m = rem // 60
     if d > 0:
         return f"{d}d {h:02d}h"
@@ -436,6 +437,50 @@ def rotate_crash_log(path: pathlib.Path, max_bytes: int = MAX_FILE_SIZE, always:
         path.replace(backup)
     except OSError:
         pass
+
+
+def atomic_write_text(target, data, *, writelines: bool = False) -> bool:
+    """Atomically write UTF-8 text to ``target`` via an unpredictable temp file
+    in the same directory, then ``os.replace()`` onto the target (a same-
+    filesystem rename — atomic on POSIX and Windows). Returns ``True`` on
+    success, ``False`` on any OSError.
+
+    ``data`` is a single string by default; pass ``writelines=True`` to write an
+    iterable of strings (each must already carry its own newline). On failure
+    the temp file is closed and unlinked so a botched write never leaks a
+    ``.tmp`` file. Best-effort by design — callers that must keep two files
+    aligned (e.g. snapshot vs history) branch on the bool return.
+
+    ``target.parent`` must already exist and be writable; callers run
+    ``ensure_data_dir`` first. Consolidates the previously-duplicated temp-file
+    scaffold in statusline.write_shared_state / _trim_history and
+    pulse._atomic_replace_log (M-2).
+    """
+    target = pathlib.Path(target)
+    fd = None
+    try:
+        fd = tempfile.NamedTemporaryFile(
+            dir=str(target.parent), suffix=".tmp", delete=False,
+            mode="w", encoding="utf-8",
+        )
+        if writelines:
+            fd.writelines(data)
+        else:
+            fd.write(data)
+        fd.close()
+        pathlib.Path(fd.name).replace(target)
+        return True
+    except OSError:
+        if fd is not None:
+            try:
+                fd.close()
+            except OSError:
+                pass
+            try:
+                os.unlink(fd.name)
+            except OSError:
+                pass
+        return False
 
 
 def acquire_singleton_lock(lock_path) -> Optional[IO]:
