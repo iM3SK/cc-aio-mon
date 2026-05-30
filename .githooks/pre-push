@@ -68,7 +68,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         echo "BLOCKED: Stripe key pattern (sk_live/sk_test/rk_live/pk_live) in diff" >&2
         fail=1
     fi
-    if echo "$diff_text" | grep -qE -- '-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----'; then
+    if echo "$diff_text" | grep -qE -- '-----BEGIN ((RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY|PRIVATE KEY|ENCRYPTED PRIVATE KEY)-----'; then
         echo "BLOCKED: Private key block in diff" >&2
         fail=1
     fi

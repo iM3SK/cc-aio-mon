@@ -1,8 +1,8 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.12.0
+# FILE-IPC CONTRACT: cc-aio-mon v1.12.4
 
 **Status**: Active  
-**Version**: 1.12.0 (`SCHEMA_VERSION` = 1)  
-**Last Updated**: 2026-05-22  
+**Version**: 1.12.4 (`SCHEMA_VERSION` = 1)  
+**Last Updated**: 2026-05-30  
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
@@ -38,13 +38,13 @@ Two long-running processes communicate solely via the filesystem—no sockets, p
 > - macOS: per-user `/var/folders/<hash>/T/`
 > - Windows: `%TEMP%` (e.g. `C:\Users\<user>\AppData\Local\Temp\`)
 
-**Constants** (source: `shared.py:50-51`):
+**Constants** (source: `shared.py`):
 - `DATA_DIR_NAME` = `"claude-aio-monitor"`
 - `DATA_DIR` = `pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME`
 
 ### Creator
 
-**Function**: `ensure_data_dir(d)` (`shared.py:279`)
+**Function**: `ensure_data_dir(d)` (`shared.py`)
 
 | Attribute | Value |
 |---|---|
@@ -54,7 +54,7 @@ Two long-running processes communicate solely via the filesystem—no sockets, p
 | Return value | `True` if created/verified; `False` if symlink/junction/unsafe |
 | Idempotent | Yes (mkdir exists_ok=True) |
 
-**Safety Check**: `is_safe_dir(p)` (`shared.py:261`)
+**Safety Check**: `is_safe_dir(p)` (`shared.py`)
 
 Rejects symlinks and reparse points (Windows junctions). Uses `lstat()` (TOCTOU-resistant):
 - Unix: `not S_ISDIR(st_mode) → False`
@@ -68,7 +68,7 @@ Callers must call `ensure_data_dir()` once at startup, then all file operations 
 
 ### Regex Pattern
 
-**Source**: `shared.py:34-36`
+**Source**: `shared.py`
 
 ```python
 _SID_RE = re.compile(
@@ -85,7 +85,7 @@ _SID_RE = re.compile(
 
 ### Reserved Session IDs
 
-**Source**: `shared.py:27`
+**Source**: `shared.py`
 
 ```python
 RESERVED_SIDS = frozenset({"rls", "stats", "pulse"})
@@ -123,7 +123,7 @@ Example: `$TMPDIR/claude-aio-monitor/default.json`
 
 ### Writing (statusline.py)
 
-**Function**: `write_shared_state(data: dict)` (`statusline.py:278-333`)
+**Function**: `write_shared_state(data: dict)` (`statusline.py`)
 
 1. Validate session ID via `_SID_RE`
 2. Ensure data directory (exit early if `not ensure_data_dir()`)
@@ -149,7 +149,7 @@ pathlib.Path(fd.name).replace(target)  # atomic on all platforms
 
 ### Reading (monitor.py)
 
-**Function**: `load_state(sid)` (`monitor.py:739-750`)
+**Function**: `load_state(sid)` (`monitor.py`)
 
 ```python
 def load_state(sid):
@@ -161,17 +161,23 @@ def load_state(sid):
     if raw is None:
         return None
     try:
-        return json.loads(raw.decode("utf-8"))
+        d = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+    # Refuse a snapshot tagged newer than this build understands (schema gate).
+    if (isinstance(d, dict) and isinstance(d.get("_schema_version"), int)
+            and d["_schema_version"] > SCHEMA_VERSION):
+        return None
+    return d
 ```
 
 - Validates `sid` and directory safety
 - Bounded read: `safe_read()` caps at `MAX_FILE_SIZE` (1 MB)
 - Returns parsed dict or `None` on error
 - **No exception raised** on malformed JSON (returns `None`)
+- **Schema gate**: a `_schema_version` newer than `shared.SCHEMA_VERSION` degrades to `None`
 
-**Poll Cadence**: Main loop (`monitor.py:2618`) polls `load_state()` every 500 ms per session.
+**Poll Cadence**: The main loop polls `load_state()` for each active session on every data-load interval.
 
 ### JSON Schema
 
@@ -202,14 +208,15 @@ def load_state(sid):
 
 ### Schema Version
 
-**Current Value**: 1 (`shared.py:62`)
+**Current Value**: 1 (`shared.SCHEMA_VERSION`)
 
 **Semantics**:
 - Added to snapshot at write time by statusline: `{..., "_schema_version": 1}`
-- Monitor reads via `dict.get("_schema_version")` → `None` if absent (pre-v1.10 snapshots)
-- Bumped when JSON shape changes incompatibly (e.g., rename field, change nesting)
-- **No version check in monitor yet** — all reads are defensive (dict.get with defaults)
-- Future `read_session_snapshot()` function could gate on this value
+- `monitor.load_state()` **gates** on it: a snapshot tagged NEWER than the running
+  build degrades to `None` (treated as unreadable) rather than risk a misread of
+  an incompatible shape
+- Missing or older tags default to `0` (pre-v1.10 snapshots) and stay readable
+- Bumped when the JSON shape changes incompatibly (e.g., rename field, change nesting)
 
 ### File Size & Disk Full
 
@@ -236,7 +243,7 @@ Example: `$TMPDIR/claude-aio-monitor/default.jsonl`
 
 ### Writing (statusline.py)
 
-**Function**: `write_shared_state()` (`statusline.py:324-333`; the surrounding alignment guard at `statusline.py:320-322` aborts the append if the snapshot write failed)
+**Function**: `write_shared_state()` (`statusline.py`; the surrounding alignment guard at `statusline.py` aborts the append if the snapshot write failed)
 
 After successful snapshot write:
 
@@ -245,7 +252,7 @@ After successful snapshot write:
 3. No fsync (relies on OS buffering + rename for atomicity)
 4. Check file size after write; if `> MAX_FILE_SIZE`, call `_trim_history()`
 
-**Trim Policy** (`statusline.py:336-361`):
+**Trim Policy** (`statusline.py`):
 
 - **Trigger**: File size > 1 MB (`MAX_FILE_SIZE`)
 - **Trim target**: Last 1000 lines (`HISTORY_TRIM_TO`)
@@ -255,7 +262,7 @@ After successful snapshot write:
 
 ### Reading (shared.py + monitor.py)
 
-**Function**: `load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None)` (`shared.py:142`)
+**Function**: `load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None)` (`shared.py`)
 
 Single source of truth for both statusline and monitor. `HISTORY_RATE_SAMPLES`
 defaults to 120 — at ~1 statusline event/min this is a ~2-hour rolling window.
@@ -343,7 +350,7 @@ Example: `$TMPDIR/claude-aio-monitor/pulse.jsonl`
 
 ### Writing (pulse.py)
 
-**Function**: `_append_log(snap)` (`pulse.py:490-513`)
+**Function**: `_append_log(snap)` (`pulse.py`)
 
 Called by `_refresh_once()` after each fetch + ping cycle.
 
@@ -362,7 +369,7 @@ rec = {
 line = json.dumps(rec) + "\n"
 ```
 
-**Append Pattern** (`pulse.py:509-510`):
+**Append Pattern** (`pulse.py`):
 ```python
 with open(LOG_PATH, "a", encoding="utf-8") as f:
     f.write(line)
@@ -372,12 +379,12 @@ No temp file; appends directly. Rotation guard called after every `ROTATE_CHECK_
 
 ### Retention Policy
 
-**Startup Cleanup** (`pulse.py:436-465`):
+**Startup Cleanup** (`pulse.py`):
 - Drops entries older than `LOG_AGE_CUTOFF = 24 hours`
 - Hard cap: max `LOG_STARTUP_CAP = 2000` records kept
 - Called once in `start_pulse_worker()` before launching worker thread
 
-**Runtime Rotation** (`pulse.py:468-487`):
+**Runtime Rotation** (`pulse.py`):
 - Every `ROTATE_CHECK_EVERY = 100` appends, check file size
 - If `file.stat().st_size > LOG_MAX_BYTES (1 MB)`: trim to last `LOG_TRIM_TARGET = 500` lines
 - Bounded read (2 MB cap) protects against TOCTOU growth
@@ -417,7 +424,7 @@ Example: `$TMPDIR/claude-aio-monitor/monitor-crash.log`
 
 ### Writing (monitor.py)
 
-**Function**: `_install_crash_logger()` (`monitor.py:2323-2350`)
+**Function**: `_install_crash_logger()` (`monitor.py`)
 
 Installed once at startup via `sys.excepthook = excepthook`. Captures any uncaught exception. (Snippet below is abbreviated for readability — the real implementation also writes platform / Python version / encoding metadata before the traceback.)
 
@@ -496,7 +503,7 @@ Lock file mechanism introduced to prevent multiple monitors from corrupting the 
 
 ### Acquisition
 
-**Function**: `acquire_singleton_lock(lock_path)` (`shared.py:441`)
+**Function**: `acquire_singleton_lock(lock_path)` (`shared.py`)
 
 ```python
 def acquire_singleton_lock(lock_path):
@@ -554,7 +561,7 @@ def acquire_singleton_lock(lock_path):
 
 ### Usage in monitor.py
 
-**Source**: `monitor.py:2392-2400`
+**Source**: `monitor.py`
 
 ```python
 if ensure_data_dir(DATA_DIR):
@@ -646,7 +653,7 @@ Multiple `--list` invocations can run concurrently with monitor or each other.
 
 ### Current State
 
-- **`SCHEMA_VERSION`** = 1 (`shared.py:62`)
+- **`SCHEMA_VERSION`** = 1 (`shared.py`)
 - **Version in file**: `_schema_version: 1` added to every snapshot & history entry by statusline.py
 
 ### Backward Compatibility
@@ -768,14 +775,14 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 - [Error Handling](#error-cases--silent-failures)
 
 **Functions** (with source)
-- `ensure_data_dir()` – `shared.py:279`
-- `is_safe_dir()` – `shared.py:241-256`
-- `safe_read()` – `shared.py:156-173`
-- `load_history()` – `shared.py:122-153`
-- `load_state()` – `monitor.py:739-750`
-- `write_shared_state()` – `statusline.py:278-333`
-- `acquire_singleton_lock()` – `shared.py:397-445`
-- `rotate_crash_log()` – `shared.py:376-394`
+- `ensure_data_dir()` – `shared.py`
+- `is_safe_dir()` – `shared.py`
+- `safe_read()` – `shared.py`
+- `load_history()` – `shared.py`
+- `load_state()` – `monitor.py`
+- `write_shared_state()` – `statusline.py`
+- `acquire_singleton_lock()` – `shared.py`
+- `rotate_crash_log()` – `shared.py`
 
 ---
 

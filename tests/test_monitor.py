@@ -1571,6 +1571,18 @@ class TestParseVersion(unittest.TestCase):
 
 class TestRlsBlink(unittest.TestCase):
 
+    def setUp(self):
+        # Restore blink globals after each test — test_toggles mutates them and
+        # leaked state could flip an unrelated test's first blink read (T-M-4).
+        import monitor
+        self._old_blink_last = monitor._rls_blink_last
+        self._old_blink_on = monitor._rls_blink_on
+
+    def tearDown(self):
+        import monitor
+        monitor._rls_blink_last = self._old_blink_last
+        monitor._rls_blink_on = self._old_blink_on
+
     def test_returns_bool(self):
         self.assertIsInstance(_rls_blink(), bool)
 
@@ -2104,6 +2116,46 @@ class TestLoadState(unittest.TestCase):
         p.write_bytes(b"{}" + b" " * MAX_FILE_SIZE)
         result = load_state(sid)
         self.assertIsNone(result)
+
+    def _write_snapshot(self, sid, payload):
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_current_schema_version_is_readable(self):
+        """A snapshot tagged with the current _schema_version loads normally."""
+        import shared
+        sid = "curSchema"
+        self._write_snapshot(sid, {"session_id": sid, "_schema_version": shared.SCHEMA_VERSION})
+        result = load_state(sid)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["session_id"], sid)
+
+    def test_newer_schema_version_degrades_to_none(self):
+        """IPC schema gate (M-cross-2): a snapshot from a newer build than this
+        one may be shaped incompatibly, so load_state must refuse it (None)
+        rather than risk misreading fields."""
+        import shared
+        sid = "newSchema"
+        self._write_snapshot(sid, {"session_id": sid, "_schema_version": shared.SCHEMA_VERSION + 1})
+        self.assertIsNone(load_state(sid))
+
+    def test_missing_schema_version_stays_readable(self):
+        """Pre-versioning snapshots (no tag, e.g. left on disk after a git pull)
+        default to schema 0 and must remain readable — no hard break."""
+        sid = "noSchema"
+        self._write_snapshot(sid, {"session_id": sid, "cost": {"total_cost_usd": 1.0}})
+        result = load_state(sid)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["session_id"], sid)
+
+    def test_non_int_schema_version_is_ignored(self):
+        """A non-integer _schema_version (corrupt/manual edit) is not a valid
+        version claim — the gate ignores it and the snapshot stays readable."""
+        sid = "badSchema"
+        self._write_snapshot(sid, {"session_id": sid, "_schema_version": "weird"})
+        result = load_state(sid)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["session_id"], sid)
 
 
 # ---------------------------------------------------------------------------
@@ -3012,6 +3064,40 @@ class TestAuditRegressionV1105(unittest.TestCase):
             f"monitor.py is {loc} LOC, past the 3500-line audit trigger. "
             f"Open an ADR (see PROJECTS/cc-aio-mon/ROZHODNUTIA.md) before "
             f"adding more, OR raise this trigger after the ADR is filed."
+        )
+
+    def test_h1_render_loop_catches_attributeerror(self):
+        """H-1 defense-in-depth: the main() render loop's except guarding
+        flush(render_frame(...)) must include AttributeError, so a corrupt
+        snapshot (e.g. None.get(...) from an explicit JSON null) degrades to a
+        counted render error instead of crashing the tick. Pins the v1.12.4 fix
+        against silent removal of AttributeError from the catch tuple."""
+        import ast
+        import monitor
+        src = pathlib.Path(monitor.__file__).read_text(encoding="utf-8")
+        main_fn = next(
+            n for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.FunctionDef) and n.name == "main"
+        )
+        found = False
+        for node in ast.walk(main_fn):
+            if not isinstance(node, ast.Try):
+                continue
+            dump = ast.dump(node)
+            if "flush" not in dump or "render_frame" not in dump:
+                continue
+            for handler in node.handlers:
+                exc = handler.type
+                names = []
+                if isinstance(exc, ast.Tuple):
+                    names = [e.id for e in exc.elts if isinstance(e, ast.Name)]
+                elif isinstance(exc, ast.Name):
+                    names = [exc.id]
+                if "AttributeError" in names:
+                    found = True
+        self.assertTrue(
+            found,
+            "main() render-loop except must catch AttributeError (H-1 defense-in-depth)"
         )
 
     def test_debt015_monitor_load_history_delegates_to_shared(self):

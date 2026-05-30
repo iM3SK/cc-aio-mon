@@ -25,7 +25,7 @@ If you add a new env var, add it here in the same commit.
 
 - **Type:** flag (`"1"` disables, anything else enables)
 - **Default:** unset → release-check worker enabled
-- **Read by:** `monitor.py:590` (`_rls_maybe_check`)
+- **Read by:** `monitor.py` (`_rls_maybe_check`)
 - **Effect:** disables the hourly background `git fetch` + remote-version
   poll that powers the `RLS` (Release Status) line and the update modal's
   "new version available" notification.
@@ -37,7 +37,7 @@ If you add a new env var, add it here in the same commit.
 
 - **Type:** flag (`"1"` disables, anything else enables)
 - **Default:** unset → Pulse worker enabled
-- **Read by:** `monitor.py:2562` (`main`)
+- **Read by:** `monitor.py` (`main`)
 - **Effect:** suppresses the `pulse.py` background thread that probes
   `status.claude.com` + the Anthropic API ping endpoint. The `STB`
   (Stability) modal becomes unavailable.
@@ -56,7 +56,7 @@ shells; new thresholds go under `CC_AIO_MON_*`.
 
 - **Type:** float (percent, 0–100)
 - **Default:** `50.0`
-- **Read by:** `shared.py:88` → exported as `shared.WARN_PCT`
+- **Read by:** `shared.py` → exported as `shared.WARN_PCT`
 - **Effect:** percentage threshold at which `CTX` / `5HL` / `7DL` / `CTR`
   bars flip from green to yellow.
 - **Parser:** `shared._env_pct` — invalid / empty values silently fall back
@@ -66,16 +66,16 @@ shells; new thresholds go under `CC_AIO_MON_*`.
 
 - **Type:** float (percent, 0–100)
 - **Default:** `80.0`
-- **Read by:** `shared.py:89` → exported as `shared.CRIT_PCT`
+- **Read by:** `shared.py` → exported as `shared.CRIT_PCT`
 - **Effect:** percentage threshold at which the same bars flip from yellow
   to red. Also drives the `!CTX>X%` warning glyph on the dashboard
-  (`monitor.py:988`).
+  (`monitor.py`).
 
 ### `CLAUDE_WARN_BRN`
 
 - **Type:** float ($/min)
 - **Default:** `3.0`
-- **Read by:** `monitor.py:384` (`_env_float` → `WARN_BRN`)
+- **Read by:** `monitor.py` (`_env_float` → `WARN_BRN`)
 - **Effect:** burn-rate threshold above which the `BRN` segment switches
   to its alert color. The dashboard `BRN OVER TIME` axis is fixed at
   `0–10 $/min` regardless of this value (axis is set by `BRN_MAX`, not
@@ -93,7 +93,7 @@ have a documented diagnostic anchor.
 
 - **Type:** string
 - **Default:** set by the terminal emulator
-- **Read by:** `monitor.py:2529`
+- **Read by:** `monitor.py`
 - **Effect:** if `TERM=dumb`, `monitor.py` aborts with an explanatory
   message instead of trying to drive an interactive TUI on a non-capable
   terminal (CI logs, redirected output, etc.).
@@ -102,7 +102,7 @@ have a documented diagnostic anchor.
 
 - **Type:** int
 - **Default:** unset → `os.get_terminal_size()` fallback
-- **Read by:** `statusline.py:53` (`_get_terminal_width`)
+- **Read by:** `statusline.py` (`_get_terminal_width`)
 - **Effect:** explicit terminal-width override for the one-line
   statusline. Useful when the parent process (Claude Code) reports a
   width that differs from what the user sees, or for fixed-width tests.
@@ -116,7 +116,7 @@ have a documented diagnostic anchor.
 - **Effect:** root for `$TMPDIR/claude-aio-monitor/` — the IPC directory
   that holds session snapshots, JSONL history, the singleton lock, the
   crash log, and the rotated crash log. Whitelisted in `shared.run_git`'s
-  env scrub (`shared.py:307`).
+  env scrub (`shared.py`).
 
 ### `HOME` / `USERPROFILE`
 
@@ -165,7 +165,7 @@ are not part of the user-facing contract and may change without notice.
 
 ### `_TEST_ENV_FLOAT` / `_TEST_ENV_FLOAT_BAD`
 
-- **Read by:** `tests/test_monitor.py:758, 771` — `_env_float` parser
+- **Read by:** `tests/test_monitor.py` — `_env_float` parser
   smoke tests.
 - **Lifecycle:** set + unset within a single `setUp`/`tearDown` pair.
   Never leaks across test boundaries.

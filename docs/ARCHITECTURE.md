@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.12.0 · Target reader: new contributor who just cloned the repo.
+> v1.12.4 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -152,14 +152,14 @@ CHANGELOG entry.
 
 ## 5. Threading Model in monitor.py
 
-`monitor.main()` runs a single-threaded event loop (the `while True:` at
-line ~2456). Three daemon threads run concurrently:
+`monitor.main()` runs a single-threaded event loop (the `while True:` loop in
+`main()`). Three daemon threads run concurrently:
 
 | Thread | Spawned by | Purpose |
 |---|---|---|
 | `pulse-worker` | `pulse.start_pulse_worker()` | Fetch Anthropic status + ping API every 30 s |
-| `rls-check` (anonymous) | `_maybe_trigger_rls_check()` | Check GitHub for new release once per hour |
-| `update-apply` (anonymous) | `_start_apply_update()` | Run `git pull --ff-only` when user presses `a` |
+| `rls-check` (anonymous) | `_rls_maybe_check()` | Check GitHub for new release once per hour |
+| `update-apply` | `_apply_update_action()` | Run `git pull --ff-only` when user presses `a` |
 
 All three threads are `daemon=True`: they are killed automatically when the
 main thread exits, so they can never block the terminal restore or hang the
@@ -179,8 +179,16 @@ process on `q`.
   it is an OS-level file lock held via `msvcrt.locking` / `fcntl.flock` for
   the process lifetime. Python must not GC it, hence the module-level reference.
 
-Inside `pulse.py`, `_snapshot_lock` and `_history_lock` guard the pulse
-snapshot dict and the rolling score/latency deques respectively.
+**Lock inventory (`pulse.py`):**
+
+- `_snapshot_lock` (`threading.Lock`) — guards the `_snapshot` dict (the public
+  IPC snapshot) shared between the pulse worker and the main render thread.
+- `_worker_lock` (`threading.Lock`) — guards the `_worker_started` flag so
+  `start_pulse_worker()` launches exactly one daemon (idempotent start).
+- `_history_lock` (`threading.Lock`) — guards the rolling score / latency
+  deques used for median smoothing and p50/p95 percentiles.
+- `_log_lock` (`threading.Lock`) — serializes the atomic rewrites of
+  `pulse.jsonl` during startup cleanup and runtime rotation.
 
 The main loop never blocks on network I/O. Every outbound call (status page,
 API ping, git fetch, git pull) is confined to a daemon thread, so the 50 ms
@@ -270,6 +278,15 @@ with a human-readable error pointing to the lock file. The lock file contains
 the holder's PID for diagnosis. `--list` mode is intentionally exempt because
 it is a one-shot non-interactive read.
 
+*Asymmetric lock-dir-failure behavior (by design):* if `ensure_data_dir()`
+fails (e.g. an attacker-owned `$TMPDIR/claude-aio-monitor/`), the two entry
+points diverge deliberately. `update.py --apply` prints a warning and proceeds
+without the singleton guard (best-effort — a self-update should not be blocked
+by a transient dir issue). `monitor.py` proceeds **silently** without the lock,
+because it has not yet entered the alt-screen and a stderr warning would be
+clobbered by the TUI init; the singleton guard is a convenience there, not a
+safety invariant. Neither path treats lock-dir failure as fatal.
+
 **Crash-log rotation.** `_install_crash_logger()` calls
 `shared.rotate_crash_log(log_path, always=True)` before each crash write.
 The previous traceback is always preserved as `monitor-crash.log.1` even
@@ -279,9 +296,12 @@ quick succession no longer overwrite each other. The default
 any caller that only cares about disk-growth bounds.
 
 **File-IPC schema version.** `shared.SCHEMA_VERSION = 1` is stamped into every
-snapshot and JSONL entry by `statusline.write_shared_state()`. Monitor reads all
-fields via `dict.get()` so old snapshots on disk are silently tolerated. The
-version field exists to make future incompatible shape changes detectable.
+snapshot and JSONL entry by `statusline.write_shared_state()`. `monitor.load_state()`
+gates on it: a snapshot tagged with a version *newer* than the running build is
+treated as unreadable (degrades to `None`) instead of risking a misread of an
+incompatible shape. Missing or older tags default to `0` and stay readable, so
+pre-versioning snapshots left on disk after a `git pull` are tolerated. Bump the
+constant when the JSON shape changes incompatibly.
 
 Two duplicate code paths were also consolidated: `shared.check_syntax_after_pull()`
 replaces byte-for-byte copies in `monitor._apply_update_worker` and
@@ -294,11 +314,11 @@ for `git rev-list --left-right --count` output in both files.
 
 | Goal | Start here |
 |---|---|
-| Change how burn rate or context rate is computed | `shared.calc_rates()` (shared.py:490) — reads last HISTORY_RATE_SAMPLES JSONL history entries |
-| Change hardcoded model pricing | `monitor.py:_aggregate_session_cost()` (line 1269) and the per-model rate dicts above it |
-| Add a field to the IPC snapshot | `statusline.py:write_shared_state()` (line 278) → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` |
-| Add a new TUI modal | `monitor.py:render_frame()` (line 833) dispatches to `render_*` functions; add a new `render_xyz()` and wire a key in the event loop |
-| Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` (line 198) |
+| Change how burn rate or context rate is computed | `shared.calc_rates()` — reads last `HISTORY_RATE_SAMPLES` JSONL history entries |
+| Change hardcoded model pricing | `monitor._aggregate_session_cost()` and the per-model rate dicts above it |
+| Add a field to the IPC snapshot | `statusline.write_shared_state()` → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` (and extend `pulse.PulseSnapshot` if it is a pulse field) |
+| Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()` and wire a key in the event loop |
+| Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` |
 | Change the Anthropic Pulse scoring weights | `pulse.py` constants `_W_INDICATOR`, `_W_INCIDENTS`, `_W_LATENCY` and `_INDICATOR_SCORE` / `_IMPACT_DEDUCT` dicts |
-| Add a new Python file to the project | Append the filename to `shared.PY_FILES` (shared.py:107) — this propagates to the post-update syntax check and the compile-check in the test suite |
+| Add a new Python file to the project | Append the filename to `shared.PY_FILES` — this propagates to the post-update syntax check and the compile-check in the test suite |
 | Understand the session file format | `statusline.py:write_shared_state()` writes it; `monitor.py:load_state()` reads it; field names mirror the Claude Code statusline JSON protocol keys |

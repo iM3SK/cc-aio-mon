@@ -467,6 +467,49 @@ class TestAcquireSingletonLock(unittest.TestCase):
         if result is not None:
             result.close()
 
+    def test_contention_across_processes(self):
+        """A separate OS process must not acquire a lock another process holds.
+        This is the real update.py-vs-monitor.py mutual exclusion guarantee
+        (CI-M-2) — the same-process test above cannot prove it because both
+        acquires share one interpreter. Spawns a child that tries to acquire."""
+        import subprocess
+        import sys
+        from shared import acquire_singleton_lock
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as d:
+            lock_path = pathlib.Path(d) / "monitor.lock"
+            child = (
+                "import sys; sys.path.insert(0, %r);"
+                "from shared import acquire_singleton_lock;"
+                "fh = acquire_singleton_lock(%r);"
+                "print('ACQUIRED' if fh is not None else 'NONE')"
+                % (str(repo_root), str(lock_path))
+            )
+            # 1) Parent holds the lock → a child process must fail to acquire it.
+            fh1 = acquire_singleton_lock(lock_path)
+            try:
+                self.assertIsNotNone(fh1, "parent acquire must succeed")
+                r = subprocess.run(
+                    [sys.executable, "-c", child],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(
+                    r.stdout.strip(), "NONE",
+                    f"child must NOT acquire a held lock (stderr: {r.stderr})",
+                )
+            finally:
+                if fh1 is not None:
+                    fh1.close()
+            # 2) Once the parent releases, a fresh child process CAN acquire it.
+            r2 = subprocess.run(
+                [sys.executable, "-c", child],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                r2.stdout.strip(), "ACQUIRED",
+                f"child must acquire a free lock (stderr: {r2.stderr})",
+            )
+
 
 class TestRotateCrashLog(unittest.TestCase):
     """shared.rotate_crash_log — rotates oversized crash logs."""

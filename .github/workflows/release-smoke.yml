@@ -1,0 +1,83 @@
+name: Release Smoke (self-update E2E)
+
+# End-to-end smoke test for the self-update happy path (CI-H-1). Self-update is
+# commit-driven: update.py / monitor.py run `git pull --ff-only origin main` and
+# read the version from `origin/main:shared.py`, so users pull whatever lands on
+# main HEAD. This job simulates a real release-to-release update: it rewinds the
+# checkout to the PREVIOUS tag (an "outdated install"), then runs the actual
+# update.py --apply path and verifies the updated tree compiles and passes the
+# full suite. Catches regressions in the update machinery itself before users
+# auto-pull a broken release.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.py"
+      - ".github/workflows/release-smoke.yml"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  self-update-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0  # full history + tags needed to rewind to a prior release
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Identify previous release tag
+        id: prev
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          # update.py requires being ON the main branch (rejects detached HEAD).
+          git checkout -B main "$GITHUB_SHA"
+          # Most recent tag reachable from the parent commit = the prior release.
+          PREV="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          if [ -z "$PREV" ]; then
+            echo "No previous tag found — skipping self-update smoke (nothing to update from)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Previous release tag: $PREV"
+            echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Simulate outdated install (rewind main to previous tag)
+        if: steps.prev.outputs.skip != 'true'
+        env:
+          PREV: ${{ steps.prev.outputs.prev }}
+        run: |
+          # Rewind local main behind origin/main (which still points at the
+          # pushed HEAD) — exactly the state of a user one release behind.
+          git reset --hard "$PREV"
+          python -c "import shared; print('Simulated install at VERSION', shared.VERSION)"
+
+      - name: Read-only update check detects an available update
+        if: steps.prev.outputs.skip != 'true'
+        run: |
+          # Non-apply mode exits 0 whether up-to-date or behind; assert it ran
+          # cleanly and reported a remote version.
+          python update.py | tee check.out
+          grep -q "Latest:" check.out
+
+      - name: Apply self-update (git pull --ff-only + syntax check)
+        if: steps.prev.outputs.skip != 'true'
+        run: |
+          python update.py --apply | tee apply.out
+          grep -q "Update complete." apply.out
+          grep -q "Syntax check passed" apply.out
+
+      - name: Updated tree matches origin/main HEAD
+        if: steps.prev.outputs.skip != 'true'
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          python -c "import importlib, shared; importlib.reload(shared); print('Updated to VERSION', shared.VERSION)"
+
+      - name: Full suite passes on the updated tree
+        if: steps.prev.outputs.skip != 'true'
+        run: python tests.py

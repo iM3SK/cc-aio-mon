@@ -827,7 +827,7 @@ class TestWorkerLoopCrashRecovery(unittest.TestCase):
     a visible error rather than freezing at the last-good state. Without
     this branch the daemon thread would die silently. No prior test.
 
-    pulse.py:597-607
+    See pulse.py `_worker_loop` + `_crash_snapshot`.
     """
 
     def setUp(self):
@@ -842,47 +842,48 @@ class TestWorkerLoopCrashRecovery(unittest.TestCase):
             self._p._snapshot.clear()
             self._p._snapshot.update(self._orig_snapshot)
 
-    def test_refresh_exception_sets_worker_crashed_snapshot(self):
-        """When _refresh_once raises, the worker's except branch must
-        write a 'PULSE ERROR' / 'worker crashed' snapshot, not propagate."""
-
-        # We test the except-branch body without running the infinite loop:
-        # simulate one iteration where _refresh_once raises, then verify
-        # the snapshot reflects the crash. We do this by running the body
-        # of one iteration manually with _refresh_once patched.
-        import time as _time
-
-        # Drive a single iteration of the loop logic
-        with patch.object(self._p, "_refresh_once", side_effect=RuntimeError("simulated")):
-            # Inline the loop body once — this mirrors pulse._worker_loop without
-            # the `while True` so the test stays deterministic.
-            try:
-                self._p._refresh_once()
-            except Exception:
-                with self._p._snapshot_lock:
-                    self._p._snapshot.update({
-                        "t": _time.monotonic(),
-                        "wall_t": _time.time(),
-                        "score": None,
-                        "verdict": "PULSE ERROR",
-                        "level": "error",
-                        "reason": "worker crashed",
-                        "error": "worker crash",
-                    })
-
-        with self._p._snapshot_lock:
-            snap = dict(self._p._snapshot)
-        self.assertEqual(snap.get("verdict"), "PULSE ERROR")
-        self.assertEqual(snap.get("reason"), "worker crashed")
-        self.assertEqual(snap.get("level"), "error")
-        self.assertIsNone(snap.get("score"))
+    def test_crash_snapshot_clears_stale_fields(self):
+        """The worker last-resort crash payload must reset every data-bearing
+        field to its neutral init value — a 'PULSE ERROR' state must never
+        carry stale incidents/components/latency from the last healthy fetch
+        (M-cross-3). Asserts against the real _crash_snapshot() the worker
+        uses, not an inlined copy of the except body."""
+        crash = self._p._crash_snapshot()
+        # Crash markers
+        self.assertEqual(crash["verdict"], "PULSE ERROR")
+        self.assertEqual(crash["reason"], "worker crashed")
+        self.assertEqual(crash["level"], "error")
+        self.assertEqual(crash["error"], "worker crash")
+        # Every data-bearing field cleared to its init default
+        self.assertIsNone(crash["score"])
+        self.assertIsNone(crash["raw_score"])
+        self.assertIsNone(crash["indicator"])
+        self.assertEqual(crash["incidents"], [])
+        self.assertEqual(crash["components"], [])
+        self.assertIsNone(crash["latency_ms"])
+        self.assertIsNone(crash["latency_p50_ms"])
+        self.assertIsNone(crash["latency_p95_ms"])
+        # Drift guard: crash payload must cover exactly the keys the live
+        # snapshot tracks (a new _snapshot field forgotten here would fail).
+        self.assertEqual(set(crash), set(self._orig_snapshot))
 
     def test_worker_loop_actually_recovers_from_one_exception(self):
         """Integration: spin _worker_loop briefly with _refresh_once raising,
-        verify it reaches the except branch (snapshot mutates to crashed state)
-        and the thread keeps running (does not propagate the exception)."""
+        verify it reaches the except branch (snapshot mutates to crashed state),
+        clears any stale healthy-fetch data, and the thread keeps running
+        (does not propagate the exception)."""
         import threading
         import time as _time
+
+        # Seed a stale "all green" snapshot from a prior healthy fetch — the
+        # crash handler must wipe these so PULSE ERROR doesn't show green data.
+        with self._p._snapshot_lock:
+            self._p._snapshot.update({
+                "score": 100, "raw_score": 100, "indicator": "none",
+                "incidents": [{"name": "x", "impact": "minor"}],
+                "components": [{"name": "API", "status": "operational"}],
+                "latency_ms": 123.0, "latency_p50_ms": 120, "latency_p95_ms": 150,
+            })
 
         crashed_event = threading.Event()
         original_sleep = _time.sleep
@@ -907,6 +908,11 @@ class TestWorkerLoopCrashRecovery(unittest.TestCase):
             snap = dict(self._p._snapshot)
         self.assertEqual(snap.get("verdict"), "PULSE ERROR")
         self.assertEqual(snap.get("reason"), "worker crashed")
+        # Stale healthy-fetch data must be gone (M-cross-3)
+        self.assertEqual(snap.get("incidents"), [])
+        self.assertEqual(snap.get("components"), [])
+        self.assertIsNone(snap.get("latency_ms"))
+        self.assertIsNone(snap.get("indicator"))
 
 
 class TestAtomicReplaceLogOSErrorCleanup(unittest.TestCase):

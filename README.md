@@ -41,9 +41,9 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 
 | Platform | Guide |
 |----------|-------|
-| [Windows](setup-windows.md) | Python Launcher (`py`), Windows Terminal, PowerShell |
-| [macOS](setup-macos.md) | python3, Terminal.app or iTerm2 |
-| [Linux](setup-linux.md) | python3, any truecolor terminal |
+| [Windows](docs/setup-windows.md) | Python Launcher (`py`), Windows Terminal, PowerShell |
+| [macOS](docs/setup-macos.md) | python3, Terminal.app or iTerm2 |
+| [Linux](docs/setup-linux.md) | python3, any truecolor terminal |
 
 ## Features
 
@@ -78,7 +78,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`) with Windows reserved-device-name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink/junction rejection on the temp data directory and `~/.claude/projects/`, transcript containment checks, and bounded reads for JSON, JSONL, transcripts, Pulse responses, and post-update source checks.
 - **Singleton lock** — only one interactive `py monitor.py` can run at a time; a second attempt exits with a clear error pointing at `$TMPDIR/claude-aio-monitor/monitor.lock`. The `--list` mode is exempt.
 - **Crash-log rotation** — `monitor-crash.log` rotates to `.log.1` at 1 MB so repeated crashes don't fill the disk.
-- **File-IPC schema versioning** — snapshots and history entries now carry `_schema_version` for forward-compatibility; see [docs/FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
+- **File-IPC schema versioning** — snapshots and history entries carry `_schema_version`; `monitor.load_state()` refuses snapshots newer than it understands. See [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md).
 - **Test suite reorganization** — tests are now under `tests/`; existing `py tests.py` invocations still work via discovery.
 
 ## Session States
@@ -264,9 +264,9 @@ export CLAUDE_STATUS_CRIT=90
 
 Platform-specific troubleshooting is in the setup guides:
 
-- [Windows — Troubleshooting](setup-windows.md#troubleshooting)
-- [macOS — Troubleshooting](setup-macos.md#troubleshooting)
-- [Linux — Troubleshooting](setup-linux.md#troubleshooting)
+- [Windows — Troubleshooting](docs/setup-windows.md#troubleshooting)
+- [macOS — Troubleshooting](docs/setup-macos.md#troubleshooting)
+- [Linux — Troubleshooting](docs/setup-linux.md#troubleshooting)
 
 ## Updating
 
@@ -287,6 +287,8 @@ py update.py --apply          # check + git pull
 ```
 
 The script is **read-only by default** — it shows you what would change (version, new commits, CHANGELOG preview) and only pulls when you add `--apply`. It aborts safely if your working tree is dirty, you're on a different branch, or history has diverged.
+
+**From inside the monitor:** you can also update without leaving the TUI — press `u` to open the update manager (current vs remote version, new commits, changelog preview, safety warnings), then `a` to apply. It runs the same `git pull --ff-only` + post-pull syntax check as `update.py --apply`; restart the monitor afterwards to load the new code.
 
 **Rollback safety:** before each `--apply` pull, a `pre-update-YYYYMMDD-HHMMSS` git tag is created automatically. If anything breaks after the update, recover with:
 
@@ -312,9 +314,9 @@ After updating, restart Claude Code to pick up the new statusline. Optionally re
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](ARCHITECTURE.md) — contributor-oriented architecture overview
-- [docs/FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md) — schema of the two-process file IPC
-- [docs/RELEASE.md](RELEASE.md) — release process checklist
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor-oriented architecture overview
+- [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md) — schema of the two-process file IPC
+- [docs/RELEASE.md](docs/RELEASE.md) — release process checklist
 - [.github/SECURITY.md](.github/SECURITY.md) — security policy
 
 ## Contributing

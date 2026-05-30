@@ -15,6 +15,7 @@ import datetime
 import signal
 import sys
 from pathlib import Path
+from typing import List, Optional, Tuple
 from shared import (
     VERSION_RE, MAX_FILE_SIZE, _sanitize, run_git as _shared_run_git,
     ensure_utf8_stdout, extract_changelog_entry, PY_FILES, safe_read,
@@ -116,7 +117,7 @@ def fetch_remote():
     ok("Fetched from origin")
 
 
-def get_local_version():
+def get_local_version() -> str:
     source = REPO_ROOT / "shared.py"
     if not source.exists():
         raise RuntimeError("shared.py not found")
@@ -130,7 +131,7 @@ def get_local_version():
     return m.group(1)
 
 
-def get_remote_version():
+def get_remote_version() -> str:
     r = run_git(["show", "origin/main:shared.py"])
     if r.returncode != 0:
         raise RuntimeError("Failed to read remote shared.py")
@@ -140,7 +141,7 @@ def get_remote_version():
     return m.group(1)
 
 
-def get_ahead_behind():
+def get_ahead_behind() -> Tuple[int, int]:
     """Return (behind, ahead) relative to origin/main."""
     r = run_git(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
     if r.returncode != 0:
@@ -152,14 +153,14 @@ def get_ahead_behind():
     return behind, ahead
 
 
-def get_new_commits():
+def get_new_commits() -> List[str]:
     r = run_git(["log", "--oneline", "HEAD..origin/main"])
     if r.returncode != 0:
         return []
     return [line for line in r.stdout.strip().split("\n") if line]
 
 
-def get_remote_changelog_entry(version):
+def get_remote_changelog_entry(version: str) -> Optional[str]:
     r = run_git(["show", "origin/main:CHANGELOG.md"])
     if r.returncode != 0:
         return None
