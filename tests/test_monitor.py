@@ -2231,8 +2231,11 @@ class TestRenderPicker(unittest.TestCase):
         self.assertIn("MyProject", plain)
 
     def test_returns_buffer_of_correct_length(self):
+        # Modals no longer pad to the terminal height (flush erases to end of
+        # screen); _window_buf returns at most `rows` lines.
         buf = render_picker([], 80, 24)
-        self.assertEqual(len(buf), 24)
+        self.assertLessEqual(len(buf), 24)
+        self.assertGreater(len(buf), 0)
 
     def test_stale_session_shows_stale_label(self):
         sessions = [
@@ -4103,26 +4106,84 @@ class TestScanSubagents(unittest.TestCase):
         self.assertTrue(monitor._subagents_cache)  # background scan ran
 
 
+class TestModalScroll(unittest.TestCase):
+    """_window_buf / _apply_scroll: modals taller than the terminal must be
+    scrollable instead of clipped (content was previously unreachable)."""
+
+    def tearDown(self):
+        import monitor
+        monitor._modal_scroll = 0
+
+    def test_short_buffer_unchanged(self):
+        import monitor
+        monitor._modal_scroll = 0
+        buf = ["a", "b", "c"]
+        out = monitor._window_buf(buf, 24)
+        self.assertEqual(out, ["a", "b", "c"])  # fits — no indicator added
+
+    def test_long_buffer_windows_and_indicates(self):
+        import monitor
+        buf = [f"line{i}" for i in range(50)]
+        monitor._modal_scroll = 0
+        out = monitor._window_buf(list(buf), 10)
+        self.assertLessEqual(len(out), 10)
+        self.assertIn("line0", out[0])
+        self.assertTrue(any("/50" in _strip_ansi([ln])[0] for ln in out))  # position indicator
+
+    def test_offset_clamped_to_bottom(self):
+        import monitor
+        buf = [f"line{i}" for i in range(50)]
+        monitor._modal_scroll = 9999  # overshoot
+        monitor._window_buf(list(buf), 10)
+        self.assertLess(monitor._modal_scroll, 50)        # clamped
+        self.assertGreater(monitor._modal_scroll, 0)
+
+    def test_apply_scroll_keys(self):
+        import monitor
+        self.assertEqual(monitor._apply_scroll(10, "<DOWN>", 20), 11)
+        self.assertEqual(monitor._apply_scroll(10, "j", 20), 11)
+        self.assertEqual(monitor._apply_scroll(10, "<UP>", 20), 9)
+        self.assertEqual(monitor._apply_scroll(10, "k", 20), 9)
+        self.assertEqual(monitor._apply_scroll(0, "<UP>", 20), 0)        # clamp at top
+        self.assertEqual(monitor._apply_scroll(10, "<HOME>", 20), 0)
+        self.assertGreater(monitor._apply_scroll(10, "<PGDN>", 20), 11)  # page > 1
+        self.assertEqual(monitor._apply_scroll(100, "<PGUP>", 20), max(0, 100 - 17))
+
+
 class TestPollKeyEscape(unittest.TestCase):
-    """poll_key must swallow escape sequences (arrow keys / mouse-wheel scroll)
+    """poll_key must parse escape sequences (arrow keys / Page keys / mouse-
+    wheel scroll) into nav tokens for scrolling, and swallow anything else,
     so their bytes don't get misread as key presses that close open modals."""
 
-    def test_escape_sequence_swallowed(self):
+    def _poll_with(self, seq):
         import monitor
-        if monitor.IS_WIN:
-            self.skipTest("Unix poll_key only")
         from unittest.mock import patch
-        reads = iter(["\x1b", "[", "A"])  # an Up-arrow / scroll sequence
+        reads = iter(seq)
         calls = {"n": 0}
 
         def selecting(rlist, wlist, xlist, timeout=0):
-            # ready for ESC, '[', 'A' (3 reads), then nothing
             calls["n"] += 1
-            return ([sys.stdin], [], []) if calls["n"] <= 3 else ([], [], [])
+            return ([sys.stdin], [], []) if calls["n"] <= len(seq) else ([], [], [])
 
         with patch.object(monitor.select, "select", side_effect=selecting), \
              patch.object(sys.stdin, "read", side_effect=lambda n=1: next(reads)):
-            self.assertIsNone(monitor.poll_key())  # whole sequence swallowed
+            return monitor.poll_key()
+
+    def test_arrow_sequence_maps_to_nav_token(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_with(["\x1b", "[", "A"]), "<UP>")    # Up arrow
+        self.assertEqual(self._poll_with(["\x1b", "[", "B"]), "<DOWN>")  # Down arrow
+        self.assertEqual(self._poll_with(["\x1b", "[", "5", "~"]), "<PGUP>")
+        self.assertEqual(self._poll_with(["\x1b", "[", "6", "~"]), "<PGDN>")
+
+    def test_unknown_escape_swallowed(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        # An unrecognised CSI (e.g. a mouse report) must not surface as a key.
+        self.assertIsNone(self._poll_with(["\x1b", "[", "Z"]))
 
     def test_plain_char_returned(self):
         import monitor

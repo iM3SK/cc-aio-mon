@@ -159,6 +159,7 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 | `1`–`9` | Select session from picker | session picker only |
 | `1` / `2` / `3` | Switch period (all / 7d / 30d) | inside token-stats modal only |
 | `f` | Toggle active-only filter (hide idle agents) | inside agents modal only |
+| `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `Home` `End` | Scroll the open modal (content taller than the terminal) | inside any modal |
 
 ### Session Picker
 

@@ -304,6 +304,19 @@ IS_WIN = sys.platform == "win32"
 _term_state = None
 _orig_console_output_cp = None  # Windows: saved by _setup_term, restored by _restore_term
 
+# Navigation keys returned by poll_key as symbolic tokens so the key handler
+# can scroll modals on arrows / Page keys instead of treating each escape byte
+# as a separate (modal-closing) key press.
+_NAV_SEQ = {  # Unix: bytes after the ESC introducer
+    "[A": "<UP>", "[B": "<DOWN>", "[5~": "<PGUP>", "[6~": "<PGDN>",
+    "[H": "<HOME>", "[F": "<END>", "OH": "<HOME>", "OF": "<END>",
+}
+_WIN_NAV = {  # Windows: scancode after the \x00 / \xe0 prefix
+    b"H": "<UP>", b"P": "<DOWN>", b"I": "<PGUP>", b"Q": "<PGDN>",
+    b"G": "<HOME>", b"O": "<END>",
+}
+_SCROLL_KEYS = {"<UP>", "<DOWN>", "<PGUP>", "<PGDN>", "<HOME>", "<END>", "j", "k"}
+
 if IS_WIN:
     import ctypes
     import msvcrt
@@ -312,8 +325,7 @@ if IS_WIN:
         if msvcrt.kbhit():
             ch = msvcrt.getch()
             if ch in (b"\x00", b"\xe0"):
-                msvcrt.getch()
-                return None
+                return _WIN_NAV.get(msvcrt.getch())  # nav key or None
             return ch.decode("utf-8", errors="ignore")
         return None
 
@@ -430,20 +442,26 @@ else:
             return None
         ch = sys.stdin.read(1)
         if ch == "\x1b":
-            # Drain the rest of an escape sequence (arrow keys, mouse-wheel
-            # scroll, etc.) so its bytes aren't misread as separate key presses
-            # — otherwise every scroll tick would feed ESC/'['/'A'… to the key
-            # handler and close whatever modal is open. The short timeout
-            # catches sequences split across reads. Mirrors the Windows branch,
-            # which already swallows \x00/\xe0 function-key prefixes.
-            while True:
+            # Read the rest of an escape sequence (arrow keys, Page keys, mouse-
+            # wheel scroll, …) and map known navigation sequences to scroll
+            # tokens; anything else (incl. a bare ESC) returns None so its bytes
+            # aren't misread as separate key presses that close the open modal.
+            # The short timeout catches sequences split across reads. Mirrors
+            # the Windows branch's \x00/\xe0 function-key handling.
+            seq = ""
+            for _ in range(8):  # bounded — CSI/SS3 are short
                 r2, _, _ = select.select([sys.stdin], [], [], 0.01)
                 if not r2:
                     break
                 b = sys.stdin.read(1)
-                if not b or "\x40" <= b <= "\x7e":  # CSI/SS3 final byte ends it
+                if not b:
                     break
-            return None
+                seq += b
+                # Final byte ends a CSI/SS3 sequence, but only after the
+                # introducer ('[' / 'O'), which itself falls in 0x40-0x7e.
+                if len(seq) >= 2 and "\x40" <= b <= "\x7e":
+                    break
+            return _NAV_SEQ.get(seq)  # nav token, or None for ESC / unknown
         return ch
 
     def _set_console_utf8():
@@ -1003,6 +1021,64 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
     buf.extend(tail)
 
 
+_modal_scroll = 0  # vertical scroll offset for the active modal (clamped in _window_buf)
+
+
+def _window_buf(buf, rows):
+    """Fit a modal buffer to terminal height WITH vertical scrolling.
+
+    Drop-in replacement for ``_fit_buf_height(clip_tail=True)`` on modals:
+    instead of clipping the bottom off (making content unreachable on short
+    terminals), show a scrollable window into the buffer at the module-level
+    ``_modal_scroll`` offset — clamped here so the key handler can blindly
+    inc/dec it — and append a position indicator. Buffers that already fit are
+    returned unchanged. Modifies ``buf`` in place and returns it.
+    """
+    global _modal_scroll
+    try:
+        rows = int(rows)
+    except (TypeError, ValueError):
+        rows = 24
+    rows = max(1, rows)
+    if len(buf) <= rows:
+        _modal_scroll = 0
+        return buf
+    visible = max(1, rows - 1)  # reserve one line for the indicator
+    max_off = len(buf) - visible
+    off = min(max(0, _modal_scroll), max_off)
+    _modal_scroll = off  # persist the clamped value
+    window = buf[off:off + visible]
+    up = "↑" if off > 0 else " "
+    dn = "↓" if off < max_off else " "
+    window.append(
+        f"{C_DIM}── {off + 1}-{off + len(window)}/{len(buf)}  "
+        f"{up}{dn} ↑↓/jk/PgUp-Dn ──{R}")
+    buf[:] = window
+    return buf
+
+
+def _apply_scroll(off, k, rows):
+    """Map a navigation key to a new scroll offset. The upper bound is clamped
+    in _window_buf at render time, so DOWN/PGDN/END may overshoot here."""
+    try:
+        page = max(1, int(rows) - 3)
+    except (TypeError, ValueError):
+        page = 10
+    if k in ("<UP>", "k"):
+        return max(0, off - 1)
+    if k in ("<DOWN>", "j"):
+        return off + 1
+    if k == "<PGUP>":
+        return max(0, off - page)
+    if k == "<PGDN>":
+        return off + page
+    if k == "<HOME>":
+        return 0
+    if k == "<END>":
+        return 10 ** 9  # clamped to the bottom by _window_buf
+    return off
+
+
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
@@ -1264,6 +1340,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal{R} {C_DIM}PgUp/Dn Home/End{R}")
     # ── Token Stats ──
     buf.append(sep(SW))
     tp = max(0, SW - 11)
@@ -1303,7 +1380,7 @@ def render_legend(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -1743,7 +1820,7 @@ def render_cost_breakdown(data, hist, cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -1918,7 +1995,7 @@ def render_pulse_modal(cols, rows):
     buf.append(f"{C_DIM}{footer[:SW]}{R}")
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -1952,7 +2029,7 @@ def render_menu(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -2233,7 +2310,7 @@ def render_update_modal(cols, rows):
         buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (check failed){R}")
         buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -2450,7 +2527,7 @@ def render_stats(cols, rows, period="all"):
         buf.append(sep(SW))
         buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
         buf.append(f"{C_DIM}press any key to close{R}")
-        _fit_buf_height(buf, rows, clip_tail=True)
+        _window_buf(buf, rows)
         return buf
 
     # -- Overview section --
@@ -2531,7 +2608,7 @@ def render_stats(cols, rows, period="all"):
     buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -2726,14 +2803,14 @@ def render_agents(data, cols, rows, active_only=False):
             buf.append(f"{C_DIM}Scanning subagents…{R}")
             buf.append(sep(SW))
             buf.append(f"{C_DIM}press any key to close{R}")
-            _fit_buf_height(buf, rows, clip_tail=True)
+            _window_buf(buf, rows)
             return buf
     if not info or not info["total"]:
         buf.append(f"{C_DIM}No subagents for this session.{R}")
         buf.append(f"{C_DIM}(populated when Task or Workflow agents run){R}")
         buf.append(sep(SW))
         buf.append(f"{C_DIM}press any key to close{R}")
-        _fit_buf_height(buf, rows, clip_tail=True)
+        _window_buf(buf, rows)
         return buf
 
     buf.append(
@@ -2747,8 +2824,9 @@ def render_agents(data, cols, rows, active_only=False):
     if active_only and not shown:
         idle = info["total"] - info["active"]
         buf.append(f"{C_DIM}No active agents ({idle} idle hidden).{R}")
-    visible = max(1, rows - 8)
-    for a in shown[:visible]:
+    # Emit every agent; _window_buf provides the scrollable window (the old
+    # rows-8 cap + "+N more" is gone — the list is now scrollable instead).
+    for a in shown:
         dot = f"{C_GRN}●{R}" if a["active"] else f"{C_DIM}○{R}"
         tool = a["tool"] or "--"
         # Fixed-width columns so the token / tool columns line up regardless of
@@ -2762,14 +2840,10 @@ def render_agents(data, cols, rows, active_only=False):
                 f"{C_WHT}{tok_str}{R} {C_DIM}tok{R}   {C_CYN}{tool}{R}")
         buf.append(truncate(line, SW))
 
-    extra = len(shown) - visible
-    if extra > 0:
-        buf.append(f"{C_DIM}... +{extra} more{R}")
-
     buf.append(sep(SW))
     filt = f"{C_WHT}all{R}{C_DIM}/active" if not active_only else f"{C_DIM}all/{R}{C_WHT}active{R}"
     buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}] {filt}{C_DIM}   ·   press any key to close{R}")
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -2808,7 +2882,7 @@ def render_picker(sessions, cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}] select{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -2910,7 +2984,7 @@ def main():
     # Singleton lock — interactive monitor only. Two concurrent dashboards
     # would race on snapshot polling and corrupt the crash log; --list is
     # exempt because it is a one-shot non-interactive read.
-    global _SINGLETON_LOCK_HANDLE
+    global _SINGLETON_LOCK_HANDLE, _modal_scroll
     if ensure_data_dir(DATA_DIR):
         _SINGLETON_LOCK_HANDLE = acquire_singleton_lock(DATA_DIR / "monitor.lock")
         if _SINGLETON_LOCK_HANDLE is None:
@@ -2959,6 +3033,8 @@ def main():
     show_pulse = False
     show_agents = False
     agents_active_only = False
+    _modal_scroll = 0
+    prev_modal_sig = None  # resets scroll offset when the active modal changes
     # Opt-out: CC_AIO_MON_NO_PULSE=1 disables the background Anthropic Pulse worker.
     # Mirrors CC_AIO_MON_NO_UPDATE_CHECK=1 pattern for the release checker.
     if os.environ.get("CC_AIO_MON_NO_PULSE") != "1":
@@ -2995,6 +3071,13 @@ def main():
                     pass
                 else:
                     break
+            # ── Scroll the open modal (arrows / Page / j / k) — must precede
+            #    the modal close handlers so a scroll key doesn't dismiss it ──
+            elif k in _SCROLL_KEYS and (
+                show_menu or show_cost or show_legend or show_agents
+                or show_pulse or show_update or show_stats is not None
+            ):
+                _modal_scroll = _apply_scroll(_modal_scroll, k, rows)
             # ── Modal-specific handlers first (priority) ──
             elif show_update and k == "a" and _get_update_result() is None:
                 _apply_update_action()
@@ -3105,6 +3188,14 @@ def main():
                 show_pulse = False
                 show_update = False
                 _set_update_result(None)
+
+            # Reset scroll whenever the active modal changes (open / switch /
+            # close) so a new modal always starts at the top.
+            modal_sig = (show_menu, show_cost, show_legend, show_agents,
+                         show_pulse, show_update, show_stats)
+            if modal_sig != prev_modal_sig:
+                _modal_scroll = 0
+                prev_modal_sig = modal_sig
 
             # Render every tick when we have data (for spinner), reload data on interval
             need_render = size_changed or last_data is not None or since_data >= data_interval
