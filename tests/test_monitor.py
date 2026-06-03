@@ -3796,21 +3796,34 @@ class TestRenderStatsLifetime(unittest.TestCase):
         self.assertIn("DAILY", plain)
         self.assertIn("04-24", plain)     # date short
 
-    def test_lifetime_block_omitted_on_small_terminal(self):
+    def test_lifetime_and_daily_always_emitted(self):
+        # Regression: _append_lifetime_block no longer drops LIFETIME/DAILY to
+        # "fit" the terminal — the whole block is always emitted (scrolling
+        # handles height). On a tall enough terminal _window_buf returns it all.
         self._write_cache()
-        buf = self._monitor.render_stats(80, 12, period="all")
-        plain = "\n".join(_strip_ansi(buf))
-        self.assertNotIn("LIFETIME", plain)
+        m = self._monitor
+        try:
+            m._modal_scroll = 0
+            buf = m.render_stats(80, 200, period="all")
+            plain = "\n".join(_strip_ansi(buf))
+            self.assertIn("LIFETIME", plain)
+            self.assertIn("DAILY", plain)
+        finally:
+            m._modal_scroll = 0
 
-    def test_daily_omitted_on_medium_terminal(self):
+    def test_stats_scrollable_on_small_terminal(self):
+        # On a short terminal the modal is windowed (not clipped-and-padded):
+        # at most `rows` lines, with a scroll position indicator.
         self._write_cache()
-        # Empty-models path: pre=5, footer=3, core needs 7, daily needs 7 more.
-        # rows=18 gives budget = 10 → core fits, daily doesn't.
-        buf = self._monitor.render_stats(80, 18, period="all")
-        plain = "\n".join(_strip_ansi(buf))
-        self.assertIn("LIFETIME", plain)
-        self.assertIn("HRS", plain)
-        self.assertNotIn("DAILY", plain)
+        m = self._monitor
+        try:
+            m._modal_scroll = 0
+            buf = m.render_stats(80, 12, period="all")
+            self.assertLessEqual(len(buf), 12)
+            plain = "\n".join(_strip_ansi(buf))
+            self.assertRegex(plain, r"\d+-\d+/\d+")  # "── 1-11/NN ──" indicator
+        finally:
+            m._modal_scroll = 0
 
     def test_lifetime_block_skipped_when_cache_missing(self):
         # No file written
@@ -4155,6 +4168,11 @@ class TestPollKeyEscape(unittest.TestCase):
     wheel scroll) into nav tokens for scrolling, and swallow anything else,
     so their bytes don't get misread as key presses that close open modals."""
 
+    def setUp(self):
+        import monitor
+        if not monitor.IS_WIN:
+            monitor._esc_buf[0] = ""  # isolate from any leftover partial seq
+
     def _poll_with(self, seq):
         import monitor
         from unittest.mock import patch
@@ -4168,6 +4186,48 @@ class TestPollKeyEscape(unittest.TestCase):
         with patch.object(monitor.select, "select", side_effect=selecting), \
              patch.object(sys.stdin, "read", side_effect=lambda n=1: next(reads)):
             return monitor.poll_key()
+
+    def _poll_calls(self, chunks):
+        """Feed bytes across multiple poll_key() calls (one chunk per call) to
+        simulate a sequence split over reads. Returns the list of results."""
+        import monitor
+        from unittest.mock import patch
+        out = []
+        for chunk in chunks:
+            reads = iter(chunk)
+            calls = {"n": 0}
+
+            def selecting(rlist, wlist, xlist, timeout=0, _c=calls, _ch=chunk):
+                _c["n"] += 1
+                return ([sys.stdin], [], []) if _c["n"] <= len(_ch) else ([], [], [])
+
+            with patch.object(monitor.select, "select", side_effect=selecting), \
+                 patch.object(sys.stdin, "read", side_effect=lambda n=1, _r=reads: next(_r)):
+                out.append(monitor.poll_key())
+        return out
+
+    def test_split_sequence_never_leaks_raw_bytes(self):
+        # ESC, then '[', then 'A' arriving in three separate poll_key() calls
+        # must NOT surface '[' or 'A' as keys (which would close a modal); the
+        # nav token appears only once the sequence completes.
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_calls([["\x1b"], ["["], ["A"]]), [None, None, "<UP>"])
+
+    def test_ss3_arrow_maps_to_nav_token(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_with(["\x1b", "O", "A"]), "<UP>")
+        self.assertEqual(self._poll_with(["\x1b", "O", "B"]), "<DOWN>")
+
+    def test_mouse_report_dropped(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        # SGR mouse wheel report must be consumed, not leaked as keystrokes.
+        self.assertIsNone(self._poll_with(list("\x1b[<64;1;1M")))
 
     def test_arrow_sequence_maps_to_nav_token(self):
         import monitor

@@ -310,6 +310,9 @@ _orig_console_output_cp = None  # Windows: saved by _setup_term, restored by _re
 _NAV_SEQ = {  # Unix: bytes after the ESC introducer
     "[A": "<UP>", "[B": "<DOWN>", "[5~": "<PGUP>", "[6~": "<PGDN>",
     "[H": "<HOME>", "[F": "<END>", "OH": "<HOME>", "OF": "<END>",
+    # SS3 / application-cursor variants (DECCKM, and what ?1007h wheel emits on
+    # many terminals): ESC O A/B instead of ESC [ A/B.
+    "OA": "<UP>", "OB": "<DOWN>",
 }
 _WIN_NAV = {  # Windows: scancode after the \x00 / \xe0 prefix
     b"H": "<UP>", b"P": "<DOWN>", b"I": "<PGUP>", b"Q": "<PGDN>",
@@ -436,32 +439,67 @@ else:
     import termios
     import tty
 
+    # In-progress escape sequence carried across poll_key calls. A sequence
+    # split over multiple reads (slow SSH/tmux, bursty wheel) is buffered here
+    # so its bytes are NEVER surfaced as standalone keys — which would close the
+    # open modal and snap back to the dashboard ("main screen" symptom).
+    _esc_buf = [""]
+
+    def _resolve_esc():
+        """Interpret the buffered escape sequence. Returns a nav token when it
+        is a complete known sequence (and clears the buffer), None + clears for
+        a complete unknown / mouse / Alt sequence, or None + keeps buffering
+        while it is still incomplete."""
+        b = _esc_buf[0]
+        if not b:
+            return None
+        if len(b) > 32:  # runaway — drop
+            _esc_buf[0] = ""
+            return None
+        if b == "\x1b":
+            return None  # bare ESC so far — keep buffering
+        intro = b[1]
+        if len(b) == 2:
+            if intro in ("[", "O"):
+                return None  # CSI / SS3 introducer — keep buffering
+            _esc_buf[0] = ""  # ESC + other (Alt-key / unknown) — drop
+            return None
+        last = b[-1]
+        if intro == "O":  # SS3: ESC O <char> — complete at 3 bytes
+            _esc_buf[0] = ""
+            return _NAV_SEQ.get(b[1:])
+        if intro == "[":  # CSI: ends on a final byte 0x40-0x7e
+            if "\x40" <= last <= "\x7e":
+                seq = b[1:]
+                _esc_buf[0] = ""
+                if seq[:1] in ("<", "M"):
+                    return None  # SGR / X10 mouse report — ignore cleanly
+                return _NAV_SEQ.get(seq)
+            return None  # still accumulating CSI parameters
+        _esc_buf[0] = ""
+        return None
+
     def poll_key():
         r, _, _ = select.select([sys.stdin], [], [], 0)
         if not r:
             return None
         ch = sys.stdin.read(1)
+        if _esc_buf[0]:  # mid-sequence from a previous (split) read
+            _esc_buf[0] += ch
+            return _resolve_esc()
         if ch == "\x1b":
-            # Read the rest of an escape sequence (arrow keys, Page keys, mouse-
-            # wheel scroll, …) and map known navigation sequences to scroll
-            # tokens; anything else (incl. a bare ESC) returns None so its bytes
-            # aren't misread as separate key presses that close the open modal.
-            # The short timeout catches sequences split across reads. Mirrors
-            # the Windows branch's \x00/\xe0 function-key handling.
-            seq = ""
-            for _ in range(8):  # bounded — CSI/SS3 are short
-                r2, _, _ = select.select([sys.stdin], [], [], 0.01)
+            _esc_buf[0] = "\x1b"
+            # Fast path: pull immediately-available bytes so atomic sequences
+            # resolve in this one call; anything not yet arrived stays buffered.
+            for _ in range(32):
+                r2, _, _ = select.select([sys.stdin], [], [], 0)
                 if not r2:
                     break
-                b = sys.stdin.read(1)
-                if not b:
-                    break
-                seq += b
-                # Final byte ends a CSI/SS3 sequence, but only after the
-                # introducer ('[' / 'O'), which itself falls in 0x40-0x7e.
-                if len(seq) >= 2 and "\x40" <= b <= "\x7e":
-                    break
-            return _NAV_SEQ.get(seq)  # nav token, or None for ESC / unknown
+                _esc_buf[0] += sys.stdin.read(1)
+                tok = _resolve_esc()
+                if not _esc_buf[0]:  # resolved (token or dropped)
+                    return tok
+            return _resolve_esc()  # leave any partial for the next poll
         return ch
 
     def _set_console_utf8():
@@ -494,6 +532,11 @@ HIDE_CUR = E + "?25l"
 SHOW_CUR = E + "?25h"
 ALT_ON = E + "?1049h"
 ALT_OFF = E + "?1049l"
+# Alternate-scroll mode: in the alt-screen buffer, makes the terminal translate
+# mouse-wheel scroll into arrow-key sequences (ESC[A / ESC[B) instead of
+# swallowing it — without this the wheel does nothing in a fullscreen TUI.
+ALT_SCROLL_ON = E + "?1007h"
+ALT_SCROLL_OFF = E + "?1007l"
 CLR = E + "2J"
 HOME = E + "H"
 EL = E + "K"
@@ -2410,18 +2453,13 @@ _STATS_FOOTER_LINES = 3      # sep + 2 footer lines
 
 
 def _append_lifetime_block(buf, rows, width):
-    """Append LIFETIME ACTIVITY block to buf if it fits.
+    """Append the LIFETIME ACTIVITY block to buf when the stats cache exists.
 
-    Respects rows budget: drops DAILY first, then whole block. Cache miss skips silently.
-    Renders to a side buffer first so partial output never reaches the terminal.
+    The whole block (incl. DAILY) is always emitted; the modal is scrollable
+    (_window_buf), so nothing is dropped to "fit" the terminal height — that
+    rows-gating used to make LIFETIME/DAILY unreachable on short terminals.
+    Cache miss skips silently. ``rows`` is kept for signature compatibility.
     """
-    try:
-        rows = int(rows)
-    except (TypeError, ValueError):
-        return
-    budget = rows - len(buf) - _STATS_FOOTER_LINES
-    if budget < _LIFETIME_CORE_LINES:
-        return
     cache, _ = _read_stats_cache()
     if not cache:
         return
@@ -2460,14 +2498,13 @@ def _append_lifetime_block(buf, rows, width):
     block.append(f"{C_DIM}HRS{R} {C_DIM}0     6     12    18{R}")
     block.append(f"{C_DIM}ACT{R} {C_CYN}{heat}{R}")
 
-    if budget >= _LIFETIME_CORE_LINES + _LIFETIME_DAILY_LINES:
-        daily = cache.get("dailyActivity") or []
-        items = [d for d in daily if isinstance(d, dict)] if isinstance(daily, list) else []
-        if items:
-            items.sort(key=lambda d: d.get("date") or "", reverse=True)
-            block.append(sep(width))
-            block.append(f"{C_DIM}DAILY{R}")
-            for d in items[:5]:
+    daily = cache.get("dailyActivity") or []
+    items = [d for d in daily if isinstance(d, dict)] if isinstance(daily, list) else []
+    if items:
+        items.sort(key=lambda d: d.get("date") or "", reverse=True)
+        block.append(sep(width))
+        block.append(f"{C_DIM}DAILY{R}")
+        for d in items[:5]:
                 date_s = (d.get("date") or "")[5:]  # MM-DD
                 ses = int(_num(d.get("sessionCount", 0)))
                 msg = int(_num(d.get("messageCount", 0)))
@@ -3007,12 +3044,12 @@ def main():
         )
 
     _setup_term()
-    sys.stdout.write(ALT_ON + HIDE_CUR + CLR)
+    sys.stdout.write(ALT_ON + ALT_SCROLL_ON + HIDE_CUR + CLR)
     sys.stdout.flush()
 
     def cleanup(*_args):
         _restore_term()
-        sys.stdout.write(SHOW_CUR + ALT_OFF)
+        sys.stdout.write(SHOW_CUR + ALT_SCROLL_OFF + ALT_OFF)
         sys.stdout.flush()
 
     atexit.register(cleanup)
