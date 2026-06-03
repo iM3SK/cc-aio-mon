@@ -3962,6 +3962,7 @@ class TestScanSubagents(unittest.TestCase):
     def test_render_agents_lists_agents(self):
         import monitor
         self._agent("agent-aaa.jsonl", in_tok=1000, tool="Read")
+        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
         buf = monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)
         flat = "\n".join(_strip_ansi(buf))
         self.assertIn("total", flat)
@@ -4061,6 +4062,7 @@ class TestScanSubagents(unittest.TestCase):
         # like its sibling show_cost / show_legend flags.
         import monitor
         self._agent("agent-aaa.jsonl", in_tok=10)
+        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
         buf = monitor.render_frame(
             {"transcript_path": str(self.tp)}, [], 80, 24, show_agents=True)
         self.assertTrue(any("AGENTS" in ln for ln in _strip_ansi(buf)))
@@ -4074,16 +4076,63 @@ class TestScanSubagents(unittest.TestCase):
         old = time.time() - 3600
         os.utime(self.subdir / "agent-idle.jsonl", (old, old))
         data = {"transcript_path": str(self.tp)}
+        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
         all_flat = "\n".join(_strip_ansi(monitor.render_agents(data, 80, 24, active_only=False)))
         self.assertIn("live", all_flat)
         self.assertIn("idle", all_flat)
-        monitor._subagents_cache.clear()
         act_flat = "\n".join(_strip_ansi(monitor.render_agents(data, 80, 24, active_only=True)))
         self.assertIn("live", act_flat)
         self.assertNotIn("idle", act_flat)        # idle hidden
         self.assertIn("[active]", act_flat)        # filter indicated in title
         # idle file still on disk (non-destructive)
         self.assertTrue((self.subdir / "agent-idle.jsonl").exists())
+
+    def test_render_is_async_non_blocking(self):
+        # Perf: with an empty cache the render shows "Scanning…" and kicks a
+        # background scan instead of blocking the render thread on the read.
+        import time, monitor
+        self._agent("agent-aaa.jsonl", in_tok=5)
+        monitor._subagents_cache.clear()
+        flat = "\n".join(_strip_ansi(
+            monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)))
+        self.assertIn("Scanning", flat)
+        for _ in range(100):  # wait up to ~2s for the daemon scan to populate
+            if monitor._subagents_cache:
+                break
+            time.sleep(0.02)
+        self.assertTrue(monitor._subagents_cache)  # background scan ran
+
+
+class TestPollKeyEscape(unittest.TestCase):
+    """poll_key must swallow escape sequences (arrow keys / mouse-wheel scroll)
+    so their bytes don't get misread as key presses that close open modals."""
+
+    def test_escape_sequence_swallowed(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        from unittest.mock import patch
+        reads = iter(["\x1b", "[", "A"])  # an Up-arrow / scroll sequence
+        calls = {"n": 0}
+
+        def selecting(rlist, wlist, xlist, timeout=0):
+            # ready for ESC, '[', 'A' (3 reads), then nothing
+            calls["n"] += 1
+            return ([sys.stdin], [], []) if calls["n"] <= 3 else ([], [], [])
+
+        with patch.object(monitor.select, "select", side_effect=selecting), \
+             patch.object(sys.stdin, "read", side_effect=lambda n=1: next(reads)):
+            self.assertIsNone(monitor.poll_key())  # whole sequence swallowed
+
+    def test_plain_char_returned(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        from unittest.mock import patch
+        with patch.object(monitor.select, "select",
+                          side_effect=lambda *a, **k: ([sys.stdin], [], [])), \
+             patch.object(sys.stdin, "read", side_effect=lambda n=1: "q"):
+            self.assertEqual(monitor.poll_key(), "q")
 
 
 if __name__ == "__main__":

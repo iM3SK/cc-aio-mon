@@ -426,9 +426,25 @@ else:
 
     def poll_key():
         r, _, _ = select.select([sys.stdin], [], [], 0)
-        if r:
-            return sys.stdin.read(1)
-        return None
+        if not r:
+            return None
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            # Drain the rest of an escape sequence (arrow keys, mouse-wheel
+            # scroll, etc.) so its bytes aren't misread as separate key presses
+            # — otherwise every scroll tick would feed ESC/'['/'A'… to the key
+            # handler and close whatever modal is open. The short timeout
+            # catches sequences split across reads. Mirrors the Windows branch,
+            # which already swallows \x00/\xe0 function-key prefixes.
+            while True:
+                r2, _, _ = select.select([sys.stdin], [], [], 0.01)
+                if not r2:
+                    break
+                b = sys.stdin.read(1)
+                if not b or "\x40" <= b <= "\x7e":  # CSI/SS3 final byte ends it
+                    break
+            return None
+        return ch
 
     def _set_console_utf8():
         """Unix counterpart — no-op. Unix terminals get encoding from
@@ -1247,6 +1263,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
     # ── Token Stats ──
     buf.append(sep(SW))
     tp = max(0, SW - 11)
@@ -2653,6 +2670,36 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
     return data
 
 
+_subagents_scan_thread = None
+_subagents_scan_lock = threading.Lock()
+
+
+def _subagents_refresh_async(transcript_path):
+    """Kick a background scan when the cache is stale and none is in flight.
+
+    Keeps the read+parse of up to 256 agent transcripts OFF the render thread so
+    the modal doesn't stutter on large fan-outs (the synchronous scan blocked
+    the 20Hz loop for ~0.3s every TTL). The worker writes _subagents_cache;
+    render_agents reads the last cached result without ever blocking. Mirrors
+    the _rls_check_worker / pulse worker pattern.
+    """
+    global _subagents_scan_thread
+    d = _subagents_dir_for(transcript_path)
+    if d is None:
+        return
+    cached = _subagents_cache.get(str(d))
+    if cached and time.monotonic() - cached["t"] < _SUBAGENTS_TTL:
+        return  # fresh enough — no scan needed
+    with _subagents_scan_lock:
+        if _subagents_scan_thread is not None and _subagents_scan_thread.is_alive():
+            return
+        t = threading.Thread(
+            target=scan_subagents, args=(transcript_path,),
+            kwargs={"ttl": _SUBAGENTS_TTL}, name="subagents-scan", daemon=True)
+        _subagents_scan_thread = t
+        t.start()
+
+
 def render_agents(data, cols, rows, active_only=False):
     """Modal: live subagent / Workflow fan-out for the watched session.
 
@@ -2667,7 +2714,20 @@ def render_agents(data, cols, rows, active_only=False):
     buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
     buf.append(sep(SW))
 
-    info = scan_subagents((data or {}).get("transcript_path"))
+    tp = (data or {}).get("transcript_path")
+    d = _subagents_dir_for(tp)
+    info = None
+    if d is not None:
+        _subagents_refresh_async(tp)  # off-thread scan; render never blocks
+        cached = _subagents_cache.get(str(d))
+        info = cached["data"] if cached else None
+        if info is None:
+            # Scan in flight, nothing cached yet (first open this TTL).
+            buf.append(f"{C_DIM}Scanning subagents…{R}")
+            buf.append(sep(SW))
+            buf.append(f"{C_DIM}press any key to close{R}")
+            _fit_buf_height(buf, rows, clip_tail=True)
+            return buf
     if not info or not info["total"]:
         buf.append(f"{C_DIM}No subagents for this session.{R}")
         buf.append(f"{C_DIM}(populated when Task or Workflow agents run){R}")
