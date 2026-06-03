@@ -370,6 +370,21 @@ class TestWriteSharedState(unittest.TestCase):
         self.assertIn("_schema_version", entry)
         self.assertEqual(entry["_schema_version"], shared.SCHEMA_VERSION)
 
+    def test_snapshot_failure_skips_history_append(self):
+        """Alignment guard: if the snapshot write fails, history must NOT be
+        appended — otherwise calc_rates would read a fresh JSONL line against a
+        stale snapshot and skew BRN/CTR. statusline.py:309-311."""
+        import statusline
+        from statusline import write_shared_state
+        data = {"session_id": "alignfail", "cost": {"total_cost_usd": 2.0}}
+        with patch.object(statusline, "atomic_write_text", return_value=False):
+            write_shared_state(data)
+        hist = self._base / "alignfail.jsonl"
+        self.assertFalse(
+            hist.exists(),
+            "history JSONL must not be created when the snapshot write fails",
+        )
+
 
 class TestTrimHistory(unittest.TestCase):
 

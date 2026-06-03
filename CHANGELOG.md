@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.12.6 — 2026-06-03
+
+**Bug fixes:**
+- **Terminal-width detection works on 64-bit Windows.** `statusline.py`'s
+  last-resort width probe (opening `CONOUT$` directly when stdout is piped)
+  called `CreateFileW` without declaring its ctypes signature. Foreign
+  functions default to a 32-bit `c_int` return type, so the pointer-sized
+  console HANDLE was truncated and `GetConsoleScreenBufferInfo` always failed —
+  the branch silently fell back to a fixed width of 120. The handle types are
+  now declared (`restype`/`argtypes` = `c_void_p`) and checked against
+  `INVALID_HANDLE_VALUE` (`statusline.py:_get_terminal_width`).
+- **Console code page is restored correctly on Windows.** `_set_console_utf8()`
+  runs unconditionally before the `--list` branch and saved the original output
+  code page; interactive setup then called `_setup_term()`, which saved it again
+  — by then already `65001`, so the user's locale code page (e.g. CP1250) was
+  lost and the console was left in UTF-8 after quitting. Both saves are now
+  idempotent (`monitor.py:_set_console_utf8`, `_setup_term`).
+
+**CI / tooling:**
+- **Dependabot can update the bandit lockfile again.** `requirements-bandit.txt`
+  was a flat `--require-hashes` file that mixed the direct `bandit[sarif]` pin
+  with its transitive deps, so Dependabot failed weekly trying to bump a
+  transitive package (`jsonpickle`) in isolation. It is now generated from
+  `requirements-bandit.in` via `pip-compile --generate-hashes`; Dependabot
+  recognises the header and regenerates the whole hash tree. Hash pinning is
+  preserved.
+
+**Tests:** 621 passing (+4) — behavioural coverage for two safety guards
+(`check_syntax_after_pull` post-update integrity check; `write_shared_state`
+snapshot/history alignment).
+
 ## v1.12.5 — 2026-05-30
 
 **Bug fixes:**

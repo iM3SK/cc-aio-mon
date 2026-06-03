@@ -67,6 +67,20 @@ def _get_terminal_width(fallback: int = 80) -> int:
     if _IS_WIN:
         try:
             kernel32 = ctypes.windll.kernel32
+            # ctypes defaults foreign-function restype to c_int (32-bit). A
+            # HANDLE is pointer-sized, so on 64-bit Windows the value returned
+            # by CreateFileW would be truncated/sign-extended and the handle
+            # corrupted — GetConsoleScreenBufferInfo then fails and this whole
+            # branch becomes a no-op. Declare the real types so the handle
+            # survives intact.
+            kernel32.CreateFileW.restype = ctypes.c_void_p
+            kernel32.CreateFileW.argtypes = [
+                ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+            ]
+            kernel32.GetConsoleScreenBufferInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            _INVALID_HANDLE = ctypes.c_void_p(-1).value
             # CONOUT$ is the Windows console output device — works even when
             # stdout/stderr are piped (Claude Code subprocess context)
             h = kernel32.CreateFileW(
@@ -78,7 +92,7 @@ def _get_terminal_width(fallback: int = 80) -> int:
                 0,
                 None,
             )
-            if h not in (-1, 0):
+            if h not in (None, 0, _INVALID_HANDLE):
                 try:
                     csbi = ctypes.create_string_buffer(22)
                     if kernel32.GetConsoleScreenBufferInfo(h, csbi):

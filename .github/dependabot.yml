@@ -1,6 +1,8 @@
 version: 2
 updates:
-  # CI: bandit + transitive deps pinned by hash in requirements-bandit.txt
+  # CI: bandit pinned in requirements-bandit.in; lockfile requirements-bandit.txt
+  # is pip-compile --generate-hashes managed (Dependabot regenerates the whole
+  # hash tree via the .in, so transitive deps no longer fail to update)
   - package-ecosystem: pip
     directory: "/.github/workflows"
     schedule:
