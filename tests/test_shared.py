@@ -825,6 +825,40 @@ class TestContextSuffixHelpers(unittest.TestCase):
         self.assertEqual(shared.compact_context_suffix(""), "")
 
 
+class TestCheckSyntaxAfterPull(unittest.TestCase):
+    """Behavioural coverage for the post-self-update integrity guard.
+
+    The except-SyntaxError branch is the entire reason this function exists:
+    update.py:apply_update() and the monitor TUI worker both gate a pull as
+    safe only when the result is empty. Prior tests fed it valid Python
+    (test_update.py) or a None safe_read — never genuinely broken syntax — so
+    a regression in the except branch (wrong exception type, "eval"/"exec"
+    typo) would pass the whole green suite while the guard silently let a
+    corrupt self-update through. shared.py:391-394."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.root = pathlib.Path(self.tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_broken_file_reported_valid_file_excluded(self):
+        (self.root / "broken.py").write_text("def f(:\n    pass\n", encoding="utf-8")
+        (self.root / "good.py").write_text("x = 1\n", encoding="utf-8")
+        bad = shared.check_syntax_after_pull(self.root, ["broken.py", "good.py"])
+        self.assertEqual(bad, ["broken.py"])
+
+    def test_all_valid_returns_empty(self):
+        (self.root / "good.py").write_text("y = 2\n", encoding="utf-8")
+        self.assertEqual(shared.check_syntax_after_pull(self.root, ["good.py"]), [])
+
+    def test_missing_file_skipped_not_flagged(self):
+        # Absent files are not a syntax failure — they must not land in `bad`.
+        self.assertEqual(shared.check_syntax_after_pull(self.root, ["nope.py"]), [])
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

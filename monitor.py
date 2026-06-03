@@ -333,10 +333,16 @@ if IS_WIN:
             kernel32 = ctypes.windll.kernel32
         except Exception:
             return
-        try:
-            _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
-        except Exception:
-            _orig_console_output_cp = None
+        # Save the *real* original CP only once. _set_console_utf8 runs
+        # unconditionally before the --list branch, and interactive setup later
+        # calls _setup_term which saves again — by then the CP is already 65001,
+        # so an unguarded re-save would persist 65001 as the "original" and
+        # _restore_term would never put the user's locale CP back.
+        if _orig_console_output_cp is None:
+            try:
+                _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
+            except Exception:
+                _orig_console_output_cp = None
         try:
             kernel32.SetConsoleOutputCP(65001)
         except Exception:
@@ -373,11 +379,14 @@ if IS_WIN:
             kernel32 = ctypes.windll.kernel32
         except Exception:
             sys.exit(_WIN10_ANSI_REQUIRED_MSG)
-        # Save current output CP first so _restore_term can put it back
-        try:
-            _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
-        except Exception:
-            _orig_console_output_cp = None
+        # Save current output CP first so _restore_term can put it back.
+        # Guard against overwriting a CP already saved by an earlier
+        # _set_console_utf8 (which by now switched the console to 65001).
+        if _orig_console_output_cp is None:
+            try:
+                _orig_console_output_cp = int(kernel32.GetConsoleOutputCP())
+            except Exception:
+                _orig_console_output_cp = None
         # Switch console output to UTF-8 — `ensure_utf8_stdout()` makes
         # Python write UTF-8 bytes, this makes the Windows console
         # interpret them as UTF-8 instead of the locale default.
