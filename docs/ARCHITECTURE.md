@@ -208,6 +208,7 @@ in `requirements.txt` (there is none).
 | `api.anthropic.com/v1/messages` | `pulse.py:_ping_api()` | HTTPS (urllib) | Optional — same opt-out |
 | GitHub (`origin/main`) | `_rls_check_worker`, `update.py` | HTTPS via `git fetch` | Optional — disable with `CC_AIO_MON_NO_UPDATE_CHECK=1` |
 | `~/.claude/projects/` | `monitor.py:scan_transcript_stats()` | local file | Optional — token stats modal reads transcripts |
+| `~/.claude/projects/<proj>/<session>/subagents/` | `monitor.py:scan_subagents()` | local file | Optional — agents fan-out modal; derived from the session `transcript_path`, containment-checked |
 | `~/.claude/stats-cache.json` | `monitor.py` (lifetime stats panel) | local file | Optional — omitted silently when absent |
 
 `shared.run_git()` uses a minimal env whitelist (`_GIT_ENV_WHITELIST`) to strip

@@ -990,13 +990,15 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
-def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False):
+def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False):
     if show_menu:
         return render_menu(cols, rows)
     if show_cost:
         return render_cost_breakdown(data, hist, cols, rows)
     if show_legend:
         return render_legend(cols, rows)
+    if show_agents:
+        return render_agents(data, cols, rows, active_only=agents_active_only)
 
     SW = cols
     buf = []
@@ -1239,6 +1241,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R}   {C_DIM}Refresh{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
@@ -1920,6 +1923,7 @@ def render_menu(cols, rows):
     buf.append(f"{BG_BAR}{C_WHT}{B}VIEWS{R}{BG_BAR}{' ' * vp}{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
@@ -2515,6 +2519,201 @@ def render_stats(cols, rows, period="all"):
 
 
 # ---------------------------------------------------------------------------
+# Agents modal — live subagent / Workflow fan-out for the watched session.
+#
+# Task subagents and Workflow agents each write their own transcript under
+#   <claude_projects>/<proj>/<session>/subagents/agent-*.jsonl   (+ workflows/)
+# We derive that dir from the session's transcript_path (reusing the same
+# containment hardening as the title/usage scanners), sum each agent's token
+# usage, and flag "active" by recent mtime. The scan is lazy — invoked only
+# while the modal is open — and TTL-cached, so the default dashboard never
+# pays for it. On a cache miss (every TTL while the modal is open) the read
+# still runs on the render thread; the file-size + count caps bound that cost.
+# ---------------------------------------------------------------------------
+_SUBAGENT_SCAN_CAP = 256              # max agent files per scan (DoS guard)
+_SUBAGENT_FILE_MAX = 8 * 1024 * 1024  # skip token-sum read above this size
+_SUBAGENT_ACTIVE_WINDOW = 30.0        # mtime within N seconds == "active"
+_SUBAGENTS_TTL = 2.0
+_subagents_cache = {}                 # {dir_str: {"t": monotonic, "data": {...}}}
+_SUBAGENTS_CACHE_MAX = 8
+
+
+def _subagents_dir_for(transcript_path):
+    """Derive the subagents/ dir for a session from its transcript path.
+
+    transcript = <root>/<proj>/<session>.jsonl  ->  <root>/<proj>/<session>/subagents/
+    Reuses _safe_transcript_path containment (regular file inside the projects
+    root, no symlink escapes). Returns the dir Path or None.
+    """
+    path = _safe_transcript_path(transcript_path)
+    if path is None:
+        return None
+    try:
+        d = path.parent / path.stem / "subagents"
+        st = d.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return None
+        return d
+    except OSError:
+        return None
+
+
+def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
+    """Return a fan-out summary for the session's subagents, or None.
+
+    {"total": int, "active": int, "total_tokens": int,
+     "agents": [{"id": str, "tokens": int, "tool": str|None, "active": bool,
+                 "mtime": float, "too_large": bool}, ...]}
+
+    Lazy + TTL-cached: only invoked while the agents modal is open, and re-reads
+    at most every ``ttl`` seconds so an open modal doesn't re-parse N files each
+    render tick.
+    """
+    d = _subagents_dir_for(transcript_path)
+    if d is None:
+        return None
+    key = str(d)
+    mono = time.monotonic()
+    cached = _subagents_cache.get(key)
+    if cached and mono - cached["t"] < ttl:
+        return cached["data"]
+
+    now = time.time()
+    files = []
+    try:
+        files.extend(sorted(d.glob("agent-*.jsonl")))
+        wf = d / "workflows"
+        if wf.is_dir() and not wf.is_symlink():
+            files.extend(f for f in wf.glob("**/*.jsonl") if f.name != "journal.jsonl")
+    except OSError:
+        return None
+    files = files[:_SUBAGENT_SCAN_CAP]
+
+    agents = []
+    total_tok = 0
+    active = 0
+    for f in files:
+        try:
+            lst = f.lstat()
+        except OSError:
+            continue
+        # Defense-in-depth: skip a symlinked or non-regular leaf so a planted
+        # symlink can't redirect the read outside the projects root, and a FIFO/
+        # special file can't block the (synchronous) scan. Mirrors the
+        # _scan_ai_title / _safe_transcript_path hardening for the dir leaf.
+        if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+            continue
+        mt = lst.st_mtime
+        tok = 0
+        last_tool = None
+        # Bounded, TOCTOU-safe read (never exceeds the cap even if the file
+        # grows between lstat and read). None == unreadable or over cap.
+        raw = safe_read(f, _SUBAGENT_FILE_MAX)
+        too_large = raw is None
+        if raw is not None:
+            for line in raw.decode("utf-8", errors="replace").splitlines():
+                try:
+                    o = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(o, dict):
+                    continue  # valid JSON but not an object (e.g. bare array)
+                m = o.get("message")
+                if not isinstance(m, dict):
+                    continue
+                u = m.get("usage")
+                if isinstance(u, dict):
+                    tok += (_num(u.get("input_tokens"), 0) + _num(u.get("output_tokens"), 0)
+                            + _num(u.get("cache_creation_input_tokens"), 0)
+                            + _num(u.get("cache_read_input_tokens"), 0))
+                for c in (m.get("content") or []):
+                    if isinstance(c, dict) and c.get("type") == "tool_use":
+                        last_tool = c.get("name")
+        is_active = (now - mt) < _SUBAGENT_ACTIVE_WINDOW
+        if is_active:
+            active += 1
+        total_tok += tok
+        aid = f.stem
+        if aid.startswith("agent-"):
+            aid = aid[6:]
+        agents.append({"id": aid[:12], "tokens": int(tok), "tool": last_tool,
+                       "active": is_active, "mtime": mt, "too_large": too_large})
+
+    agents.sort(key=lambda a: a["mtime"], reverse=True)
+    # total counts agents we actually materialised (stat/symlink-rejected files
+    # drop out), so the header and "+N more" line match the rendered list.
+    data = {"total": len(agents), "active": active,
+            "total_tokens": total_tok, "agents": agents}
+
+    _subagents_cache[key] = {"t": mono, "data": data}
+    if len(_subagents_cache) > _SUBAGENTS_CACHE_MAX:
+        oldest = min(_subagents_cache, key=lambda kk: _subagents_cache[kk]["t"])
+        if oldest != key:
+            _subagents_cache.pop(oldest, None)
+    return data
+
+
+def render_agents(data, cols, rows, active_only=False):
+    """Modal: live subagent / Workflow fan-out for the watched session.
+
+    ``active_only`` hides idle (○) agents so a fresh fan-out isn't buried under
+    history — a non-destructive "clear board" (nothing on disk is touched).
+    """
+    SW = cols
+    buf = []
+    buf.append(sep(SW))
+    title = "AGENTS  fan-out" + ("  [active]" if active_only else "")
+    tp = max(0, SW - len(title))
+    buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
+    buf.append(sep(SW))
+
+    info = scan_subagents((data or {}).get("transcript_path"))
+    if not info or not info["total"]:
+        buf.append(f"{C_DIM}No subagents for this session.{R}")
+        buf.append(f"{C_DIM}(populated when Task or Workflow agents run){R}")
+        buf.append(sep(SW))
+        buf.append(f"{C_DIM}press any key to close{R}")
+        _fit_buf_height(buf, rows, clip_tail=True)
+        return buf
+
+    buf.append(
+        f"{C_GRN}{B}{info['active']}{R}{C_DIM} active{R} "
+        f"{C_DIM}/{R} {C_WHT}{B}{info['total']}{R}{C_DIM} total{R}    "
+        f"{C_DIM}TOK{R} {C_WHT}{f_tok(info['total_tokens'])}{R}"
+    )
+    buf.append(sep(SW))
+
+    shown = [a for a in info["agents"] if a["active"]] if active_only else info["agents"]
+    if active_only and not shown:
+        idle = info["total"] - info["active"]
+        buf.append(f"{C_DIM}No active agents ({idle} idle hidden).{R}")
+    visible = max(1, rows - 8)
+    for a in shown[:visible]:
+        dot = f"{C_GRN}●{R}" if a["active"] else f"{C_DIM}○{R}"
+        tool = a["tool"] or "--"
+        # Fixed-width columns so the token / tool columns line up regardless of
+        # how wide each agent's formatted token count is (pad the plain text
+        # before wrapping it in ANSI, or the escape bytes would skew alignment).
+        aid = a["id"][:12].ljust(12)
+        # A too-large transcript is skipped for token-summing — show "  >cap"
+        # instead of a misleading 0 so the count isn't silently undercounted.
+        tok_str = f"{'>cap' if a.get('too_large') else f_tok(a['tokens']):>7}"
+        line = (f"{dot} {C_DIM}{aid}{R}  "
+                f"{C_WHT}{tok_str}{R} {C_DIM}tok{R}   {C_CYN}{tool}{R}")
+        buf.append(truncate(line, SW))
+
+    extra = len(shown) - visible
+    if extra > 0:
+        buf.append(f"{C_DIM}... +{extra} more{R}")
+
+    buf.append(sep(SW))
+    filt = f"{C_WHT}all{R}{C_DIM}/active" if not active_only else f"{C_DIM}all/{R}{C_WHT}active{R}"
+    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}] {filt}{C_DIM}   ·   press any key to close{R}")
+    _fit_buf_height(buf, rows, clip_tail=True)
+    return buf
+
+
+# ---------------------------------------------------------------------------
 # Session picker
 # ---------------------------------------------------------------------------
 def render_picker(sessions, cols, rows):
@@ -2698,6 +2897,8 @@ def main():
     force_picker = False
     show_update = False
     show_pulse = False
+    show_agents = False
+    agents_active_only = False
     # Opt-out: CC_AIO_MON_NO_PULSE=1 disables the background Anthropic Pulse worker.
     # Mirrors CC_AIO_MON_NO_UPDATE_CHECK=1 pattern for the release checker.
     if os.environ.get("CC_AIO_MON_NO_PULSE") != "1":
@@ -2767,11 +2968,18 @@ def main():
                     show_cost = True
                 elif k == "p":
                     show_pulse = True
+                elif k == "a":
+                    show_agents = True
                 show_menu = False
             elif show_cost and k is not None:
                 show_cost = False
             elif show_pulse and k is not None:
                 show_pulse = False
+            elif show_agents and k == "f":
+                # In-modal filter toggle: hide idle agents ("clear board").
+                agents_active_only = not agents_active_only
+            elif show_agents and k is not None:
+                show_agents = False
             elif show_legend and k is not None:
                 show_legend = False
             # ── Global handlers ──
@@ -2826,6 +3034,15 @@ def main():
                 show_legend = False
                 show_stats = None
                 show_cost = False
+                show_update = False
+                _set_update_result(None)
+            elif k == "a":
+                show_agents = not show_agents
+                show_menu = False
+                show_legend = False
+                show_stats = None
+                show_cost = False
+                show_pulse = False
                 show_update = False
                 _set_update_result(None)
 
@@ -2927,6 +3144,7 @@ def main():
                     render_frame(
                         last_data, last_hist, cols, rows,
                         show_legend, show_menu, show_cost, stale=is_stale,
+                        show_agents=show_agents, agents_active_only=agents_active_only,
                     ),
                     cols,
                 )

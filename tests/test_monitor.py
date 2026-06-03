@@ -3871,6 +3871,221 @@ class TestMainSingleton(unittest.TestCase):
             _m.main()
         mock_lock.assert_not_called()
 
+
+# ---------------------------------------------------------------------------
+# scan_subagents / render_agents — Agents fan-out modal
+# ---------------------------------------------------------------------------
+class TestScanSubagents(unittest.TestCase):
+    """Subagent/Workflow fan-out scanner reads <proj>/<session>/subagents/."""
+
+    def setUp(self):
+        import tempfile, pathlib, monitor, json
+        self._json = json
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_root = monitor.CLAUDE_PROJECTS_DIR
+        monitor.CLAUDE_PROJECTS_DIR = pathlib.Path(self.tmpdir)
+        monitor._subagents_cache.clear()
+        # transcript = <root>/proj/sess.jsonl ; subagents = <root>/proj/sess/subagents/
+        self.proj = pathlib.Path(self.tmpdir) / "proj"
+        self.proj.mkdir(parents=True, exist_ok=True)
+        self.tp = self.proj / "sess.jsonl"
+        self.tp.write_text('{"type":"user"}\n', encoding="utf-8")
+        self.subdir = self.proj / "sess" / "subagents"
+        self.subdir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.CLAUDE_PROJECTS_DIR = self._orig_root
+        monitor._subagents_cache.clear()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _agent(self, name, in_tok=0, out_tok=0, cache_r=0, tool=None):
+        msg = {"usage": {"input_tokens": in_tok, "output_tokens": out_tok,
+                         "cache_read_input_tokens": cache_r}}
+        if tool:
+            msg["content"] = [{"type": "tool_use", "name": tool}]
+        line = self._json.dumps({"type": "assistant", "message": msg})
+        (self.subdir / name).write_text(line + "\n", encoding="utf-8")
+
+    def test_aggregates_tokens_and_counts(self):
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=100, out_tok=50, cache_r=200, tool="Read")
+        self._agent("agent-bbb.jsonl", in_tok=10, out_tok=5, tool="Grep")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["total_tokens"], 100 + 50 + 200 + 10 + 5)
+        ids = {a["id"] for a in info["agents"]}
+        self.assertEqual(ids, {"aaa", "bbb"})
+
+    def test_workflow_journal_excluded(self):
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=10)
+        wf = self.subdir / "workflows" / "wf_x"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / "journal.jsonl").write_text('{"type":"system"}\n', encoding="utf-8")
+        (wf / "agent-w1.jsonl").write_text(
+            self._json.dumps({"type": "assistant",
+                              "message": {"usage": {"input_tokens": 7}}}) + "\n",
+            encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        # agent-aaa + workflow agent-w1, journal.jsonl excluded
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["total_tokens"], 17)
+
+    def test_active_flag_by_mtime(self):
+        import os, time, monitor
+        self._agent("agent-fresh.jsonl", in_tok=1)
+        self._agent("agent-stale.jsonl", in_tok=1)
+        old = time.time() - 3600
+        os.utime(self.subdir / "agent-stale.jsonl", (old, old))
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["active"], 1)  # only the fresh one
+
+    def test_no_subagents_dir_returns_none(self):
+        import pathlib, monitor
+        bare = self.proj / "lonely.jsonl"
+        bare.write_text('{"type":"user"}\n', encoding="utf-8")
+        self.assertIsNone(monitor.scan_subagents(str(bare), ttl=0))
+
+    def test_invalid_path_returns_none(self):
+        import monitor
+        self.assertIsNone(monitor.scan_subagents(None, ttl=0))
+        self.assertIsNone(monitor.scan_subagents("/etc/passwd", ttl=0))
+
+    def test_render_agents_no_data_does_not_crash(self):
+        import monitor
+        buf = monitor.render_agents({}, 80, 24)
+        self.assertTrue(any("No subagents" in ln for ln in _strip_ansi(buf)))
+
+    def test_render_agents_lists_agents(self):
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=1000, tool="Read")
+        buf = monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)
+        flat = "\n".join(_strip_ansi(buf))
+        self.assertIn("total", flat)
+        self.assertIn("aaa", flat)
+
+    def test_non_dict_json_line_skipped_not_crash(self):
+        # Review finding: a valid-JSON-but-non-object line ([1,2,3], 42, "x")
+        # used to raise AttributeError on o.get("message"), blanking the modal
+        # and defeating the TTL cache. Must be skipped and the cache populated.
+        import monitor
+        (self.subdir / "agent-bad.jsonl").write_text(
+            '[1,2,3]\n42\n"hi"\n'
+            + self._json.dumps({"type": "assistant",
+                                "message": {"usage": {"input_tokens": 5}}}) + "\n",
+            encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["total_tokens"], 5)  # only the valid object counts
+        # cache must be populated (perf guard not defeated)
+        self.assertTrue(monitor._subagents_cache)
+
+    def test_malformed_jsonl_line_skipped(self):
+        import monitor
+        (self.subdir / "agent-x.jsonl").write_text(
+            "not json at all\n"
+            + self._json.dumps({"message": {"usage": {"input_tokens": 99}}}) + "\n",
+            encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertEqual(info["total_tokens"], 99)
+
+    def test_symlink_leaf_rejected(self):
+        # Security: a symlinked agent file must not be read (no escape outside
+        # the projects root). The dir-leaf guard alone didn't cover leaf files.
+        import os, monitor
+        self._agent("agent-real.jsonl", in_tok=10)
+        outside = pathlib.Path(self.tmpdir) / "evil.jsonl"
+        outside.write_text(
+            self._json.dumps({"message": {"usage": {"input_tokens": 99999}}}) + "\n",
+            encoding="utf-8")
+        try:
+            os.symlink(str(outside), str(self.subdir / "agent-evil.jsonl"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported here")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        ids = {a["id"] for a in info["agents"]}
+        self.assertNotIn("evil", ids)
+        self.assertEqual(info["total_tokens"], 10)  # symlink target not read
+
+    def test_too_large_file_marked_not_counted(self):
+        import monitor
+        self._agent("agent-small.jsonl", in_tok=3)
+        big = self._json.dumps({"message": {"usage": {"input_tokens": 9999}}})
+        (self.subdir / "agent-big.jsonl").write_text((big + "\n") * 100, encoding="utf-8")
+        orig = monitor._SUBAGENT_FILE_MAX
+        # Cap between the small agent (~90 B) and the big one (~5 KB).
+        monitor._SUBAGENT_FILE_MAX = 500
+        try:
+            info = monitor.scan_subagents(str(self.tp), ttl=0)
+        finally:
+            monitor._SUBAGENT_FILE_MAX = orig
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["total_tokens"], 3)  # big one contributes 0
+        big_a = [a for a in info["agents"] if a["id"] == "big"][0]
+        self.assertTrue(big_a["too_large"])
+
+    def test_ttl_cache_hit(self):
+        # Second call within TTL returns the cached result (perf guarantee).
+        import monitor
+        self._agent("agent-a.jsonl", in_tok=1)
+        first = monitor.scan_subagents(str(self.tp), ttl=100)
+        self.assertEqual(first["total"], 1)
+        self._agent("agent-b.jsonl", in_tok=1)  # add a file after caching
+        cached = monitor.scan_subagents(str(self.tp), ttl=100)
+        self.assertEqual(cached["total"], 1)  # cache hit: new file not seen
+        fresh = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertEqual(fresh["total"], 2)  # ttl=0 forces refresh
+
+    def test_lru_cache_bounded(self):
+        import monitor
+        self._agent("agent-a.jsonl", in_tok=1)
+        # Scan more distinct dirs than the cache cap to force eviction.
+        for i in range(monitor._SUBAGENTS_CACHE_MAX + 3):
+            p = pathlib.Path(self.tmpdir) / f"p{i}"
+            (p).mkdir(parents=True, exist_ok=True)
+            tpi = p / "s.jsonl"
+            tpi.write_text('{"type":"user"}\n', encoding="utf-8")
+            sd = p / "s" / "subagents"
+            sd.mkdir(parents=True, exist_ok=True)
+            (sd / "agent-x.jsonl").write_text(
+                self._json.dumps({"message": {"usage": {"input_tokens": 1}}}) + "\n",
+                encoding="utf-8")
+            monitor.scan_subagents(str(tpi), ttl=100)
+        self.assertLessEqual(len(monitor._subagents_cache), monitor._SUBAGENTS_CACHE_MAX)
+
+    def test_render_frame_dispatch_show_agents(self):
+        # render_frame must route show_agents=True to the AGENTS modal,
+        # like its sibling show_cost / show_legend flags.
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=10)
+        buf = monitor.render_frame(
+            {"transcript_path": str(self.tp)}, [], 80, 24, show_agents=True)
+        self.assertTrue(any("AGENTS" in ln for ln in _strip_ansi(buf)))
+
+    def test_active_only_filter_hides_idle(self):
+        # "clear board" filter: active_only must hide idle (○) agents but keep
+        # the active (●) ones — purely visual, nothing on disk is touched.
+        import os, time, monitor
+        self._agent("agent-live.jsonl", in_tok=1)
+        self._agent("agent-idle.jsonl", in_tok=1)
+        old = time.time() - 3600
+        os.utime(self.subdir / "agent-idle.jsonl", (old, old))
+        data = {"transcript_path": str(self.tp)}
+        all_flat = "\n".join(_strip_ansi(monitor.render_agents(data, 80, 24, active_only=False)))
+        self.assertIn("live", all_flat)
+        self.assertIn("idle", all_flat)
+        monitor._subagents_cache.clear()
+        act_flat = "\n".join(_strip_ansi(monitor.render_agents(data, 80, 24, active_only=True)))
+        self.assertIn("live", act_flat)
+        self.assertNotIn("idle", act_flat)        # idle hidden
+        self.assertIn("[active]", act_flat)        # filter indicated in title
+        # idle file still on disk (non-destructive)
+        self.assertTrue((self.subdir / "agent-idle.jsonl").exists())
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

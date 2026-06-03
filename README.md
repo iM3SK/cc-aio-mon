@@ -72,7 +72,8 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
 - **Auto-purge** — dead session files older than 48 hours are automatically cleaned up from the temp directory.
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
-- **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, cost breakdown, update manager.
+- **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, agents fan-out, cost breakdown, Anthropic Pulse, update manager.
+- **Agents fan-out** — press `a` for a live view of the subagents / Workflow agents spawned by the watched session: active/total count, summed token usage, and a per-agent list (id, tokens, last tool) sorted by recency, refreshed while the modal is open. Press `f` to toggle an **active-only** filter that hides idle agents (a non-destructive "clear board" — nothing on disk is touched). Reads each agent's transcript under `~/.claude/projects/<proj>/<session>/subagents/agent-*.jsonl` (lazy, TTL-cached, containment-checked). When a Task or Workflow fans out across dozens of agents, you can see it happen in real time.
 - **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). Also shows cache savings percentage and burn rate over time bars. When non-zero, **WSR / WFR** rows surface server-side tool calls (`web_search_requests` / `web_fetch_requests` from `usage.server_tool_use`) and **TIE / T5M** rows split cache-creation tokens between the 1-hour and 5-minute ephemeral TTLs.
 - **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.claude.com` (indicator + incidents) + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku) — prefers `incidents[].components[]` array, falls back to regex on title. JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`) with Windows reserved-device-name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink/junction rejection on the temp data directory and `~/.claude/projects/`, transcript containment checks, and bounded reads for JSON, JSONL, transcripts, Pulse responses, and post-update source checks.
@@ -151,11 +152,13 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 | `t` | Token usage stats (per-model breakdown) | dashboard |
 | `c` | Cost breakdown (token costs, cache savings, burn rate over time) | dashboard |
 | `u` | Update manager (version check, changelog) | dashboard |
+| `a` | Agents fan-out (live subagent / Workflow view for the watched session) | dashboard |
 | `a` | Apply update (fetches + runs `git pull --ff-only`) | inside update modal only |
 | `p` | Anthropic Pulse (backend stability modal) | dashboard |
 | `l` | Toggle legend overlay | dashboard |
 | `1`–`9` | Select session from picker | session picker only |
 | `1` / `2` / `3` | Switch period (all / 7d / 30d) | inside token-stats modal only |
+| `f` | Toggle active-only filter (hide idle agents) | inside agents modal only |
 
 ### Session Picker
 
