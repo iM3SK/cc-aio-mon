@@ -639,16 +639,27 @@ class TestCachedCrossSessionCosts(unittest.TestCase):
         self.assertEqual(week, 99.0)
 
     def test_ttl_expired_kicks_async_refresh(self):
-        # Non-blocking: an expired TTL returns the STALE value immediately and
-        # refreshes off-thread (render never re-parses transcripts inline).
-        import monitor
+        # Non-blocking: an expired TTL returns the cached value immediately and
+        # refreshes off-thread. Block the worker's compute so the immediate
+        # return is deterministically the stale value — otherwise the worker can
+        # win the race and overwrite the cache before the assertion (flaky on
+        # fast CI).
+        import monitor, threading
+        from unittest.mock import patch
+        gate = threading.Event()
+
+        def blocked_calc():
+            gate.wait(2.0)
+            return (0.0, 0.0)
+
         _cost_cache.update({"t": 0, "today": 42.0, "week": 99.0})
-        today, week = cached_cross_session_costs(ttl=0)
-        self.assertEqual((today, week), (42.0, 99.0))  # stale value, not blocked
-        # Worker finishes and updates the cache; empty dir -> 0.0/0.0.
-        t = monitor._cost_scan_thread
-        self.assertIsNotNone(t)
-        t.join(timeout=2.0)
+        with patch.object(monitor, "calc_cross_session_costs", blocked_calc):
+            today, week = cached_cross_session_costs(ttl=0)
+            self.assertEqual((today, week), (42.0, 99.0))  # worker blocked -> stale
+            t = monitor._cost_scan_thread
+            self.assertIsNotNone(t)
+            gate.set()  # release the worker
+            t.join(timeout=2.0)
         self.assertEqual((_cost_cache["today"], _cost_cache["week"]), (0.0, 0.0))
 
     def test_worker_aggregates_into_cache(self):
@@ -4126,18 +4137,26 @@ class TestScanSubagents(unittest.TestCase):
 
     def test_render_is_async_non_blocking(self):
         # Perf: with an empty cache the render shows "Scanning…" and kicks a
-        # background scan instead of blocking the render thread on the read.
-        import time, monitor
+        # background scan instead of blocking on the read. Stub the refresh to a
+        # no-op so the worker can't win the race and populate the cache before
+        # the render reads it (that race made this flaky on fast CI).
+        import monitor
+        from unittest.mock import patch
         self._agent("agent-aaa.jsonl", in_tok=5)
         monitor._subagents_cache.clear()
-        flat = "\n".join(_strip_ansi(
-            monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)))
-        self.assertIn("Scanning", flat)
-        for _ in range(100):  # wait up to ~2s for the daemon scan to populate
-            if monitor._subagents_cache:
-                break
-            time.sleep(0.02)
-        self.assertTrue(monitor._subagents_cache)  # background scan ran
+        called = {"n": 0}
+
+        def fake_refresh(tp, d=None):
+            called["n"] += 1
+
+        with patch.object(monitor, "_subagents_refresh_async", fake_refresh):
+            flat = "\n".join(_strip_ansi(
+                monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)))
+        self.assertIn("Scanning", flat)   # empty cache -> "Scanning" shown
+        self.assertEqual(called["n"], 1)  # render kicked the off-thread refresh
+        # The scan itself populates the cache when actually run.
+        monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertTrue(monitor._subagents_cache)
 
 
 class TestModalScroll(unittest.TestCase):
