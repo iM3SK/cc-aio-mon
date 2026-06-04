@@ -4258,11 +4258,13 @@ class TestPollKeyEscape(unittest.TestCase):
 
     def test_pushback_returned_first(self):
         # A key stashed in _key_pushback (by the scroll-burst drain) is returned
-        # by the next poll_key before reading stdin.
+        # by the next poll_key before any stdin/select (Unix) or msvcrt (Windows)
+        # read — so call poll_key() directly rather than via _poll_with, whose
+        # select patch is Unix-only (monitor.select does not exist on Windows).
         import monitor
         monitor._key_pushback[0] = "q"
         try:
-            self.assertEqual(self._poll_with([]), "q")
+            self.assertEqual(monitor.poll_key(), "q")
             self.assertIsNone(monitor._key_pushback[0])
         finally:
             monitor._key_pushback[0] = None
