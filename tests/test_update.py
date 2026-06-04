@@ -676,6 +676,41 @@ class TestCheckPythonVersion(unittest.TestCase):
                 self.fail("Python newer than MIN_PYTHON must not trigger sys.exit")
 
 
+class TestUpdateMainFlow(unittest.TestCase):
+    """Coverage for update.main() flow-control exit codes. The component checks
+    were tested in isolation; the orchestration (ahead/behind/diverged ->
+    exit code) was never exercised."""
+
+    def _run_main(self, behind, ahead, apply=False):
+        import io, update
+        argv = ["update.py"] + (["--apply"] if apply else [])
+        with patch.object(update.sys, "argv", argv), \
+             patch.object(update, "_init_terminal", lambda: None), \
+             patch.object(update, "check_python_version", lambda: None), \
+             patch.object(update, "check_repo", lambda: None), \
+             patch.object(update, "check_branch", lambda: None), \
+             patch.object(update, "check_clean", lambda: None), \
+             patch.object(update, "fetch_remote", lambda: None), \
+             patch.object(update, "get_local_version", lambda: "1.0.0"), \
+             patch.object(update, "get_remote_version", lambda: "1.0.1"), \
+             patch.object(update, "get_ahead_behind", lambda: (behind, ahead)), \
+             patch.object(update.sys, "stdout", io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                update.main()
+        return cm.exception.code
+
+    def test_up_to_date_exits_zero(self):
+        self.assertEqual(self._run_main(behind=0, ahead=0), 0)
+
+    def test_local_ahead_exits_one(self):
+        # Local ahead of origin (can't downgrade) -> hard exit 1.
+        self.assertEqual(self._run_main(behind=0, ahead=2), 1)
+
+    def test_diverged_exits_one(self):
+        # Local diverged (ahead AND behind) -> manual merge required, exit 1.
+        self.assertEqual(self._run_main(behind=3, ahead=1), 1)
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)
