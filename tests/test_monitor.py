@@ -4140,8 +4140,20 @@ class TestModalScroll(unittest.TestCase):
         monitor._modal_scroll = 0
         out = monitor._window_buf(list(buf), 10)
         self.assertLessEqual(len(out), 10)
-        self.assertIn("line0", out[0])
-        self.assertTrue(any("/50" in _strip_ansi([ln])[0] for ln in out))  # position indicator
+        self.assertIn("line0", out[0])  # pinned header stays at top
+        flat = _strip_ansi(out)
+        self.assertTrue(any(re.search(r"\d+-\d+/\d+", ln) for ln in flat))  # position indicator
+
+    def test_header_pinned_when_scrolled(self):
+        # The title/header lines (first _MODAL_HEADER_LINES) must stay at the top
+        # even when scrolled — they used to scroll away ("floating content").
+        import monitor
+        buf = ["=HDR=", "TITLE", "=HDR=" ] + [f"line{i}" for i in range(50)]
+        monitor._modal_scroll = 9999  # scrolled to the bottom
+        out = monitor._window_buf(list(buf), 10)
+        self.assertEqual(_strip_ansi([out[0]])[0], "=HDR=")   # header still on top
+        self.assertIn("TITLE", _strip_ansi([out[1]])[0])
+        monitor._modal_scroll = 0
 
     def test_offset_clamped_to_bottom(self):
         import monitor
@@ -4214,6 +4226,25 @@ class TestPollKeyEscape(unittest.TestCase):
         if monitor.IS_WIN:
             self.skipTest("Unix poll_key only")
         self.assertEqual(self._poll_calls([["\x1b"], ["["], ["A"]]), [None, None, "<UP>"])
+
+    def test_bare_esc_does_not_eat_next_key(self):
+        # A bare ESC followed (later) by a real key must surface that key, not
+        # swallow it.
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_calls([["\x1b"], ["q"]]), [None, "q"])
+
+    def test_pushback_returned_first(self):
+        # A key stashed in _key_pushback (by the scroll-burst drain) is returned
+        # by the next poll_key before reading stdin.
+        import monitor
+        monitor._key_pushback[0] = "q"
+        try:
+            self.assertEqual(self._poll_with([]), "q")
+            self.assertIsNone(monitor._key_pushback[0])
+        finally:
+            monitor._key_pushback[0] = None
 
     def test_ss3_arrow_maps_to_nav_token(self):
         import monitor

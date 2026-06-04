@@ -319,12 +319,19 @@ _WIN_NAV = {  # Windows: scancode after the \x00 / \xe0 prefix
     b"G": "<HOME>", b"O": "<END>",
 }
 _SCROLL_KEYS = {"<UP>", "<DOWN>", "<PGUP>", "<PGDN>", "<HOME>", "<END>", "j", "k"}
+# A non-scroll key read during the scroll-burst drain is stashed here so the
+# next poll_key() returns it instead of dropping it.
+_key_pushback = [None]
 
 if IS_WIN:
     import ctypes
     import msvcrt
 
     def poll_key():
+        if _key_pushback[0] is not None:
+            k = _key_pushback[0]
+            _key_pushback[0] = None
+            return k
         if msvcrt.kbhit():
             ch = msvcrt.getch()
             if ch in (b"\x00", b"\xe0"):
@@ -462,8 +469,10 @@ else:
         if len(b) == 2:
             if intro in ("[", "O"):
                 return None  # CSI / SS3 introducer — keep buffering
-            _esc_buf[0] = ""  # ESC + other (Alt-key / unknown) — drop
-            return None
+            # ESC + other: a bare ESC followed by a real key (or Alt-<key>).
+            # Surface that key instead of swallowing it.
+            _esc_buf[0] = ""
+            return intro
         last = b[-1]
         if intro == "O":  # SS3: ESC O <char> — complete at 3 bytes
             _esc_buf[0] = ""
@@ -480,6 +489,10 @@ else:
         return None
 
     def poll_key():
+        if _key_pushback[0] is not None:
+            k = _key_pushback[0]
+            _key_pushback[0] = None
+            return k
         r, _, _ = select.select([sys.stdin], [], [], 0)
         if not r:
             return None
@@ -1065,17 +1078,34 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
 
 
 _modal_scroll = 0  # vertical scroll offset for the active modal (clamped in _window_buf)
+_MODAL_HEADER_LINES = 3  # sep + title bar + sep — every modal opens with these
 
 
-def _window_buf(buf, rows):
+def _scroll_indicator(off, vis, total, width):
+    """One-line position bar: a proportional thumb whose LENGTH shows how much
+    of the content is visible and whose POSITION shows where in it we are."""
+    barw = max(6, min(20, width - 28))
+    max_off = max(1, total - vis)
+    thumb = max(1, min(barw, round(vis / total * barw)))
+    pos = round(off / max_off * (barw - thumb)) if total > vis else 0
+    pos = max(0, min(pos, barw - thumb))
+    bar = "·" * pos + "█" * thumb + "·" * (barw - pos - thumb)
+    up = "↑" if off > 0 else " "
+    dn = "↓" if off < max_off else " "
+    label = f"{off + 1}-{off + vis}/{total}"
+    return (f"{C_DIM}{up}[{R}{C_CYN}{bar}{R}{C_DIM}]{dn}"
+            f" {label}  {C_DIM}↑↓/jk/PgUp-Dn{R}")
+
+
+def _window_buf(buf, rows, header_n=_MODAL_HEADER_LINES):
     """Fit a modal buffer to terminal height WITH vertical scrolling.
 
-    Drop-in replacement for ``_fit_buf_height(clip_tail=True)`` on modals:
-    instead of clipping the bottom off (making content unreachable on short
-    terminals), show a scrollable window into the buffer at the module-level
-    ``_modal_scroll`` offset — clamped here so the key handler can blindly
-    inc/dec it — and append a position indicator. Buffers that already fit are
-    returned unchanged. Modifies ``buf`` in place and returns it.
+    Replaces clip-from-bottom on modals: keeps the first ``header_n`` lines
+    (sep / title bar / sep) PINNED at the top so the title never scrolls away,
+    scrolls only the body at the module-level ``_modal_scroll`` offset (clamped
+    here so the key handler can blindly inc/dec it), and appends a proportional
+    scroll-bar indicator. Buffers that already fit are returned unchanged.
+    Modifies ``buf`` in place and returns it.
     """
     global _modal_scroll
     try:
@@ -1086,17 +1116,17 @@ def _window_buf(buf, rows):
     if len(buf) <= rows:
         _modal_scroll = 0
         return buf
-    visible = max(1, rows - 1)  # reserve one line for the indicator
-    max_off = len(buf) - visible
+    width = len(_ANSI_RE.sub("", buf[0])) if buf else 80
+    hn = max(0, min(header_n, len(buf) - 2))
+    head = buf[:hn]
+    body = buf[hn:]
+    visible = max(1, rows - hn - 1)  # reserve one line for the indicator
+    max_off = max(0, len(body) - visible)
     off = min(max(0, _modal_scroll), max_off)
     _modal_scroll = off  # persist the clamped value
-    window = buf[off:off + visible]
-    up = "↑" if off > 0 else " "
-    dn = "↓" if off < max_off else " "
-    window.append(
-        f"{C_DIM}── {off + 1}-{off + len(window)}/{len(buf)}  "
-        f"{up}{dn} ↑↓/jk/PgUp-Dn ──{R}")
-    buf[:] = window
+    win = body[off:off + visible]
+    indicator = _scroll_indicator(off, len(win), len(body), width)
+    buf[:] = head + win + [indicator]
     return buf
 
 
@@ -2547,6 +2577,28 @@ def _render_hour_heatmap(hour_counts):
     return "".join(out)
 
 
+_stats_scan_thread = None
+_stats_scan_lock = threading.Lock()
+
+
+def _stats_refresh_async(period):
+    """Kick a background scan_transcript_stats when its cache is stale, so the
+    ~0.6s read+parse of all transcripts never blocks the render/input thread
+    (mirrors _subagents_refresh_async / _rls_check_worker / the pulse worker).
+    render_stats reads the last _usage_cache result and never blocks."""
+    global _stats_scan_thread
+    cached = _usage_cache.get(period)
+    if cached and time.monotonic() - cached["t"] < 30.0:
+        return  # fresh enough
+    with _stats_scan_lock:
+        if _stats_scan_thread is not None and _stats_scan_thread.is_alive():
+            return
+        t = threading.Thread(target=scan_transcript_stats, args=(period,),
+                             name="stats-scan", daemon=True)
+        _stats_scan_thread = t
+        t.start()
+
+
 def render_stats(cols, rows, period="all"):
     SW = cols
     buf = []
@@ -2556,7 +2608,16 @@ def render_stats(cols, rows, period="all"):
     buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
     buf.append(sep(SW))
 
-    models, overview = scan_transcript_stats(period)
+    cached = _usage_cache.get(period)
+    if cached is None:
+        # First open for this period: one synchronous scan so the modal shows
+        # data immediately (and fills the cache). Every later open reads the
+        # cache and refreshes it off-thread, so the ~0.6s read never blocks
+        # again — that repeated freeze was the Critical finding.
+        models, overview = scan_transcript_stats(period)
+    else:
+        _stats_refresh_async(period)  # refresh stale cache off the render thread
+        models, overview = cached["models"], cached["overview"]
     if not models:
         buf.append(f"{C_DIM}No transcript data found in ~/.claude/projects/{R}")
         buf.append(f"{C_DIM}(stats appear after at least one CC session){R}")
@@ -3115,6 +3176,25 @@ def main():
                 or show_pulse or show_update or show_stats is not None
             ):
                 _modal_scroll = _apply_scroll(_modal_scroll, k, rows)
+                # Coalesce the rest of a wheel/key burst into THIS frame.
+                # poll_key otherwise yields one sequence per 50ms loop, so a
+                # fast wheel spin (3-15 notches queued, often arriving split on
+                # SSH/tmux) scrolled one line per tick and felt stuck. Drain
+                # within a short grace window, briefly waiting for in-transit
+                # bytes instead of bailing on the first None.
+                drain_deadline = time.monotonic() + 0.05
+                drained = 0
+                while drained < 512 and time.monotonic() < drain_deadline:
+                    k2 = poll_key()
+                    if k2 in _SCROLL_KEYS:
+                        _modal_scroll = _apply_scroll(_modal_scroll, k2, rows)
+                        drained += 1
+                        drain_deadline = time.monotonic() + 0.02  # extend per notch
+                    elif k2 is None:
+                        time.sleep(0.001)  # let a split sequence finish arriving
+                    else:
+                        _key_pushback[0] = k2  # real non-scroll key — next poll_key returns it
+                        break
             # ── Modal-specific handlers first (priority) ──
             elif show_update and k == "a" and _get_update_result() is None:
                 _apply_update_action()
@@ -3235,7 +3315,12 @@ def main():
                 prev_modal_sig = modal_sig
 
             # Render every tick when we have data (for spinner), reload data on interval
-            need_render = size_changed or last_data is not None or since_data >= data_interval
+            # An open modal must always re-render (scroll responsiveness) even
+            # when there is no live session driving the gate.
+            any_modal_open = (show_menu or show_cost or show_legend or show_agents
+                              or show_pulse or show_update or show_stats is not None)
+            need_render = (size_changed or last_data is not None
+                           or since_data >= data_interval or any_modal_open)
             if not need_render:
                 time.sleep(tick)
                 continue
