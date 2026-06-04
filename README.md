@@ -47,7 +47,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 
 ## Features
 
-- **Compact** — all critical metrics in one screen. No scrolling, no tabs, no wasted space.
+- **Compact** — every critical metric fits on one dashboard screen, no tabs, no wasted space. Detail modals (token stats, agents, legend, cost) scroll — mouse wheel or keyboard — when they outgrow the terminal, with a pinned header and a proportional scroll bar.
 - **Stdlib only** — Python 3.8+. No pip install, no venv, no node_modules.
 - **Simple setup** — clone the repo, add one block to `~/.claude/settings.json`, launch the monitor. See [platform setup guide](#setup).
 - **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin. No log scraping, no file watching, no API polling. Real data, real-time.
@@ -159,7 +159,7 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 | `1`–`9` | Select session from picker | session picker only |
 | `1` / `2` / `3` | Switch period (all / 7d / 30d) | inside token-stats modal only |
 | `f` | Toggle active-only filter (hide idle agents) | inside agents modal only |
-| `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `Home` `End` | Scroll the open modal (content taller than the terminal) | inside any modal |
+| `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `Home` `End` / mouse wheel | Scroll the open modal (content taller than the terminal) | inside any modal |
 
 ### Session Picker
 

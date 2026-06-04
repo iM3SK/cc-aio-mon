@@ -153,17 +153,21 @@ CHANGELOG entry.
 ## 5. Threading Model in monitor.py
 
 `monitor.main()` runs a single-threaded event loop (the `while True:` loop in
-`main()`). Three daemon threads run concurrently:
+`main()`). Render-thread work is kept off the 50 ms loop by daemon workers —
+two run periodically, the rest are spawned on demand:
 
 | Thread | Spawned by | Purpose |
 |---|---|---|
 | `pulse-worker` | `pulse.start_pulse_worker()` | Fetch Anthropic status + ping API every 30 s |
 | `rls-check` (anonymous) | `_rls_maybe_check()` | Check GitHub for new release once per hour |
 | `update-apply` | `_apply_update_action()` | Run `git pull --ff-only` when user presses `a` |
+| `stats-scan` | `_stats_refresh_async()` | Re-scan `~/.claude/projects` transcripts for the token-stats modal (off-thread refresh; only the first open scans synchronously) |
+| `subagents-scan` | `_subagents_refresh_async()` | Scan the watched session's `subagents/` dir for the agents fan-out modal |
 
-All three threads are `daemon=True`: they are killed automatically when the
-main thread exits, so they can never block the terminal restore or hang the
-process on `q`.
+All are `daemon=True`: they are killed automatically when the main thread exits,
+so they can never block the terminal restore or hang the process on `q`. The
+two scan workers write a shared cache (`_usage_cache` / `_subagents_cache`) that
+the corresponding modal reads without ever blocking the render thread.
 
 **Lock inventory:**
 
@@ -318,7 +322,7 @@ for `git rev-list --left-right --count` output in both files.
 | Change how burn rate or context rate is computed | `shared.calc_rates()` — reads last `HISTORY_RATE_SAMPLES` JSONL history entries |
 | Change hardcoded model pricing | `monitor._aggregate_session_cost()` and the per-model rate dicts above it |
 | Add a field to the IPC snapshot | `statusline.write_shared_state()` → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` (and extend `pulse.PulseSnapshot` if it is a pulse field) |
-| Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()` and wire a key in the event loop |
+| Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()`, end it with `_window_buf(buf, rows)` so it scrolls (pinned header + proportional scroll bar), and wire a key in the event loop |
 | Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` |
 | Change the Anthropic Pulse scoring weights | `pulse.py` constants `_W_INDICATOR`, `_W_INCIDENTS`, `_W_LATENCY` and `_INDICATOR_SCORE` / `_IMPACT_DEDUCT` dicts |
 | Add a new Python file to the project | Append the filename to `shared.PY_FILES` — this propagates to the post-update syntax check and the compile-check in the test suite |
