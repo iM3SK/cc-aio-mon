@@ -824,6 +824,84 @@ class TestContextSuffixHelpers(unittest.TestCase):
     def test_compact_empty_input(self):
         self.assertEqual(shared.compact_context_suffix(""), "")
 
+    def test_badge_1m(self):
+        self.assertEqual(
+            shared.badge_context_suffix("Opus 4.7 (1M context)"), "Opus 4.7 (1M CTX)")
+
+    def test_badge_generalises_beyond_1m(self):
+        # The old dashboard literal only matched "(1M context)"; the helper must
+        # also compact other units so a future 200k suffix isn't left verbose.
+        self.assertEqual(
+            shared.badge_context_suffix("Sonnet 4.6 (200k context)"),
+            "Sonnet 4.6 (200k CTX)")
+
+    def test_badge_no_suffix_unchanged(self):
+        self.assertEqual(shared.badge_context_suffix("Opus 4.7"), "Opus 4.7")
+
+    def test_badge_empty_input(self):
+        self.assertEqual(shared.badge_context_suffix(""), "")
+
+
+class TestCalcRatesOrdering(unittest.TestCase):
+    """#1c: calc_rates must order history by time before reading endpoints, so
+    a clock-skew-scrambled history doesn't silently compute the rate over the
+    wrong interval."""
+
+    def _mk(self, t, cost, ctx):
+        return {"t": t, "cost": {"total_cost_usd": cost},
+                "context_window": {"used_percentage": ctx}}
+
+    # Epochs above MIN_EPOCH (2020-01-01) so calc_rates doesn't reject them.
+    _T = 1_700_000_000.0
+
+    def test_scrambled_history_matches_sorted(self):
+        ordered = [self._mk(self._T, 1.0, 10.0),
+                   self._mk(self._T + 60, 2.0, 20.0),
+                   self._mk(self._T + 120, 4.0, 40.0)]
+        scrambled = [ordered[2], ordered[0], ordered[1]]
+        result = shared.calc_rates(scrambled)
+        self.assertEqual(result, shared.calc_rates(ordered))
+        self.assertIsNotNone(result[0])  # guard: a real rate, not a trivial None==None
+
+    def test_endpoints_use_true_min_max_time(self):
+        # Span 120s, cost 1->4 ($3 over 2 min = $1.5/min), ctx 10->40 (15%/min).
+        scrambled = [self._mk(self._T + 120, 4.0, 40.0),
+                     self._mk(self._T, 1.0, 10.0),
+                     self._mk(self._T + 60, 2.0, 20.0)]
+        brn, ctr = shared.calc_rates(scrambled)
+        self.assertAlmostEqual(brn, 1.5, places=4)
+        self.assertAlmostEqual(ctr, 15.0, places=4)
+
+    def test_non_dict_entries_do_not_crash(self):
+        self.assertEqual(shared.calc_rates([None, "x"]), (None, None))
+
+
+class TestAtomicWriteTextCleanup(unittest.TestCase):
+    """Coverage for atomic_write_text's failure branch: a write error must
+    return False and never leak a .tmp file behind."""
+
+    def test_write_failure_returns_false_and_leaves_no_tmp(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = pathlib.Path(d) / "out.txt"
+            boom_name = str(pathlib.Path(d) / "boom.tmp")
+
+            class _BoomFile:
+                def __init__(self, *a, **k):
+                    self.name = boom_name
+                    open(self.name, "w").close()  # materialise so unlink runs
+                def write(self, *_a):
+                    raise OSError("disk full")
+                def writelines(self, *_a):
+                    raise OSError("disk full")
+                def close(self):
+                    pass
+
+            with patch.object(shared.tempfile, "NamedTemporaryFile", _BoomFile):
+                ok = shared.atomic_write_text(target, "payload")
+            self.assertFalse(ok)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(pathlib.Path(d).glob("*.tmp")), [])
+
 
 class TestCheckSyntaxAfterPull(unittest.TestCase):
     """Behavioural coverage for the post-self-update integrity guard.

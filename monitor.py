@@ -10,6 +10,31 @@ Usage:
     python monitor.py --session ID        # specific session
     python monitor.py --list              # list active sessions
     python monitor.py --refresh 1000      # custom refresh interval (ms)
+
+Section map (ordered; jump via your editor outline or grep the `# ----` rules).
+This file is intentionally a single large module — see ADR-002 in
+PROJECTS/cc-aio-mon/ROZHODNUTIA.md for why the "5 runtime files" constraint is
+kept and the LOC tripwire (test_debt016) is set to a higher discussion limit
+rather than splitting an event-loop module across files:
+
+    1.  Transcript usage scanner   — scan_transcript_stats + aggregation
+    2.  Platform                   — keyboard input (poll_key, esc parser, term)
+    3.  ANSI / characters / format — colours, char_width, formatting helpers
+    4.  Bars & warnings            — mkbar, collect_warnings
+    5.  Cost aggregation & RLS     — cross-session cost, release check worker
+    6.  Layout & data loading      — sep, list_sessions, load_state/_history
+    7.  Spinners                   — session / RLS spinners
+    8.  Render — main dashboard    — render_frame (+ _window_buf scroll engine)
+    9.  Legend overlay             — render_legend
+    10. Cost breakdown modal       — render_cost_breakdown + pricing
+    11. Anthropic Pulse modal      — render_pulse_modal
+    12. Menu modal                 — render_menu
+    13. Update modal               — render_update_modal + apply worker
+    14. Token stats modal          — render_stats + lifetime/daily blocks
+    15. Agents modal               — render_agents + scan_subagents fan-out
+    16. Session picker             — render_picker (+ _picker_order SSoT)
+    17. Screen flush               — flush (synchronized-output frame writer)
+    18. Main                       — event loop, key handling, lifecycle
 """
 
 import argparse
@@ -40,6 +65,7 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     DATA_DIR, VERSION_RE, VERSION, SCHEMA_VERSION,
                     PY_FILES,  # noqa: F401 — pinned by TestPyFilesSingleSourceOfTruth (SSoT regression guard)
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
+                    badge_context_suffix,
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind,
                     rotate_crash_log, acquire_singleton_lock,
@@ -144,7 +170,11 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
                 ts_str = obj.get("timestamp", "")
                 ts = _parse_ts(ts_str)
 
-                if cutoff and ts > 0 and ts < cutoff:
+                # When a period cutoff is active, skip both out-of-window AND
+                # unplaceable (ts<=0) records, so the model totals match the
+                # daily_tokens / active_days aggregation below (which already
+                # requires ts>0). period="all" (cutoff=0) keeps every record.
+                if cutoff and (ts <= 0 or ts < cutoff):
                     continue
 
                 # Track session timestamps for duration calc
@@ -180,7 +210,14 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
                 models[model]["calls"] += 1
 
                 if ts > 0:
-                    day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    # A corrupt/huge ts raises OverflowError (not OSError, so
+                    # the outer guard wouldn't catch it) or OSError on Windows.
+                    # Skip just this record's day attribution rather than abort
+                    # the whole transcript's aggregation.
+                    try:
+                        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    except (OverflowError, OSError, ValueError):
+                        continue
                     active_days.add(day)
                     daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
     except (OSError, UnicodeDecodeError):
@@ -304,16 +341,38 @@ IS_WIN = sys.platform == "win32"
 _term_state = None
 _orig_console_output_cp = None  # Windows: saved by _setup_term, restored by _restore_term
 
+# Navigation keys returned by poll_key as symbolic tokens so the key handler
+# can scroll modals on arrows / Page keys instead of treating each escape byte
+# as a separate (modal-closing) key press.
+_NAV_SEQ = {  # Unix: bytes after the ESC introducer
+    "[A": "<UP>", "[B": "<DOWN>", "[5~": "<PGUP>", "[6~": "<PGDN>",
+    "[H": "<HOME>", "[F": "<END>", "OH": "<HOME>", "OF": "<END>",
+    # SS3 / application-cursor variants (DECCKM, and what ?1007h wheel emits on
+    # many terminals): ESC O A/B instead of ESC [ A/B.
+    "OA": "<UP>", "OB": "<DOWN>",
+}
+_WIN_NAV = {  # Windows: scancode after the \x00 / \xe0 prefix
+    b"H": "<UP>", b"P": "<DOWN>", b"I": "<PGUP>", b"Q": "<PGDN>",
+    b"G": "<HOME>", b"O": "<END>",
+}
+_SCROLL_KEYS = {"<UP>", "<DOWN>", "<PGUP>", "<PGDN>", "<HOME>", "<END>", "j", "k"}
+# A non-scroll key read during the scroll-burst drain is stashed here so the
+# next poll_key() returns it instead of dropping it.
+_key_pushback = [None]
+
 if IS_WIN:
     import ctypes
     import msvcrt
 
     def poll_key():
+        if _key_pushback[0] is not None:
+            k = _key_pushback[0]
+            _key_pushback[0] = None
+            return k
         if msvcrt.kbhit():
             ch = msvcrt.getch()
             if ch in (b"\x00", b"\xe0"):
-                msvcrt.getch()
-                return None
+                return _WIN_NAV.get(msvcrt.getch())  # nav key or None
             return ch.decode("utf-8", errors="ignore")
         return None
 
@@ -424,11 +483,85 @@ else:
     import termios
     import tty
 
-    def poll_key():
-        r, _, _ = select.select([sys.stdin], [], [], 0)
-        if r:
-            return sys.stdin.read(1)
+    # In-progress escape sequence carried across poll_key calls. A sequence
+    # split over multiple reads (slow SSH/tmux, bursty wheel) is buffered here
+    # so its bytes are NEVER surfaced as standalone keys — which would close the
+    # open modal and snap back to the dashboard ("main screen" symptom).
+    _esc_buf = [""]
+
+    def _resolve_esc():
+        """Interpret the buffered escape sequence. Returns a nav token when it
+        is a complete known sequence (and clears the buffer), None + clears for
+        a complete unknown / mouse / Alt sequence, or None + keeps buffering
+        while it is still incomplete."""
+        b = _esc_buf[0]
+        if not b:
+            return None
+        if len(b) > 32:  # runaway — drop
+            _esc_buf[0] = ""
+            return None
+        if b == "\x1b":
+            return None  # bare ESC so far — keep buffering
+        intro = b[1]
+        if len(b) == 2:
+            if intro in ("[", "O"):
+                return None  # CSI / SS3 introducer — keep buffering
+            # ESC + other: a bare ESC followed by a real key (or Alt-<key>).
+            # Surface that key instead of swallowing it.
+            _esc_buf[0] = ""
+            return intro
+        last = b[-1]
+        if intro == "O":  # SS3: ESC O <char> — complete at 3 bytes
+            _esc_buf[0] = ""
+            return _NAV_SEQ.get(b[1:])
+        if intro == "[":  # CSI: ends on a final byte 0x40-0x7e
+            second = b[2:3]
+            if second == "M":
+                # X10 mouse report: ESC [ M + exactly 3 raw coordinate bytes
+                # (each >= 0x20, so they never contain ESC). The 'M' is itself a
+                # CSI final byte, so without this we'd resolve at ESC[M and leak
+                # the 3 coordinate bytes as keystrokes. Buffer until all arrive,
+                # then drop the whole report.
+                if len(b) < 6:
+                    return None
+                _esc_buf[0] = ""
+                return None
+            if "\x40" <= last <= "\x7e":
+                seq = b[1:]
+                _esc_buf[0] = ""
+                if second == "<":
+                    return None  # SGR mouse report (ESC [ < … M/m) — ignore cleanly
+                return _NAV_SEQ.get(seq)
+            return None  # still accumulating CSI parameters
+        _esc_buf[0] = ""
         return None
+
+    def poll_key():
+        if _key_pushback[0] is not None:
+            k = _key_pushback[0]
+            _key_pushback[0] = None
+            return k
+        r, _, _ = select.select([sys.stdin], [], [], 0)
+        if not r:
+            return None
+        ch = sys.stdin.read(1)
+        if _esc_buf[0]:  # mid-sequence from a previous (split) read
+            _esc_buf[0] += ch
+            return _resolve_esc()
+        if ch == "\x1b":
+            _esc_buf[0] = "\x1b"
+            # Fast path: pull immediately-available bytes so atomic sequences
+            # resolve in this one call; anything not yet arrived stays buffered.
+            for _ in range(32):
+                r2, _, _ = select.select([sys.stdin], [], [], 0)
+                if not r2:
+                    break
+                _esc_buf[0] += sys.stdin.read(1)
+                tok = _resolve_esc()
+                if not _esc_buf[0]:  # resolved (token or dropped)
+                    return tok
+            return _resolve_esc()  # leave any partial for the next poll
+        return ch
 
     def _set_console_utf8():
         """Unix counterpart — no-op. Unix terminals get encoding from
@@ -460,6 +593,11 @@ HIDE_CUR = E + "?25l"
 SHOW_CUR = E + "?25h"
 ALT_ON = E + "?1049h"
 ALT_OFF = E + "?1049l"
+# Alternate-scroll mode: in the alt-screen buffer, makes the terminal translate
+# mouse-wheel scroll into arrow-key sequences (ESC[A / ESC[B) instead of
+# swallowing it — without this the wheel does nothing in a fullscreen TUI.
+ALT_SCROLL_ON = E + "?1007h"
+ALT_SCROLL_OFF = E + "?1007l"
 CLR = E + "2J"
 HOME = E + "H"
 EL = E + "K"
@@ -490,6 +628,14 @@ RESET_HALFWAY_PCT = 50.0
 
 def truncate(s, maxw):
     """Truncate string to maxw visible columns, preserving ANSI codes. CJK-aware."""
+    # Fast path: a plain ASCII string with no ANSI escapes and no wide/zero-
+    # width chars has visible width == len(s), so when it already fits there is
+    # nothing to do. Skips the per-char scan for the common short-line case in
+    # the 20Hz render hot path. isprintable() is False for ESC and every other
+    # C0 control, so any ANSI-coloured or control-bearing line falls through to
+    # the accurate scan below.
+    if len(s) <= maxw and s.isascii() and s.isprintable():
+        return s
     vis = 0
     i = 0
     truncated = False
@@ -723,8 +869,11 @@ def _baseline_delta(entries, cutoff_ts):
     final = 0.0
     first_in_window = None
     for e in entries:
+        t = _num(e.get("t"), 0)
+        if t <= 0:
+            continue  # unplaceable (missing/invalid t) — can't partition it
         cost = _num((e.get("cost") or {}).get("total_cost_usd"))
-        if _num(e.get("t"), 0) < cutoff_ts:
+        if t < cutoff_ts:
             baseline = cost
         else:
             if first_in_window is None:
@@ -777,14 +926,42 @@ def calc_cross_session_costs():
     return today_total, week_total
 
 
-def cached_cross_session_costs(ttl=30.0):
-    """Cached version — refreshes every ttl seconds."""
-    now = time.monotonic()
-    if now - _cost_cache["t"] < ttl:
-        return _cost_cache["today"], _cost_cache["week"]
+_cost_scan_thread = None
+_cost_scan_lock = threading.Lock()
+
+
+def _cost_scan_worker():
+    """Off-thread cross-session cost aggregation. Writes _cost_cache."""
     today, week = calc_cross_session_costs()
-    _cost_cache.update({"t": now, "today": today, "week": week})
-    return today, week
+    _cost_cache.update({"t": time.monotonic(), "today": today, "week": week})
+
+
+def _cost_refresh_async(ttl=30.0):
+    """Kick a background calc_cross_session_costs when the cache is stale and
+    none is in flight. The glob + per-line JSONL re-parse of every session's
+    history (up to HISTORY_AGGREGATE_MAX each) used to run inline in render_frame
+    every TTL — a ~tens-of-ms render-thread stall that was most visible right
+    after waking from stale (largest transcripts, active interaction). That was
+    the deferred P1-4, re-opened on user feedback. Mirrors _stats_refresh_async
+    / _subagents_refresh_async; render reads the last _cost_cache and never
+    blocks."""
+    global _cost_scan_thread
+    if time.monotonic() - _cost_cache["t"] < ttl:
+        return  # fresh enough — no scan needed
+    with _cost_scan_lock:
+        if _cost_scan_thread is not None and _cost_scan_thread.is_alive():
+            return
+        t = threading.Thread(target=_cost_scan_worker, name="cost-scan", daemon=True)
+        _cost_scan_thread = t
+        t.start()
+
+
+def cached_cross_session_costs(ttl=30.0):
+    """Non-blocking: kick an off-thread refresh when the TTL has expired, then
+    return the last cached (today, week). The aggregation runs in the cost-scan
+    daemon so the render thread never re-parses transcripts inline."""
+    _cost_refresh_async(ttl)
+    return _cost_cache["today"], _cost_cache["week"]
 
 
 # Session picker cache — main-thread only, mirrors _cost_cache contract.
@@ -987,16 +1164,91 @@ def _fit_buf_height(buf, rows, *, clip_tail=False):
     buf.extend(tail)
 
 
+_modal_scroll = 0  # vertical scroll offset for the active modal (clamped in _window_buf)
+_MODAL_HEADER_LINES = 3  # sep + title bar + sep — every modal opens with these
+
+
+def _scroll_indicator(off, vis, total):
+    """One-line scroll hint at the bottom of a windowed modal: a direction arrow
+    (more above ↑ / below ↓), the visible range, and how to scroll. No
+    proportional bar — the plain hint reads cleaner."""
+    max_off = max(0, total - vis)
+    up = "↑" if off > 0 else " "
+    dn = "↓" if off < max_off else " "
+    return (f"{C_DIM}{up}{dn} {off + 1}-{off + vis}/{total}"
+            f"   ↑↓/jk · PgUp/Dn · Home/End{R}")
+
+
+def _window_buf(buf, rows, header_n=_MODAL_HEADER_LINES):
+    """Fit a modal buffer to terminal height WITH vertical scrolling.
+
+    Replaces clip-from-bottom on modals: keeps the first ``header_n`` lines
+    (sep / title bar / sep) PINNED at the top so the title never scrolls away,
+    scrolls only the body at the module-level ``_modal_scroll`` offset (clamped
+    here so the key handler can blindly inc/dec it), and appends a proportional
+    scroll-bar indicator. Buffers that already fit are returned unchanged.
+    Modifies ``buf`` in place and returns it.
+    """
+    global _modal_scroll
+    try:
+        rows = int(rows)
+    except (TypeError, ValueError):
+        rows = 24
+    rows = max(1, rows)
+    if len(buf) <= rows:
+        _modal_scroll = 0
+        return buf
+    # Cap pinned-header lines at rows-2 (reserve >=1 body + 1 indicator line) so
+    # the emitted head+window+indicator never exceeds the terminal height on a
+    # very short terminal — without this, a 3-line pinned header on rows<=4
+    # overflowed past the bottom.
+    hn = max(0, min(header_n, len(buf) - 2, rows - 2))
+    head = buf[:hn]
+    body = buf[hn:]
+    visible = max(1, rows - hn - 1)  # reserve one line for the indicator
+    max_off = max(0, len(body) - visible)
+    off = min(max(0, _modal_scroll), max_off)
+    _modal_scroll = off  # persist the clamped value
+    win = body[off:off + visible]
+    indicator = _scroll_indicator(off, len(win), len(body))
+    buf[:] = head + win + [indicator]
+    return buf
+
+
+def _apply_scroll(off, k, rows):
+    """Map a navigation key to a new scroll offset. The upper bound is clamped
+    in _window_buf at render time, so DOWN/PGDN/END may overshoot here."""
+    try:
+        page = max(1, int(rows) - 3)
+    except (TypeError, ValueError):
+        page = 10
+    if k in ("<UP>", "k"):
+        return max(0, off - 1)
+    if k in ("<DOWN>", "j"):
+        return off + 1
+    if k == "<PGUP>":
+        return max(0, off - page)
+    if k == "<PGDN>":
+        return off + page
+    if k == "<HOME>":
+        return 0
+    if k == "<END>":
+        return 10 ** 9  # clamped to the bottom by _window_buf
+    return off
+
+
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
-def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False):
+def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False):
     if show_menu:
         return render_menu(cols, rows)
     if show_cost:
         return render_cost_breakdown(data, hist, cols, rows)
     if show_legend:
         return render_legend(cols, rows)
+    if show_agents:
+        return render_agents(data, cols, rows, active_only=agents_active_only)
 
     SW = cols
     buf = []
@@ -1004,7 +1256,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # -- Extract data (sanitize to prevent terminal escape injection) --
     # `or {}` pattern guards against explicit JSON `null` values (not just missing keys).
     m = data.get("model") or {}
-    model_str = _sanitize(m.get("display_name", "?")).replace("(1M context)", "(1M CTX)")
+    model_str = badge_context_suffix(_sanitize(m.get("display_name", "?")))
     sname = _sanitize(data.get("session_name", ""))
 
     cw = data.get("context_window") or {}
@@ -1054,9 +1306,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
                 _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
             except OSError:
                 pass
-        buf.append(f"{C_RED}{B}Session Inactive {spin_session()}{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
+        buf.append(f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
     else:
-        buf.append(f"{C_GRN}{B}Session Active {spin_session()}{R} {C_FG}{session_label}{R}")
+        buf.append(f"{C_GRN}{B}{spin_session()} Session Active{R} {C_FG}{session_label}{R}")
 
     buf.append(sep(SW))
 
@@ -1195,7 +1447,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
 
     # ── Footer ──
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}] menu{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}] menu   [{R}{C_WHT}l{R}{C_DIM}] legend   [{R}{C_WHT}q{R}{C_DIM}] quit{R}")
 
     _fit_buf_height(buf, rows, clip_tail=False)
     return buf
@@ -1211,7 +1463,28 @@ def render_legend(cols, rows):
     lg_pad = max(0, SW - 6)  # "LEGEND" = 6 chars
     buf.append(f"{BG_BAR}{C_WHT}{B}LEGEND{R}{BG_BAR}{' ' * lg_pad}{R}")
     buf.append(sep(SW))
+    # ── Hotkeys (most-used — kept at the top) ──
+    hp = max(0, SW - 7)
+    buf.append(f"{BG_BAR}{C_WHT}{B}HOTKEYS{R}{BG_BAR}{' ' * hp}{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R}   {C_DIM}Quit{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}]{R}   {C_DIM}Menu{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R}   {C_DIM}Refresh{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal{R} {C_DIM}PgUp/Dn Home/End{R}")
     # ── Dashboard metrics ──
+    buf.append(sep(SW))
+    dp = max(0, SW - 9)  # "DASHBOARD" = 9 chars
+    buf.append(f"{BG_BAR}{C_WHT}{B}DASHBOARD{R}{BG_BAR}{' ' * dp}{R}")
+    buf.append(sep(SW))
     buf.append(f"{C_GRN}APR{R} {C_DIM}API Ratio{R}")
     buf.append(f"{C_DIM} DUR  Duration - API  API Time{R}")
     buf.append(f"{C_GRN}CHR{R} {C_DIM}Cache Hit Rate{R}")
@@ -1229,21 +1502,6 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}LNS{R} {C_DIM}Lines Changed{R} {C_GRN}+{R}{C_DIM}added{R} {C_RED}-{R}{C_DIM}removed{R}")
     buf.append(f"{C_WHT}NOW{R} {C_DIM}Current Time{R} {C_WHT}UPD{R} {C_DIM}Last Update{R}")
     buf.append(f"{C_WHT}RLS{R} {C_DIM}Release Status{R}")
-    # ── Hotkeys ──
-    buf.append(sep(SW))
-    hp = max(0, SW - 7)
-    buf.append(f"{BG_BAR}{C_WHT}{B}HOTKEYS{R}{BG_BAR}{' ' * hp}{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R}   {C_DIM}Quit{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}]{R}   {C_DIM}Menu{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R}   {C_DIM}Refresh{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
     # ── Token Stats ──
     buf.append(sep(SW))
     tp = max(0, SW - 11)
@@ -1283,7 +1541,7 @@ def render_legend(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -1723,7 +1981,7 @@ def render_cost_breakdown(data, hist, cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -1898,7 +2156,7 @@ def render_pulse_modal(cols, rows):
     buf.append(f"{C_DIM}{footer[:SW]}{R}")
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -1920,6 +2178,7 @@ def render_menu(cols, rows):
     buf.append(f"{BG_BAR}{C_WHT}{B}VIEWS{R}{BG_BAR}{' ' * vp}{R}")
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
@@ -1929,9 +2188,14 @@ def render_menu(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
     buf.append(sep(SW))
+    np = max(0, SW - 10)  # "NAVIGATION" = 10 chars
+    buf.append(f"{BG_BAR}{C_WHT}{B}NAVIGATION{R}{BG_BAR}{' ' * np}{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll{R}  {C_DIM}[{R}{C_WHT}PgUp/Dn{R}{C_DIM}]{R} {C_DIM}Page{R}  {C_DIM}[{R}{C_WHT}Home/End{R}{C_DIM}]{R} {C_DIM}Jump{R}")
+    buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -1945,6 +2209,22 @@ _update_lock = threading.Lock()
 # would kill the daemon before its post-pull syntax check runs (M-cross-1).
 # Written and read only on the main thread; is_alive() is thread-safe.
 _update_thread = None
+# cleanup() joins an in-flight update worker for at most this long so signals
+# (SIGTERM / Ctrl-C) and KeyboardInterrupt — which bypass the `q`-gate — still
+# let the post-pull syntax check finish, while staying bounded so a hung pull
+# can never wedge the exit path.
+_UPDATE_JOIN_TIMEOUT = 2.0
+
+
+def _join_update_worker(timeout=_UPDATE_JOIN_TIMEOUT):
+    """Block up to ``timeout`` seconds for an in-flight self-update worker to
+    finish its (atomic pull +) post-pull syntax check. The git pull is atomic,
+    but killing the daemon mid-check would skip the integrity verification
+    (M-cross-1). Bounded, so any exit path — q, SIGTERM, Ctrl-C — stays prompt
+    even if the pull hangs on the network."""
+    t = _update_thread
+    if t is not None and t.is_alive():
+        t.join(timeout=timeout)
 
 # Update modal git-helper cache — 30s TTL, invalidated on remote_ver change.
 # Eliminates per-tick (50ms) synchronous git subprocess spam from render path
@@ -2212,7 +2492,7 @@ def render_update_modal(cols, rows):
         buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (check failed){R}")
         buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -2306,24 +2586,16 @@ def _read_stats_cache():
 
 
 _HEATMAP_GLYPHS = " ▁▂▃▄▅▆▇█"  # 9 levels including blank for zero
-_LIFETIME_CORE_LINES = 7     # sep + title + sep + ses/msg + 1st/lss + heat-hdr + heat-row
-_LIFETIME_DAILY_LINES = 7    # sep + label + 5 days
-_STATS_FOOTER_LINES = 3      # sep + 2 footer lines
 
 
 def _append_lifetime_block(buf, rows, width):
-    """Append LIFETIME ACTIVITY block to buf if it fits.
+    """Append the LIFETIME ACTIVITY block to buf when the stats cache exists.
 
-    Respects rows budget: drops DAILY first, then whole block. Cache miss skips silently.
-    Renders to a side buffer first so partial output never reaches the terminal.
+    The whole block (incl. DAILY) is always emitted; the modal is scrollable
+    (_window_buf), so nothing is dropped to "fit" the terminal height — that
+    rows-gating used to make LIFETIME/DAILY unreachable on short terminals.
+    Cache miss skips silently. ``rows`` is kept for signature compatibility.
     """
-    try:
-        rows = int(rows)
-    except (TypeError, ValueError):
-        return
-    budget = rows - len(buf) - _STATS_FOOTER_LINES
-    if budget < _LIFETIME_CORE_LINES:
-        return
     cache, _ = _read_stats_cache()
     if not cache:
         return
@@ -2362,23 +2634,22 @@ def _append_lifetime_block(buf, rows, width):
     block.append(f"{C_DIM}HRS{R} {C_DIM}0     6     12    18{R}")
     block.append(f"{C_DIM}ACT{R} {C_CYN}{heat}{R}")
 
-    if budget >= _LIFETIME_CORE_LINES + _LIFETIME_DAILY_LINES:
-        daily = cache.get("dailyActivity") or []
-        items = [d for d in daily if isinstance(d, dict)] if isinstance(daily, list) else []
-        if items:
-            items.sort(key=lambda d: d.get("date") or "", reverse=True)
-            block.append(sep(width))
-            block.append(f"{C_DIM}DAILY{R}")
-            for d in items[:5]:
-                date_s = (d.get("date") or "")[5:]  # MM-DD
-                ses = int(_num(d.get("sessionCount", 0)))
-                msg = int(_num(d.get("messageCount", 0)))
-                tlc = int(_num(d.get("toolCallCount", 0)))
-                block.append(
-                    f"{date_s} {C_DIM}SES{R} {C_WHT}{ses:,}{R} "
-                    f"{C_DIM}MSG{R} {C_WHT}{msg:,}{R} "
-                    f"{C_DIM}TLC{R} {C_WHT}{tlc:,}{R}"
-                )
+    daily = cache.get("dailyActivity") or []
+    items = [d for d in daily if isinstance(d, dict)] if isinstance(daily, list) else []
+    if items:
+        items.sort(key=lambda d: d.get("date") or "", reverse=True)
+        block.append(sep(width))
+        block.append(f"{C_DIM}DAILY{R}")
+        for d in items[:5]:
+            date_s = (d.get("date") or "")[5:]  # MM-DD
+            ses = int(_num(d.get("sessionCount", 0)))
+            msg = int(_num(d.get("messageCount", 0)))
+            tlc = int(_num(d.get("toolCallCount", 0)))
+            block.append(
+                f"{date_s} {C_DIM}SES{R} {C_WHT}{ses:,}{R} "
+                f"{C_DIM}MSG{R} {C_WHT}{msg:,}{R} "
+                f"{C_DIM}TLC{R} {C_WHT}{tlc:,}{R}"
+            )
 
     buf.extend(block)
 
@@ -2412,6 +2683,28 @@ def _render_hour_heatmap(hour_counts):
     return "".join(out)
 
 
+_stats_scan_thread = None
+_stats_scan_lock = threading.Lock()
+
+
+def _stats_refresh_async(period):
+    """Kick a background scan_transcript_stats when its cache is stale, so the
+    ~0.6s read+parse of all transcripts never blocks the render/input thread
+    (mirrors _subagents_refresh_async / _rls_check_worker / the pulse worker).
+    render_stats reads the last _usage_cache result and never blocks."""
+    global _stats_scan_thread
+    cached = _usage_cache.get(period)
+    if cached and time.monotonic() - cached["t"] < 30.0:
+        return  # fresh enough
+    with _stats_scan_lock:
+        if _stats_scan_thread is not None and _stats_scan_thread.is_alive():
+            return
+        t = threading.Thread(target=scan_transcript_stats, args=(period,),
+                             name="stats-scan", daemon=True)
+        _stats_scan_thread = t
+        t.start()
+
+
 def render_stats(cols, rows, period="all"):
     SW = cols
     buf = []
@@ -2421,7 +2714,16 @@ def render_stats(cols, rows, period="all"):
     buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
     buf.append(sep(SW))
 
-    models, overview = scan_transcript_stats(period)
+    cached = _usage_cache.get(period)
+    if cached is None:
+        # First open for this period: one synchronous scan so the modal shows
+        # data immediately (and fills the cache). Every later open reads the
+        # cache and refreshes it off-thread, so the ~0.6s read never blocks
+        # again — that repeated freeze was the Critical finding.
+        models, overview = scan_transcript_stats(period)
+    else:
+        _stats_refresh_async(period)  # refresh stale cache off the render thread
+        models, overview = cached["models"], cached["overview"]
     if not models:
         buf.append(f"{C_DIM}No transcript data found in ~/.claude/projects/{R}")
         buf.append(f"{C_DIM}(stats appear after at least one CC session){R}")
@@ -2429,7 +2731,7 @@ def render_stats(cols, rows, period="all"):
         buf.append(sep(SW))
         buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
         buf.append(f"{C_DIM}press any key to close{R}")
-        _fit_buf_height(buf, rows, clip_tail=True)
+        _window_buf(buf, rows)
         return buf
 
     # -- Overview section --
@@ -2510,13 +2812,289 @@ def render_stats(cols, rows, period="all"):
     buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
     buf.append(f"{C_DIM}press any key to close{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
+    return buf
+
+
+# ---------------------------------------------------------------------------
+# Agents modal — live subagent / Workflow fan-out for the watched session.
+#
+# Task subagents and Workflow agents each write their own transcript under
+#   <claude_projects>/<proj>/<session>/subagents/agent-*.jsonl   (+ workflows/)
+# We derive that dir from the session's transcript_path (reusing the same
+# containment hardening as the title/usage scanners), sum each agent's token
+# usage, and flag "active" by recent mtime. The scan is lazy — invoked only
+# while the modal is open — and TTL-cached, so the default dashboard never
+# pays for it. On a cache miss (every TTL while the modal is open) the read
+# still runs on the render thread; the file-size + count caps bound that cost.
+# ---------------------------------------------------------------------------
+_SUBAGENT_SCAN_CAP = 256              # max agent files per scan (DoS guard)
+_SUBAGENT_FILE_MAX = 8 * 1024 * 1024  # skip token-sum read above this size
+_SUBAGENT_ACTIVE_WINDOW = 30.0        # mtime within N seconds == "active"
+_SUBAGENTS_TTL = 2.0
+_subagents_cache = {}                 # {dir_str: {"t": monotonic, "data": {...}}}
+_SUBAGENTS_CACHE_MAX = 8
+
+
+def _subagents_dir_for(transcript_path):
+    """Derive the subagents/ dir for a session from its transcript path.
+
+    transcript = <root>/<proj>/<session>.jsonl  ->  <root>/<proj>/<session>/subagents/
+    Reuses _safe_transcript_path containment (regular file inside the projects
+    root, no symlink escapes). Returns the dir Path or None.
+    """
+    path = _safe_transcript_path(transcript_path)
+    if path is None:
+        return None
+    try:
+        d = path.parent / path.stem / "subagents"
+        st = d.lstat()
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return None
+        return d
+    except OSError:
+        return None
+
+
+def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
+    """Return a fan-out summary for the session's subagents, or None.
+
+    {"total": int, "active": int, "total_tokens": int,
+     "agents": [{"id": str, "tokens": int, "tool": str|None, "active": bool,
+                 "mtime": float, "too_large": bool}, ...]}
+
+    Lazy + TTL-cached: only invoked while the agents modal is open, and re-reads
+    at most every ``ttl`` seconds so an open modal doesn't re-parse N files each
+    render tick.
+    """
+    d = _subagents_dir_for(transcript_path)
+    if d is None:
+        return None
+    key = str(d)
+    mono = time.monotonic()
+    cached = _subagents_cache.get(key)
+    if cached and mono - cached["t"] < ttl:
+        return cached["data"]
+
+    now = time.time()
+    files = []
+    try:
+        files.extend(sorted(d.glob("agent-*.jsonl")))
+        wf = d / "workflows"
+        if wf.is_dir() and not wf.is_symlink():
+            files.extend(f for f in wf.glob("**/*.jsonl") if f.name != "journal.jsonl")
+    except OSError:
+        return None
+    files = files[:_SUBAGENT_SCAN_CAP]
+
+    agents = []
+    total_tok = 0
+    active = 0
+    for f in files:
+        try:
+            lst = f.lstat()
+        except OSError:
+            continue
+        # Defense-in-depth: skip a symlinked or non-regular leaf so a planted
+        # symlink can't redirect the read outside the projects root, and a FIFO/
+        # special file can't block the (synchronous) scan. Mirrors the
+        # _scan_ai_title / _safe_transcript_path hardening for the dir leaf.
+        if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+            continue
+        mt = lst.st_mtime
+        tok = 0
+        last_tool = None
+        # Bounded, TOCTOU-safe read (never exceeds the cap even if the file
+        # grows between lstat and read). None == unreadable or over cap.
+        raw = safe_read(f, _SUBAGENT_FILE_MAX)
+        too_large = raw is None
+        if raw is not None:
+            for line in raw.decode("utf-8", errors="replace").splitlines():
+                try:
+                    o = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(o, dict):
+                    continue  # valid JSON but not an object (e.g. bare array)
+                m = o.get("message")
+                if not isinstance(m, dict):
+                    continue
+                u = m.get("usage")
+                if isinstance(u, dict):
+                    tok += (_num(u.get("input_tokens"), 0) + _num(u.get("output_tokens"), 0)
+                            + _num(u.get("cache_creation_input_tokens"), 0)
+                            + _num(u.get("cache_read_input_tokens"), 0))
+                for c in (m.get("content") or []):
+                    if isinstance(c, dict) and c.get("type") == "tool_use":
+                        last_tool = c.get("name")
+        is_active = (now - mt) < _SUBAGENT_ACTIVE_WINDOW
+        if is_active:
+            active += 1
+        total_tok += tok
+        aid = f.stem
+        if aid.startswith("agent-"):
+            aid = aid[6:]
+        agents.append({"id": aid[:12], "tokens": int(tok), "tool": last_tool,
+                       "active": is_active, "mtime": mt, "too_large": too_large})
+
+    agents.sort(key=lambda a: a["mtime"], reverse=True)
+    # total counts agents we actually materialised (stat/symlink-rejected files
+    # drop out), so the header and "+N more" line match the rendered list.
+    data = {"total": len(agents), "active": active,
+            "total_tokens": total_tok, "agents": agents}
+
+    _subagents_cache[key] = {"t": mono, "data": data}
+    if len(_subagents_cache) > _SUBAGENTS_CACHE_MAX:
+        oldest = min(_subagents_cache, key=lambda kk: _subagents_cache[kk]["t"])
+        if oldest != key:
+            _subagents_cache.pop(oldest, None)
+    return data
+
+
+_subagents_scan_thread = None
+_subagents_scan_lock = threading.Lock()
+
+
+def _subagents_refresh_async(transcript_path, d=None):
+    """Kick a background scan when the cache is stale and none is in flight.
+
+    Keeps the read+parse of up to 256 agent transcripts OFF the render thread so
+    the modal doesn't stutter on large fan-outs (the synchronous scan blocked
+    the 20Hz loop for ~0.3s every TTL). The worker writes _subagents_cache;
+    render_agents reads the last cached result without ever blocking. Mirrors
+    the _rls_check_worker / pulse worker pattern.
+
+    ``d`` is the caller's already-resolved subagents dir; pass it to skip a
+    redundant per-tick lstat (render_agents resolves it for its own use).
+    """
+    global _subagents_scan_thread
+    if d is None:
+        d = _subagents_dir_for(transcript_path)
+    if d is None:
+        return
+    cached = _subagents_cache.get(str(d))
+    if cached and time.monotonic() - cached["t"] < _SUBAGENTS_TTL:
+        return  # fresh enough — no scan needed
+    with _subagents_scan_lock:
+        if _subagents_scan_thread is not None and _subagents_scan_thread.is_alive():
+            return
+        t = threading.Thread(
+            target=scan_subagents, args=(transcript_path,),
+            kwargs={"ttl": _SUBAGENTS_TTL}, name="subagents-scan", daemon=True)
+        _subagents_scan_thread = t
+        t.start()
+
+
+# Compact tool labels for the agents modal — keeps each per-agent line short and
+# consistent with the monitor's 3-4 letter uppercase codes (APR/CHR/CTX...).
+# Built-ins map to a curated code; anything else (incl. long mcp__server__method
+# names) falls back to the first 4 letters of its method, uppercased.
+_TOOL_ABBR = {
+    "Read": "READ", "Write": "WRIT", "Edit": "EDIT", "MultiEdit": "MEDT",
+    "NotebookEdit": "NBED", "Bash": "BASH", "BashOutput": "BOUT",
+    "KillShell": "KILL", "Glob": "GLOB", "Grep": "GREP", "Task": "TASK",
+    "Agent": "AGNT", "WebFetch": "WFCH", "WebSearch": "WSCH",
+    "TodoWrite": "TODO", "ExitPlanMode": "PLAN", "Skill": "SKIL",
+    "AskUserQuestion": "ASK", "SlashCommand": "SLSH",
+}
+
+
+def _tool_abbr(name):
+    """Short uppercase code for an agent's last tool. Known built-ins use a
+    curated label; an MCP tool (mcp__server__method) uses the first 4 letters of
+    its method; anything else its first 4 letters. None -> '--'."""
+    if not name:
+        return "--"
+    if name in _TOOL_ABBR:
+        return _TOOL_ABBR[name]
+    base = name.split("__")[-1] if name.startswith("mcp__") else name
+    return base[:4].upper() or "--"
+
+
+def render_agents(data, cols, rows, active_only=False):
+    """Modal: live subagent / Workflow fan-out for the watched session.
+
+    ``active_only`` hides idle (○) agents so a fresh fan-out isn't buried under
+    history — a non-destructive "clear board" (nothing on disk is touched).
+    """
+    SW = cols
+    buf = []
+    buf.append(sep(SW))
+    title = "AGENTS  fan-out" + ("  [active]" if active_only else "")
+    pad = max(0, SW - len(title))
+    buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * pad}{R}")
+    buf.append(sep(SW))
+
+    tpath = (data or {}).get("transcript_path")
+    d = _subagents_dir_for(tpath)
+    info = None
+    if d is not None:
+        # Pass the dir we already resolved so the refresh helper doesn't
+        # re-lstat it every render tick while the modal is open.
+        _subagents_refresh_async(tpath, d=d)  # off-thread scan; render never blocks
+        cached = _subagents_cache.get(str(d))
+        info = cached["data"] if cached else None
+        if info is None:
+            # Scan in flight, nothing cached yet (first open this TTL).
+            buf.append(f"{C_DIM}Scanning subagents…{R}")
+            buf.append(sep(SW))
+            buf.append(f"{C_DIM}press any key to close{R}")
+            _window_buf(buf, rows)
+            return buf
+    if not info or not info["total"]:
+        buf.append(f"{C_DIM}No subagents for this session.{R}")
+        buf.append(f"{C_DIM}(populated when Task or Workflow agents run){R}")
+        buf.append(sep(SW))
+        buf.append(f"{C_DIM}press any key to close{R}")
+        _window_buf(buf, rows)
+        return buf
+
+    buf.append(
+        f"{C_GRN}{B}{info['active']}{R}{C_DIM} active{R} "
+        f"{C_DIM}/{R} {C_WHT}{B}{info['total']}{R}{C_DIM} total{R}    "
+        f"{C_DIM}TOK{R} {C_WHT}{f_tok(info['total_tokens'])}{R}"
+    )
+    buf.append(sep(SW))
+
+    shown = [a for a in info["agents"] if a["active"]] if active_only else info["agents"]
+    if active_only and not shown:
+        idle = info["total"] - info["active"]
+        buf.append(f"{C_DIM}No active agents ({idle} idle hidden).{R}")
+    # Emit every agent; _window_buf provides the scrollable window (the old
+    # rows-8 cap + "+N more" is gone — the list is now scrollable instead).
+    for a in shown:
+        dot = f"{C_GRN}●{R}" if a["active"] else f"{C_DIM}○{R}"
+        tool = _tool_abbr(a["tool"])
+        # Fixed-width columns so the token / tool columns line up regardless of
+        # how wide each agent's formatted token count is (pad the plain text
+        # before wrapping it in ANSI, or the escape bytes would skew alignment).
+        aid = a["id"][:12].ljust(12)
+        # A too-large transcript is skipped for token-summing — show "  >cap"
+        # instead of a misleading 0 so the count isn't silently undercounted.
+        tok_str = f"{'>cap' if a.get('too_large') else f_tok(a['tokens']):>7}"
+        line = (f"{dot} {C_DIM}{aid}{R}  "
+                f"{C_WHT}{tok_str}{R} {C_DIM}tok{R}   {C_CYN}{tool}{R}")
+        buf.append(truncate(line, SW))
+
+    buf.append(sep(SW))
+    filt = f"{C_WHT}all{R}{C_DIM}/active" if not active_only else f"{C_DIM}all/{R}{C_WHT}active{R}"
+    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}] {filt}{C_DIM}   ·   press any key to close{R}")
+    _window_buf(buf, rows)
     return buf
 
 
 # ---------------------------------------------------------------------------
 # Session picker
 # ---------------------------------------------------------------------------
+def _picker_order(sessions):
+    """Single source of truth for picker ordering: active sessions first, then
+    stale, capped at 9 (the keyboard 1-9 limit). render_picker and main()'s
+    digit-selection MUST share this so position N on screen maps to the Nth
+    session a keypress selects — two hand-synced copies risked an index->sid
+    desync where [3] picked a different session than the one shown at slot 3."""
+    return sorted(sessions, key=lambda s: s["stale"])[:9]
+
+
 def render_picker(sessions, cols, rows):
     W = cols
     buf = []
@@ -2532,8 +3110,7 @@ def render_picker(sessions, cols, rows):
         buf.append(f"{C_WHT}{B}SESSIONS{R}")
         buf.append(sep(W))
         # Sort: active first, then stale. Limit to 9 (keyboard limit).
-        sorted_s = sorted(sessions, key=lambda s: s["stale"])
-        shown = sorted_s[:9]
+        shown = _picker_order(sessions)
         for i, s in enumerate(shown):
             tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
             nm = s["session_name"] or s.get("ai_title") or s["id"][:8]
@@ -2549,7 +3126,7 @@ def render_picker(sessions, cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}] select{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}")
 
-    _fit_buf_height(buf, rows, clip_tail=True)
+    _window_buf(buf, rows)
     return buf
 
 
@@ -2651,7 +3228,7 @@ def main():
     # Singleton lock — interactive monitor only. Two concurrent dashboards
     # would race on snapshot polling and corrupt the crash log; --list is
     # exempt because it is a one-shot non-interactive read.
-    global _SINGLETON_LOCK_HANDLE
+    global _SINGLETON_LOCK_HANDLE, _modal_scroll
     if ensure_data_dir(DATA_DIR):
         _SINGLETON_LOCK_HANDLE = acquire_singleton_lock(DATA_DIR / "monitor.lock")
         if _SINGLETON_LOCK_HANDLE is None:
@@ -2674,12 +3251,17 @@ def main():
         )
 
     _setup_term()
-    sys.stdout.write(ALT_ON + HIDE_CUR + CLR)
+    sys.stdout.write(ALT_ON + ALT_SCROLL_ON + HIDE_CUR + CLR)
     sys.stdout.flush()
 
     def cleanup(*_args):
+        # Give an in-flight self-update worker a bounded moment to finish its
+        # post-pull syntax check before teardown (M-cross-1). The q-gate covers
+        # interactive 'q'; this backstops signals and KeyboardInterrupt, which
+        # bypass it.
+        _join_update_worker()
         _restore_term()
-        sys.stdout.write(SHOW_CUR + ALT_OFF)
+        sys.stdout.write(SHOW_CUR + ALT_SCROLL_OFF + ALT_OFF)
         sys.stdout.flush()
 
     atexit.register(cleanup)
@@ -2698,6 +3280,10 @@ def main():
     force_picker = False
     show_update = False
     show_pulse = False
+    show_agents = False
+    agents_active_only = False
+    _modal_scroll = 0
+    prev_modal_sig = None  # resets scroll offset when the active modal changes
     # Opt-out: CC_AIO_MON_NO_PULSE=1 disables the background Anthropic Pulse worker.
     # Mirrors CC_AIO_MON_NO_UPDATE_CHECK=1 pattern for the release checker.
     if os.environ.get("CC_AIO_MON_NO_PULSE") != "1":
@@ -2734,6 +3320,32 @@ def main():
                     pass
                 else:
                     break
+            # ── Scroll the open modal (arrows / Page / j / k) — must precede
+            #    the modal close handlers so a scroll key doesn't dismiss it ──
+            elif k in _SCROLL_KEYS and (
+                show_menu or show_cost or show_legend or show_agents
+                or show_pulse or show_update or show_stats is not None
+            ):
+                _modal_scroll = _apply_scroll(_modal_scroll, k, rows)
+                # Coalesce the rest of a wheel/key burst into THIS frame.
+                # poll_key otherwise yields one sequence per 50ms loop, so a
+                # fast wheel spin (3-15 notches queued, often arriving split on
+                # SSH/tmux) scrolled one line per tick and felt stuck. Drain
+                # within a short grace window, briefly waiting for in-transit
+                # bytes instead of bailing on the first None.
+                drain_deadline = time.monotonic() + 0.05
+                drained = 0
+                while drained < 512 and time.monotonic() < drain_deadline:
+                    k2 = poll_key()
+                    if k2 in _SCROLL_KEYS:
+                        _modal_scroll = _apply_scroll(_modal_scroll, k2, rows)
+                        drained += 1
+                        drain_deadline = time.monotonic() + 0.02  # extend per notch
+                    elif k2 is None:
+                        time.sleep(0.001)  # let a split sequence finish arriving
+                    else:
+                        _key_pushback[0] = k2  # real non-scroll key — next poll_key returns it
+                        break
             # ── Modal-specific handlers first (priority) ──
             elif show_update and k == "a" and _get_update_result() is None:
                 _apply_update_action()
@@ -2767,11 +3379,18 @@ def main():
                     show_cost = True
                 elif k == "p":
                     show_pulse = True
+                elif k == "a":
+                    show_agents = True
                 show_menu = False
             elif show_cost and k is not None:
                 show_cost = False
             elif show_pulse and k is not None:
                 show_pulse = False
+            elif show_agents and k == "f":
+                # In-modal filter toggle: hide idle agents ("clear board").
+                agents_active_only = not agents_active_only
+            elif show_agents and k is not None:
+                show_agents = False
             elif show_legend and k is not None:
                 show_legend = False
             # ── Global handlers ──
@@ -2828,9 +3447,31 @@ def main():
                 show_cost = False
                 show_update = False
                 _set_update_result(None)
+            elif k == "a":
+                show_agents = not show_agents
+                show_menu = False
+                show_legend = False
+                show_stats = None
+                show_cost = False
+                show_pulse = False
+                show_update = False
+                _set_update_result(None)
+
+            # Reset scroll whenever the active modal changes (open / switch /
+            # close) so a new modal always starts at the top.
+            modal_sig = (show_menu, show_cost, show_legend, show_agents,
+                         show_pulse, show_update, show_stats)
+            if modal_sig != prev_modal_sig:
+                _modal_scroll = 0
+                prev_modal_sig = modal_sig
 
             # Render every tick when we have data (for spinner), reload data on interval
-            need_render = size_changed or last_data is not None or since_data >= data_interval
+            # An open modal must always re-render (scroll responsiveness) even
+            # when there is no live session driving the gate.
+            any_modal_open = (show_menu or show_cost or show_legend or show_agents
+                              or show_pulse or show_update or show_stats is not None)
+            need_render = (size_changed or last_data is not None
+                           or since_data >= data_interval or any_modal_open)
             if not need_render:
                 time.sleep(tick)
                 continue
@@ -2874,7 +3515,7 @@ def main():
                     time.sleep(tick)
                     continue
                 else:
-                    sorted_s = sorted(sessions, key=lambda s: s["stale"])[:9]
+                    sorted_s = _picker_order(sessions)
                     flush(render_picker(sessions, cols, rows), cols)
                     if k and k.isdigit():
                         idx = int(k) - 1
@@ -2927,6 +3568,7 @@ def main():
                     render_frame(
                         last_data, last_hist, cols, rows,
                         show_legend, show_menu, show_cost, stale=is_stale,
+                        show_agents=show_agents, agents_active_only=agents_active_only,
                     ),
                     cols,
                 )

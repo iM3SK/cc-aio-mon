@@ -619,11 +619,16 @@ class TestCachedCrossSessionCosts(unittest.TestCase):
         self._orig_cache = _cost_cache.copy()
         monitor.DATA_DIR = pathlib.Path(self.tmpdir)
         _cost_cache.update({"t": 0, "today": 0.0, "week": 0.0})
+        monitor._cost_scan_thread = None
 
     def tearDown(self):
         import shutil, monitor
+        t = monitor._cost_scan_thread
+        if t is not None:
+            t.join(timeout=2.0)  # don't let a worker outlive the patched DATA_DIR
         monitor.DATA_DIR = self._orig
         _cost_cache.update(self._orig_cache)
+        monitor._cost_scan_thread = None
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_ttl_returns_cached(self):
@@ -633,12 +638,37 @@ class TestCachedCrossSessionCosts(unittest.TestCase):
         self.assertEqual(today, 42.0)
         self.assertEqual(week, 99.0)
 
-    def test_ttl_expired_refreshes(self):
+    def test_ttl_expired_kicks_async_refresh(self):
+        # Non-blocking: an expired TTL returns the cached value immediately and
+        # refreshes off-thread. Block the worker's compute so the immediate
+        # return is deterministically the stale value — otherwise the worker can
+        # win the race and overwrite the cache before the assertion (flaky on
+        # fast CI).
+        import monitor, threading
+        from unittest.mock import patch
+        gate = threading.Event()
+
+        def blocked_calc():
+            gate.wait(2.0)
+            return (0.0, 0.0)
+
         _cost_cache.update({"t": 0, "today": 42.0, "week": 99.0})
-        today, week = cached_cross_session_costs(ttl=0)
-        # Empty dir → 0.0
-        self.assertEqual(today, 0.0)
-        self.assertEqual(week, 0.0)
+        with patch.object(monitor, "calc_cross_session_costs", blocked_calc):
+            today, week = cached_cross_session_costs(ttl=0)
+            self.assertEqual((today, week), (42.0, 99.0))  # worker blocked -> stale
+            t = monitor._cost_scan_thread
+            self.assertIsNotNone(t)
+            gate.set()  # release the worker
+            t.join(timeout=2.0)
+        self.assertEqual((_cost_cache["today"], _cost_cache["week"]), (0.0, 0.0))
+
+    def test_worker_aggregates_into_cache(self):
+        # The worker itself computes and writes the cache (empty dir -> zeros).
+        import monitor
+        _cost_cache.update({"t": 0, "today": 1.0, "week": 2.0})
+        monitor._cost_scan_worker()
+        self.assertEqual((_cost_cache["today"], _cost_cache["week"]), (0.0, 0.0))
+        self.assertGreater(_cost_cache["t"], 0)
 
 
 # ---------------------------------------------------------------------------
@@ -2231,8 +2261,11 @@ class TestRenderPicker(unittest.TestCase):
         self.assertIn("MyProject", plain)
 
     def test_returns_buffer_of_correct_length(self):
+        # Modals no longer pad to the terminal height (flush erases to end of
+        # screen); _window_buf returns at most `rows` lines.
         buf = render_picker([], 80, 24)
-        self.assertEqual(len(buf), 24)
+        self.assertLessEqual(len(buf), 24)
+        self.assertGreater(len(buf), 0)
 
     def test_stale_session_shows_stale_label(self):
         sessions = [
@@ -3047,23 +3080,25 @@ class TestAuditRegressionV1105(unittest.TestCase):
     def test_debt016_monitor_loc_tripwire(self):
         """DEBT-016 / Audit P1-13: monitor.py is the single most likely
         place for the project to outgrow its "5 runtime files" constraint.
-        The 24.05.2026 audit set 3500 LOC as the discussion trigger: at or
-        above that line count, contributors must open an ADR for the
-        monitor.py size strategy (pseudo-namespace classes vs relaxing the
-        5-file constraint). See PROJECTS/cc-aio-mon/ROZHODNUTIA.md.
+        The 24.05.2026 audit set 3500 LOC as the discussion trigger; when it
+        first fired (03.06.2026, agents + scroll work), ADR-002 was resolved as
+        variant C — keep the single-module event loop (splitting flow control
+        across files is higher-risk and erodes the "5 stdlib files" product
+        constraint), add an explicit section index to the module docstring, and
+        raise this trigger to 3800. See PROJECTS/cc-aio-mon/ROZHODNUTIA.md.
 
         This is a *trigger*, not a hard ceiling — a failing test here means
-        "have the conversation", not "revert your work".
+        "have the conversation" (revisit ADR-002), not "revert your work".
         """
         import monitor
         src = pathlib.Path(monitor.__file__).read_text(encoding="utf-8")
         loc = src.count("\n") + (0 if src.endswith("\n") else 1)
-        # Trigger threshold per audit 24.05.2026
+        # Trigger threshold per ADR-002 variant C (raised from 3500, 03.06.2026)
         self.assertLess(
-            loc, 3500,
-            f"monitor.py is {loc} LOC, past the 3500-line audit trigger. "
-            f"Open an ADR (see PROJECTS/cc-aio-mon/ROZHODNUTIA.md) before "
-            f"adding more, OR raise this trigger after the ADR is filed."
+            loc, 3800,
+            f"monitor.py is {loc} LOC, past the 3800-line audit trigger. "
+            f"Re-open ADR-002 (see PROJECTS/cc-aio-mon/ROZHODNUTIA.md) before "
+            f"adding more, OR raise this trigger after the ADR is revisited."
         )
 
     def test_h1_render_loop_catches_attributeerror(self):
@@ -3793,21 +3828,34 @@ class TestRenderStatsLifetime(unittest.TestCase):
         self.assertIn("DAILY", plain)
         self.assertIn("04-24", plain)     # date short
 
-    def test_lifetime_block_omitted_on_small_terminal(self):
+    def test_lifetime_and_daily_always_emitted(self):
+        # Regression: _append_lifetime_block no longer drops LIFETIME/DAILY to
+        # "fit" the terminal — the whole block is always emitted (scrolling
+        # handles height). On a tall enough terminal _window_buf returns it all.
         self._write_cache()
-        buf = self._monitor.render_stats(80, 12, period="all")
-        plain = "\n".join(_strip_ansi(buf))
-        self.assertNotIn("LIFETIME", plain)
+        m = self._monitor
+        try:
+            m._modal_scroll = 0
+            buf = m.render_stats(80, 200, period="all")
+            plain = "\n".join(_strip_ansi(buf))
+            self.assertIn("LIFETIME", plain)
+            self.assertIn("DAILY", plain)
+        finally:
+            m._modal_scroll = 0
 
-    def test_daily_omitted_on_medium_terminal(self):
+    def test_stats_scrollable_on_small_terminal(self):
+        # On a short terminal the modal is windowed (not clipped-and-padded):
+        # at most `rows` lines, with a scroll position indicator.
         self._write_cache()
-        # Empty-models path: pre=5, footer=3, core needs 7, daily needs 7 more.
-        # rows=18 gives budget = 10 → core fits, daily doesn't.
-        buf = self._monitor.render_stats(80, 18, period="all")
-        plain = "\n".join(_strip_ansi(buf))
-        self.assertIn("LIFETIME", plain)
-        self.assertIn("HRS", plain)
-        self.assertNotIn("DAILY", plain)
+        m = self._monitor
+        try:
+            m._modal_scroll = 0
+            buf = m.render_stats(80, 12, period="all")
+            self.assertLessEqual(len(buf), 12)
+            plain = "\n".join(_strip_ansi(buf))
+            self.assertRegex(plain, r"\d+-\d+/\d+")  # "── 1-11/NN ──" indicator
+        finally:
+            m._modal_scroll = 0
 
     def test_lifetime_block_skipped_when_cache_missing(self):
         # No file written
@@ -3870,6 +3918,618 @@ class TestMainSingleton(unittest.TestCase):
             import monitor as _m
             _m.main()
         mock_lock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# scan_subagents / render_agents — Agents fan-out modal
+# ---------------------------------------------------------------------------
+class TestScanSubagents(unittest.TestCase):
+    """Subagent/Workflow fan-out scanner reads <proj>/<session>/subagents/."""
+
+    def setUp(self):
+        import tempfile, pathlib, monitor, json
+        self._json = json
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_root = monitor.CLAUDE_PROJECTS_DIR
+        monitor.CLAUDE_PROJECTS_DIR = pathlib.Path(self.tmpdir)
+        monitor._subagents_cache.clear()
+        # transcript = <root>/proj/sess.jsonl ; subagents = <root>/proj/sess/subagents/
+        self.proj = pathlib.Path(self.tmpdir) / "proj"
+        self.proj.mkdir(parents=True, exist_ok=True)
+        self.tp = self.proj / "sess.jsonl"
+        self.tp.write_text('{"type":"user"}\n', encoding="utf-8")
+        self.subdir = self.proj / "sess" / "subagents"
+        self.subdir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.CLAUDE_PROJECTS_DIR = self._orig_root
+        monitor._subagents_cache.clear()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _agent(self, name, in_tok=0, out_tok=0, cache_r=0, tool=None):
+        msg = {"usage": {"input_tokens": in_tok, "output_tokens": out_tok,
+                         "cache_read_input_tokens": cache_r}}
+        if tool:
+            msg["content"] = [{"type": "tool_use", "name": tool}]
+        line = self._json.dumps({"type": "assistant", "message": msg})
+        (self.subdir / name).write_text(line + "\n", encoding="utf-8")
+
+    def test_aggregates_tokens_and_counts(self):
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=100, out_tok=50, cache_r=200, tool="Read")
+        self._agent("agent-bbb.jsonl", in_tok=10, out_tok=5, tool="Grep")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["total_tokens"], 100 + 50 + 200 + 10 + 5)
+        ids = {a["id"] for a in info["agents"]}
+        self.assertEqual(ids, {"aaa", "bbb"})
+
+    def test_workflow_journal_excluded(self):
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=10)
+        wf = self.subdir / "workflows" / "wf_x"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / "journal.jsonl").write_text('{"type":"system"}\n', encoding="utf-8")
+        (wf / "agent-w1.jsonl").write_text(
+            self._json.dumps({"type": "assistant",
+                              "message": {"usage": {"input_tokens": 7}}}) + "\n",
+            encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        # agent-aaa + workflow agent-w1, journal.jsonl excluded
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["total_tokens"], 17)
+
+    def test_active_flag_by_mtime(self):
+        import os, time, monitor
+        self._agent("agent-fresh.jsonl", in_tok=1)
+        self._agent("agent-stale.jsonl", in_tok=1)
+        old = time.time() - 3600
+        os.utime(self.subdir / "agent-stale.jsonl", (old, old))
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["active"], 1)  # only the fresh one
+
+    def test_no_subagents_dir_returns_none(self):
+        import pathlib, monitor
+        bare = self.proj / "lonely.jsonl"
+        bare.write_text('{"type":"user"}\n', encoding="utf-8")
+        self.assertIsNone(monitor.scan_subagents(str(bare), ttl=0))
+
+    def test_invalid_path_returns_none(self):
+        import monitor
+        self.assertIsNone(monitor.scan_subagents(None, ttl=0))
+        self.assertIsNone(monitor.scan_subagents("/etc/passwd", ttl=0))
+
+    def test_render_agents_no_data_does_not_crash(self):
+        import monitor
+        buf = monitor.render_agents({}, 80, 24)
+        self.assertTrue(any("No subagents" in ln for ln in _strip_ansi(buf)))
+
+    def test_render_agents_lists_agents(self):
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=1000, tool="Read")
+        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
+        buf = monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)
+        flat = "\n".join(_strip_ansi(buf))
+        self.assertIn("total", flat)
+        self.assertIn("aaa", flat)
+
+    def test_non_dict_json_line_skipped_not_crash(self):
+        # Review finding: a valid-JSON-but-non-object line ([1,2,3], 42, "x")
+        # used to raise AttributeError on o.get("message"), blanking the modal
+        # and defeating the TTL cache. Must be skipped and the cache populated.
+        import monitor
+        (self.subdir / "agent-bad.jsonl").write_text(
+            '[1,2,3]\n42\n"hi"\n'
+            + self._json.dumps({"type": "assistant",
+                                "message": {"usage": {"input_tokens": 5}}}) + "\n",
+            encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["total_tokens"], 5)  # only the valid object counts
+        # cache must be populated (perf guard not defeated)
+        self.assertTrue(monitor._subagents_cache)
+
+    def test_malformed_jsonl_line_skipped(self):
+        import monitor
+        (self.subdir / "agent-x.jsonl").write_text(
+            "not json at all\n"
+            + self._json.dumps({"message": {"usage": {"input_tokens": 99}}}) + "\n",
+            encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertEqual(info["total_tokens"], 99)
+
+    def test_symlink_leaf_rejected(self):
+        # Security: a symlinked agent file must not be read (no escape outside
+        # the projects root). The dir-leaf guard alone didn't cover leaf files.
+        import os, monitor
+        self._agent("agent-real.jsonl", in_tok=10)
+        outside = pathlib.Path(self.tmpdir) / "evil.jsonl"
+        outside.write_text(
+            self._json.dumps({"message": {"usage": {"input_tokens": 99999}}}) + "\n",
+            encoding="utf-8")
+        try:
+            os.symlink(str(outside), str(self.subdir / "agent-evil.jsonl"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported here")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        ids = {a["id"] for a in info["agents"]}
+        self.assertNotIn("evil", ids)
+        self.assertEqual(info["total_tokens"], 10)  # symlink target not read
+
+    def test_too_large_file_marked_not_counted(self):
+        import monitor
+        self._agent("agent-small.jsonl", in_tok=3)
+        big = self._json.dumps({"message": {"usage": {"input_tokens": 9999}}})
+        (self.subdir / "agent-big.jsonl").write_text((big + "\n") * 100, encoding="utf-8")
+        orig = monitor._SUBAGENT_FILE_MAX
+        # Cap between the small agent (~90 B) and the big one (~5 KB).
+        monitor._SUBAGENT_FILE_MAX = 500
+        try:
+            info = monitor.scan_subagents(str(self.tp), ttl=0)
+        finally:
+            monitor._SUBAGENT_FILE_MAX = orig
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["total_tokens"], 3)  # big one contributes 0
+        big_a = [a for a in info["agents"] if a["id"] == "big"][0]
+        self.assertTrue(big_a["too_large"])
+
+    def test_ttl_cache_hit(self):
+        # Second call within TTL returns the cached result (perf guarantee).
+        import monitor
+        self._agent("agent-a.jsonl", in_tok=1)
+        first = monitor.scan_subagents(str(self.tp), ttl=100)
+        self.assertEqual(first["total"], 1)
+        self._agent("agent-b.jsonl", in_tok=1)  # add a file after caching
+        cached = monitor.scan_subagents(str(self.tp), ttl=100)
+        self.assertEqual(cached["total"], 1)  # cache hit: new file not seen
+        fresh = monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertEqual(fresh["total"], 2)  # ttl=0 forces refresh
+
+    def test_lru_cache_bounded(self):
+        import monitor
+        self._agent("agent-a.jsonl", in_tok=1)
+        # Scan more distinct dirs than the cache cap to force eviction.
+        for i in range(monitor._SUBAGENTS_CACHE_MAX + 3):
+            p = pathlib.Path(self.tmpdir) / f"p{i}"
+            (p).mkdir(parents=True, exist_ok=True)
+            tpi = p / "s.jsonl"
+            tpi.write_text('{"type":"user"}\n', encoding="utf-8")
+            sd = p / "s" / "subagents"
+            sd.mkdir(parents=True, exist_ok=True)
+            (sd / "agent-x.jsonl").write_text(
+                self._json.dumps({"message": {"usage": {"input_tokens": 1}}}) + "\n",
+                encoding="utf-8")
+            monitor.scan_subagents(str(tpi), ttl=100)
+        self.assertLessEqual(len(monitor._subagents_cache), monitor._SUBAGENTS_CACHE_MAX)
+
+    def test_render_frame_dispatch_show_agents(self):
+        # render_frame must route show_agents=True to the AGENTS modal,
+        # like its sibling show_cost / show_legend flags.
+        import monitor
+        self._agent("agent-aaa.jsonl", in_tok=10)
+        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
+        buf = monitor.render_frame(
+            {"transcript_path": str(self.tp)}, [], 80, 24, show_agents=True)
+        self.assertTrue(any("AGENTS" in ln for ln in _strip_ansi(buf)))
+
+    def test_active_only_filter_hides_idle(self):
+        # "clear board" filter: active_only must hide idle (○) agents but keep
+        # the active (●) ones — purely visual, nothing on disk is touched.
+        import os, time, monitor
+        self._agent("agent-live.jsonl", in_tok=1)
+        self._agent("agent-idle.jsonl", in_tok=1)
+        old = time.time() - 3600
+        os.utime(self.subdir / "agent-idle.jsonl", (old, old))
+        data = {"transcript_path": str(self.tp)}
+        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
+        all_flat = "\n".join(_strip_ansi(monitor.render_agents(data, 80, 24, active_only=False)))
+        self.assertIn("live", all_flat)
+        self.assertIn("idle", all_flat)
+        act_flat = "\n".join(_strip_ansi(monitor.render_agents(data, 80, 24, active_only=True)))
+        self.assertIn("live", act_flat)
+        self.assertNotIn("idle", act_flat)        # idle hidden
+        self.assertIn("[active]", act_flat)        # filter indicated in title
+        # idle file still on disk (non-destructive)
+        self.assertTrue((self.subdir / "agent-idle.jsonl").exists())
+
+    def test_render_is_async_non_blocking(self):
+        # Perf: with an empty cache the render shows "Scanning…" and kicks a
+        # background scan instead of blocking on the read. Stub the refresh to a
+        # no-op so the worker can't win the race and populate the cache before
+        # the render reads it (that race made this flaky on fast CI).
+        import monitor
+        from unittest.mock import patch
+        self._agent("agent-aaa.jsonl", in_tok=5)
+        monitor._subagents_cache.clear()
+        called = {"n": 0}
+
+        def fake_refresh(tp, d=None):
+            called["n"] += 1
+
+        with patch.object(monitor, "_subagents_refresh_async", fake_refresh):
+            flat = "\n".join(_strip_ansi(
+                monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)))
+        self.assertIn("Scanning", flat)   # empty cache -> "Scanning" shown
+        self.assertEqual(called["n"], 1)  # render kicked the off-thread refresh
+        # The scan itself populates the cache when actually run.
+        monitor.scan_subagents(str(self.tp), ttl=0)
+        self.assertTrue(monitor._subagents_cache)
+
+
+class TestModalScroll(unittest.TestCase):
+    """_window_buf / _apply_scroll: modals taller than the terminal must be
+    scrollable instead of clipped (content was previously unreachable)."""
+
+    def tearDown(self):
+        import monitor
+        monitor._modal_scroll = 0
+
+    def test_short_buffer_unchanged(self):
+        import monitor
+        monitor._modal_scroll = 0
+        buf = ["a", "b", "c"]
+        out = monitor._window_buf(buf, 24)
+        self.assertEqual(out, ["a", "b", "c"])  # fits — no indicator added
+
+    def test_long_buffer_windows_and_indicates(self):
+        import monitor
+        buf = [f"line{i}" for i in range(50)]
+        monitor._modal_scroll = 0
+        out = monitor._window_buf(list(buf), 10)
+        self.assertLessEqual(len(out), 10)
+        self.assertIn("line0", out[0])  # pinned header stays at top
+        flat = _strip_ansi(out)
+        self.assertTrue(any(re.search(r"\d+-\d+/\d+", ln) for ln in flat))  # position indicator
+
+    def test_header_pinned_when_scrolled(self):
+        # The title/header lines (first _MODAL_HEADER_LINES) must stay at the top
+        # even when scrolled — they used to scroll away ("floating content").
+        import monitor
+        buf = ["=HDR=", "TITLE", "=HDR=" ] + [f"line{i}" for i in range(50)]
+        monitor._modal_scroll = 9999  # scrolled to the bottom
+        out = monitor._window_buf(list(buf), 10)
+        self.assertEqual(_strip_ansi([out[0]])[0], "=HDR=")   # header still on top
+        self.assertIn("TITLE", _strip_ansi([out[1]])[0])
+        monitor._modal_scroll = 0
+
+    def test_offset_clamped_to_bottom(self):
+        import monitor
+        buf = [f"line{i}" for i in range(50)]
+        monitor._modal_scroll = 9999  # overshoot
+        monitor._window_buf(list(buf), 10)
+        self.assertLess(monitor._modal_scroll, 50)        # clamped
+        self.assertGreater(monitor._modal_scroll, 0)
+
+    def test_apply_scroll_keys(self):
+        import monitor
+        self.assertEqual(monitor._apply_scroll(10, "<DOWN>", 20), 11)
+        self.assertEqual(monitor._apply_scroll(10, "j", 20), 11)
+        self.assertEqual(monitor._apply_scroll(10, "<UP>", 20), 9)
+        self.assertEqual(monitor._apply_scroll(10, "k", 20), 9)
+        self.assertEqual(monitor._apply_scroll(0, "<UP>", 20), 0)        # clamp at top
+        self.assertEqual(monitor._apply_scroll(10, "<HOME>", 20), 0)
+        self.assertGreater(monitor._apply_scroll(10, "<PGDN>", 20), 11)  # page > 1
+        self.assertEqual(monitor._apply_scroll(100, "<PGUP>", 20), max(0, 100 - 17))
+
+
+class TestPollKeyEscape(unittest.TestCase):
+    """poll_key must parse escape sequences (arrow keys / Page keys / mouse-
+    wheel scroll) into nav tokens for scrolling, and swallow anything else,
+    so their bytes don't get misread as key presses that close open modals."""
+
+    def setUp(self):
+        import monitor
+        if not monitor.IS_WIN:
+            monitor._esc_buf[0] = ""  # isolate from any leftover partial seq
+
+    def _poll_with(self, seq):
+        import monitor
+        from unittest.mock import patch
+        reads = iter(seq)
+        calls = {"n": 0}
+
+        def selecting(rlist, wlist, xlist, timeout=0):
+            calls["n"] += 1
+            return ([sys.stdin], [], []) if calls["n"] <= len(seq) else ([], [], [])
+
+        with patch.object(monitor.select, "select", side_effect=selecting), \
+             patch.object(sys.stdin, "read", side_effect=lambda n=1: next(reads)):
+            return monitor.poll_key()
+
+    def _poll_calls(self, chunks):
+        """Feed bytes across multiple poll_key() calls (one chunk per call) to
+        simulate a sequence split over reads. Returns the list of results."""
+        import monitor
+        from unittest.mock import patch
+        out = []
+        for chunk in chunks:
+            reads = iter(chunk)
+            calls = {"n": 0}
+
+            def selecting(rlist, wlist, xlist, timeout=0, _c=calls, _ch=chunk):
+                _c["n"] += 1
+                return ([sys.stdin], [], []) if _c["n"] <= len(_ch) else ([], [], [])
+
+            with patch.object(monitor.select, "select", side_effect=selecting), \
+                 patch.object(sys.stdin, "read", side_effect=lambda n=1, _r=reads: next(_r)):
+                out.append(monitor.poll_key())
+        return out
+
+    def test_split_sequence_never_leaks_raw_bytes(self):
+        # ESC, then '[', then 'A' arriving in three separate poll_key() calls
+        # must NOT surface '[' or 'A' as keys (which would close a modal); the
+        # nav token appears only once the sequence completes.
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_calls([["\x1b"], ["["], ["A"]]), [None, None, "<UP>"])
+
+    def test_bare_esc_does_not_eat_next_key(self):
+        # A bare ESC followed (later) by a real key must surface that key, not
+        # swallow it.
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_calls([["\x1b"], ["q"]]), [None, "q"])
+
+    def test_pushback_returned_first(self):
+        # A key stashed in _key_pushback (by the scroll-burst drain) is returned
+        # by the next poll_key before any stdin/select (Unix) or msvcrt (Windows)
+        # read — so call poll_key() directly rather than via _poll_with, whose
+        # select patch is Unix-only (monitor.select does not exist on Windows).
+        import monitor
+        monitor._key_pushback[0] = "q"
+        try:
+            self.assertEqual(monitor.poll_key(), "q")
+            self.assertIsNone(monitor._key_pushback[0])
+        finally:
+            monitor._key_pushback[0] = None
+
+    def test_ss3_arrow_maps_to_nav_token(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_with(["\x1b", "O", "A"]), "<UP>")
+        self.assertEqual(self._poll_with(["\x1b", "O", "B"]), "<DOWN>")
+
+    def test_mouse_report_dropped(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        # SGR mouse wheel report must be consumed, not leaked as keystrokes.
+        self.assertIsNone(self._poll_with(list("\x1b[<64;1;1M")))
+
+    def test_x10_mouse_report_consumed_no_leak(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        # X10 mouse: ESC [ M + 3 coordinate bytes. The coords are chosen as 'A'
+        # (0x41), which is itself a CSI final byte — so without the X10-specific
+        # buffering the parser would resolve at ESC[M and leak the three 'A's as
+        # key presses. All six bytes must be consumed and yield no key.
+        monitor._esc_buf[0] = ""
+        self.assertIsNone(self._poll_with(list("\x1b[MAAA")))
+        self.assertEqual(monitor._esc_buf[0], "")
+
+    def test_arrow_sequence_maps_to_nav_token(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        self.assertEqual(self._poll_with(["\x1b", "[", "A"]), "<UP>")    # Up arrow
+        self.assertEqual(self._poll_with(["\x1b", "[", "B"]), "<DOWN>")  # Down arrow
+        self.assertEqual(self._poll_with(["\x1b", "[", "5", "~"]), "<PGUP>")
+        self.assertEqual(self._poll_with(["\x1b", "[", "6", "~"]), "<PGDN>")
+
+    def test_unknown_escape_swallowed(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        # An unrecognised CSI (e.g. a mouse report) must not surface as a key.
+        self.assertIsNone(self._poll_with(["\x1b", "[", "Z"]))
+
+    def test_plain_char_returned(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        from unittest.mock import patch
+        with patch.object(monitor.select, "select",
+                          side_effect=lambda *a, **k: ([sys.stdin], [], [])), \
+             patch.object(sys.stdin, "read", side_effect=lambda n=1: "q"):
+            self.assertEqual(monitor.poll_key(), "q")
+
+
+class TestAuditFixesV1130(unittest.TestCase):
+    """Behavioural coverage for the v1.13.0 audit-remediation batch: agents/
+    scroll inline findings (L2-L7) + audit #4 backlog (timestamp robustness,
+    error edge-cases, concurrency, perf, quality)."""
+
+    # ---- #4: truncate fast-path is equivalent to the per-char scan ----
+    def test_truncate_fast_path_plain_ascii_unchanged(self):
+        s = "a plain ascii status line"
+        self.assertEqual(monitor.truncate(s, 80), s)
+
+    def test_truncate_still_clips_when_over_width(self):
+        # Over-width still clips to 3 visible cols (a trailing reset may be
+        # appended to guard against colour bleed — strip ANSI to compare).
+        self.assertEqual(_ANSI_RE.sub("", monitor.truncate("abcdef", 3)), "abc")
+
+    def test_truncate_fast_path_bypassed_for_ansi(self):
+        # ANSI escapes make isprintable() False, so coloured lines take the
+        # accurate path and keep their escape bytes intact.
+        colored = f"{C_RED}hi{monitor.R}"
+        self.assertEqual(monitor.truncate(colored, 80), colored)
+
+    def test_truncate_control_char_does_not_crash(self):
+        # A tab is ASCII but not printable -> fast path is skipped; the accurate
+        # scan handles it without raising.
+        self.assertIsInstance(monitor.truncate("a\tb", 80), str)
+
+    # ---- agents modal: compact tool labels ----
+    def test_tool_abbr_builtin_and_mcp(self):
+        self.assertEqual(monitor._tool_abbr("Read"), "READ")
+        self.assertEqual(monitor._tool_abbr("Bash"), "BASH")
+        # Long MCP name compacts to the first 4 letters of its method.
+        self.assertEqual(
+            monitor._tool_abbr("mcp__google-ads__execute_gaql_query"), "EXEC")
+        # Unknown tool -> first 4 letters uppercased; None -> placeholder.
+        self.assertEqual(monitor._tool_abbr("CustomThing"), "CUST")
+        self.assertEqual(monitor._tool_abbr(None), "--")
+        # Every label stays short enough to keep the agent line compact.
+        for v in monitor._TOOL_ABBR.values():
+            self.assertLessEqual(len(v), 4)
+
+    # ---- #6: _picker_order is the single source of truth ----
+    def test_picker_order_active_first_and_capped(self):
+        sessions = [{"id": str(i), "stale": (i % 2 == 0)} for i in range(20)]
+        order = monitor._picker_order(sessions)
+        self.assertEqual(len(order), 9)            # keyboard 1-9 cap
+        self.assertFalse(order[0]["stale"])        # active (stale=False) first
+        # Matches a plain stable sort+slice — what render_picker and main share.
+        self.assertEqual([s["id"] for s in order],
+                         [s["id"] for s in sorted(sessions, key=lambda s: s["stale"])[:9]])
+
+    # ---- L7: _window_buf never overflows a short terminal ----
+    def test_window_buf_never_exceeds_rows(self):
+        monitor._modal_scroll = 0
+        big = [f"line{i}" for i in range(40)]
+        for rows in (2, 3, 4, 5, 10, 24):
+            out = monitor._window_buf(list(big), rows)
+            self.assertLessEqual(
+                len(out), rows,
+                f"_window_buf emitted {len(out)} lines for rows={rows}")
+        monitor._modal_scroll = 0
+
+    def test_window_buf_returns_short_buffer_unchanged(self):
+        monitor._modal_scroll = 0
+        buf = ["alpha", "beta", "gamma"]
+        self.assertEqual(monitor._window_buf(list(buf), 24), buf)
+
+    # ---- #1b: _baseline_delta skips unplaceable (t<=0) entries ----
+    def test_baseline_delta_ignores_zero_t_entries(self):
+        # An entry with t<=0 (missing/invalid) must not be treated as a
+        # pre-cutoff baseline. Window cutoff at t=100: baseline is the t=50
+        # entry ($1.00), final is the t=150 entry ($3.00) -> delta 2.00. A
+        # leading t=0/$9.99 garbage entry must not become the baseline.
+        entries = [
+            {"t": 0, "cost": {"total_cost_usd": 9.99}},     # unplaceable
+            {"t": 50, "cost": {"total_cost_usd": 1.00}},    # pre-cutoff baseline
+            {"t": 150, "cost": {"total_cost_usd": 3.00}},   # in-window final
+        ]
+        self.assertAlmostEqual(monitor._baseline_delta(entries, 100), 2.00)
+
+    # ---- #1a: period scope excludes records with no parseable timestamp ----
+    def test_period_scope_excludes_unplaceable_ts(self):
+        import json, tempfile, pathlib, shutil
+        tmp = tempfile.mkdtemp()
+        orig_dir, orig_cache = monitor._CLAUDE_DIR, monitor._usage_cache.copy()
+        monitor._CLAUDE_DIR = pathlib.Path(tmp)
+        monitor._usage_cache.clear()
+        try:
+            rec = json.dumps({  # no "timestamp" -> _parse_ts == 0
+                "type": "assistant",
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 100, "output_tokens": 0}},
+            })
+            _write_session(tmp, "proj1", "sess1", [rec])
+            models_all, _ = scan_transcript_stats("all", ttl=0)
+            self.assertEqual(models_all["claude-opus-4-6"]["input"], 100)
+            monitor._usage_cache.clear()
+            models_7d, _ = scan_transcript_stats("7d", ttl=0)
+            self.assertNotIn("claude-opus-4-6", models_7d)  # excluded from window
+        finally:
+            monitor._CLAUDE_DIR = orig_dir
+            monitor._usage_cache.clear()
+            monitor._usage_cache.update(orig_cache)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- #2a: a corrupt huge timestamp doesn't abort the whole transcript ----
+    def test_overflowing_timestamp_does_not_abort_aggregation(self):
+        import json, tempfile, pathlib, shutil, datetime as _dt
+
+        class _BoomDT(_dt.datetime):
+            @classmethod
+            def fromtimestamp(cls, *a, **k):
+                raise OverflowError("simulated out-of-range timestamp")
+
+        tmp = tempfile.mkdtemp()
+        orig_dir, orig_cache = monitor._CLAUDE_DIR, monitor._usage_cache.copy()
+        monitor._CLAUDE_DIR = pathlib.Path(tmp)
+        monitor._usage_cache.clear()
+        recs = [json.dumps({
+            "type": "assistant", "timestamp": f"2026-04-12T10:0{i}:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 10, "output_tokens": 0}},
+        }) for i in range(2)]
+        _write_session(tmp, "proj1", "sess1", recs)
+        try:
+            with patch.object(monitor, "datetime", _BoomDT):
+                models, ov = scan_transcript_stats("all", ttl=0)
+            # Both records' tokens are aggregated (fromtimestamp raising must not
+            # abort the file); only the per-day attribution is skipped.
+            self.assertEqual(models["claude-opus-4-6"]["input"], 20)
+            self.assertEqual(models["claude-opus-4-6"]["calls"], 2)
+            self.assertEqual(len(ov["active_days"]), 0)
+        finally:
+            monitor._CLAUDE_DIR = orig_dir
+            monitor._usage_cache.clear()
+            monitor._usage_cache.update(orig_cache)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- #3: cleanup join is bounded and finishes a quick worker ----
+    def test_join_update_worker_waits_for_quick_worker(self):
+        import threading
+        done = threading.Event()
+
+        def quick():
+            time.sleep(0.02)
+            done.set()
+
+        t = threading.Thread(target=quick, daemon=True)
+        orig = monitor._update_thread
+        monitor._update_thread = t
+        try:
+            t.start()
+            monitor._join_update_worker(timeout=1.0)
+            self.assertTrue(done.is_set())   # joined to completion
+            self.assertFalse(t.is_alive())
+        finally:
+            t.join(timeout=1.0)
+            monitor._update_thread = orig
+
+    def test_join_update_worker_is_bounded_on_hung_worker(self):
+        import threading
+        stop = threading.Event()
+
+        def hang():
+            stop.wait(5.0)
+
+        t = threading.Thread(target=hang, daemon=True)
+        orig = monitor._update_thread
+        monitor._update_thread = t
+        try:
+            t.start()
+            t0 = time.monotonic()
+            monitor._join_update_worker(timeout=0.05)
+            elapsed = time.monotonic() - t0
+            # Returns promptly even though the worker is still running.
+            self.assertLess(elapsed, 1.0)
+            self.assertTrue(t.is_alive())
+        finally:
+            stop.set()
+            t.join(timeout=1.0)
+            monitor._update_thread = orig
+
+    def test_join_update_worker_noop_when_idle(self):
+        orig = monitor._update_thread
+        monitor._update_thread = None
+        try:
+            monitor._join_update_worker(timeout=0.01)  # must not raise
+        finally:
+            monitor._update_thread = orig
+
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)

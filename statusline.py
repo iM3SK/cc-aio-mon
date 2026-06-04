@@ -273,7 +273,14 @@ def main():
     cols = _get_terminal_width(fallback=120)
     line = build_line(data, cols, brn=brn)
     if line:
-        print(line)
+        # Claude Code reads this line from the statusline subprocess's stdout.
+        # If it closed the pipe early (e.g. the event was superseded), print()
+        # raises BrokenPipeError — swallow it so the statusline never dies with
+        # an uncaught traceback in CC's logs. The monitor is still fed below.
+        try:
+            print(line)
+        except (BrokenPipeError, OSError):
+            pass
 
     # Feed data to TUI monitor
     write_shared_state(data)

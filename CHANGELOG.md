@@ -1,5 +1,101 @@
 # Changelog
 
+## v1.13.0 — 2026-06-04
+
+**Features:**
+- **Agents fan-out modal (`a`).** A live view of the subagents / Workflow agents
+  spawned by the watched session: active/total count, summed token usage, and a
+  per-agent list (id, tokens, last tool) sorted by recency, refreshed off-thread
+  while the modal is open. Press `f` to toggle an **active-only** filter that
+  hides idle agents (a non-destructive "clear board" — nothing on disk is
+  touched). Reads each agent's transcript under
+  `~/.claude/projects/<proj>/<session>/subagents/agent-*.jsonl` (lazy,
+  TTL-cached, containment-checked, with symlink/non-regular-leaf rejection and
+  file-count/size DoS caps).
+- **Scrollable detail modals.** Token stats, agents, legend, cost, pulse, update
+  and menu modals now scroll when they outgrow the terminal — mouse wheel
+  (alternate-scroll mode), arrows, `j`/`k`, `PgUp`/`PgDn`, `Home`/`End` — with a
+  pinned header (the title never scrolls away) and a scroll-position hint
+  (visible range + direction arrows). Replaces the old clip-from-bottom that
+  made content unreachable on short terminals.
+
+**Bug fixes (audit remediation):**
+- **Escape-sequence parser no longer leaks bytes.** A split/bursty escape
+  sequence is buffered across reads instead of surfacing its bytes as
+  modal-closing key presses; SS3 arrows (`ESC O A/B`) are mapped; SGR mouse
+  reports are dropped cleanly; and an X10 mouse report (`ESC [ M` + 3 coordinate
+  bytes) is now fully consumed instead of leaking its coordinates as keystrokes
+  (`monitor.py:_resolve_esc`).
+- **Period-scoped token stats exclude records with no parseable timestamp.** A
+  `ts==0` record could slip into the 7d/30d model totals even though the
+  per-day aggregation beside it already excluded it
+  (`monitor.py:_aggregate_transcript`).
+- **A corrupt/huge transcript timestamp no longer aborts aggregation.**
+  `datetime.fromtimestamp()` on an out-of-range epoch raises `OverflowError`
+  (not `OSError`) — it is now caught locally so one bad record skips only its
+  own day attribution instead of discarding the rest of the transcript.
+- **Burn/context rate is computed over the true time span.** `calc_rates()` now
+  orders history by timestamp before reading endpoints, so a wall-clock step
+  backwards (NTP adjustment between snapshots) can't silently skew the rate
+  (`shared.calc_rates`).
+- **Cost-window baseline ignores unplaceable entries.** `_baseline_delta()`
+  skips entries with a missing/invalid `t` rather than treating them as a
+  pre-cutoff baseline (`monitor.py:_baseline_delta`).
+- **Self-update integrity check survives Ctrl-C / SIGTERM.** Exit paths now join
+  an in-flight update worker for a bounded moment so its post-pull syntax check
+  finishes; the git pull is atomic and the join is time-capped, so quitting
+  stays prompt even if the pull hangs (`monitor.py:_join_update_worker`).
+- **Statusline survives a broken pipe.** If Claude Code closes the statusline
+  pipe early, `print()`'s `BrokenPipeError` is swallowed instead of crashing the
+  subprocess with a traceback (`statusline.py`).
+- **Short-terminal modal overflow.** `_window_buf` caps the pinned header so the
+  emitted header + window + indicator never exceeds the terminal height.
+
+**UI:**
+- The dashboard footer now hints the entry-point keys — `[m] menu` `[l] legend`
+  `[q] quit` — and the menu (`m`) gains a **Navigation** section listing the
+  scroll keys, so the controls are discoverable without opening the legend.
+- The session-status spinner moves to the **start** of the `Session Active` /
+  `Session Inactive` line (was mid-line) so it reads cleaner.
+- The agents modal shows **compact 4-letter tool codes** (e.g. `READ`, `BASH`,
+  `WFCH`; long `mcp__server__method` names collapse to the method's first four
+  letters) so each agent row stays short.
+
+**Quality / perf:**
+- **Cross-session cost aggregation moved off the render thread.** `TDY`/`WEK`
+  was recomputed inline in `render_frame` every 30 s — a glob + per-line JSONL
+  re-parse of every session's history that stalled the 50 ms loop, most visible
+  right after waking from stale (largest transcripts + active interaction). It
+  now runs in a `cost-scan` daemon (`_cost_refresh_async`); the dashboard reads
+  the last cached value and never blocks. Resolves the deferred P1-4.
+- **Token-stats scan moved off the render thread.** Re-opening the token-stats
+  modal past its 30 s cache TTL used to re-scan and parse every transcript
+  synchronously (~0.6 s freeze). Now only the first open per period scans
+  synchronously; later opens read `_usage_cache` and refresh in a `stats-scan`
+  daemon (`_stats_refresh_async`).
+- `truncate()` gains a fast path for plain ASCII lines that already fit (skips
+  the per-char width scan in the 20 Hz render hot loop).
+- The dashboard model badge uses `shared.badge_context_suffix()` instead of a
+  hardcoded `(1M context)` literal, so any context-window unit is compacted.
+- Session-picker ordering is extracted to `_picker_order()`, shared by
+  `render_picker` and the digit-selection in `main()` — removes the risk that
+  the two hand-synced sort+slice copies desync and `[3]` selects the wrong
+  session.
+- The render path resolves the subagents dir once per tick instead of three
+  times.
+
+**Architecture:**
+- **ADR-002 resolved (variant C).** The 3500-LOC tripwire on `monitor.py` first
+  fired with this batch. Rather than split an event-loop module across files
+  (higher risk; erodes the "5 stdlib files, no pip" product constraint), the
+  module keeps its single-file shape, gains an explicit section index in its
+  docstring, and the `test_debt016` discussion trigger is raised to 3800.
+
+**Tests:** 678 passing (+57) — escape parser (X10 mouse, split sequences),
+scroll window clamps, subagents scan, timestamp robustness, `calc_rates`
+ordering, bounded update-worker join, async cost-scan refresh,
+`atomic_write_text` cleanup, and `update.main()` flow-control exit codes.
+
 ## v1.12.6 — 2026-06-03
 
 **Bug fixes:**
