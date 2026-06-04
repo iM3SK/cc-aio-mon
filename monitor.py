@@ -10,6 +10,31 @@ Usage:
     python monitor.py --session ID        # specific session
     python monitor.py --list              # list active sessions
     python monitor.py --refresh 1000      # custom refresh interval (ms)
+
+Section map (ordered; jump via your editor outline or grep the `# ----` rules).
+This file is intentionally a single large module — see ADR-002 in
+PROJECTS/cc-aio-mon/ROZHODNUTIA.md for why the "5 runtime files" constraint is
+kept and the LOC tripwire (test_debt016) is set to a higher discussion limit
+rather than splitting an event-loop module across files:
+
+    1.  Transcript usage scanner   — scan_transcript_stats + aggregation
+    2.  Platform                   — keyboard input (poll_key, esc parser, term)
+    3.  ANSI / characters / format — colours, char_width, formatting helpers
+    4.  Bars & warnings            — mkbar, collect_warnings
+    5.  Cost aggregation & RLS     — cross-session cost, release check worker
+    6.  Layout & data loading      — sep, list_sessions, load_state/_history
+    7.  Spinners                   — session / RLS spinners
+    8.  Render — main dashboard    — render_frame (+ _window_buf scroll engine)
+    9.  Legend overlay             — render_legend
+    10. Cost breakdown modal       — render_cost_breakdown + pricing
+    11. Anthropic Pulse modal      — render_pulse_modal
+    12. Menu modal                 — render_menu
+    13. Update modal               — render_update_modal + apply worker
+    14. Token stats modal          — render_stats + lifetime/daily blocks
+    15. Agents modal               — render_agents + scan_subagents fan-out
+    16. Session picker             — render_picker (+ _picker_order SSoT)
+    17. Screen flush               — flush (synchronized-output frame writer)
+    18. Main                       — event loop, key handling, lifecycle
 """
 
 import argparse
@@ -40,6 +65,7 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     DATA_DIR, VERSION_RE, VERSION, SCHEMA_VERSION,
                     PY_FILES,  # noqa: F401 — pinned by TestPyFilesSingleSourceOfTruth (SSoT regression guard)
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
+                    badge_context_suffix,
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind,
                     rotate_crash_log, acquire_singleton_lock,
@@ -144,7 +170,11 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
                 ts_str = obj.get("timestamp", "")
                 ts = _parse_ts(ts_str)
 
-                if cutoff and ts > 0 and ts < cutoff:
+                # When a period cutoff is active, skip both out-of-window AND
+                # unplaceable (ts<=0) records, so the model totals match the
+                # daily_tokens / active_days aggregation below (which already
+                # requires ts>0). period="all" (cutoff=0) keeps every record.
+                if cutoff and (ts <= 0 or ts < cutoff):
                     continue
 
                 # Track session timestamps for duration calc
@@ -180,7 +210,14 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
                 models[model]["calls"] += 1
 
                 if ts > 0:
-                    day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    # A corrupt/huge ts raises OverflowError (not OSError, so
+                    # the outer guard wouldn't catch it) or OSError on Windows.
+                    # Skip just this record's day attribution rather than abort
+                    # the whole transcript's aggregation.
+                    try:
+                        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                    except (OverflowError, OSError, ValueError):
+                        continue
                     active_days.add(day)
                     daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
     except (OSError, UnicodeDecodeError):
@@ -478,11 +515,22 @@ else:
             _esc_buf[0] = ""
             return _NAV_SEQ.get(b[1:])
         if intro == "[":  # CSI: ends on a final byte 0x40-0x7e
+            second = b[2:3]
+            if second == "M":
+                # X10 mouse report: ESC [ M + exactly 3 raw coordinate bytes
+                # (each >= 0x20, so they never contain ESC). The 'M' is itself a
+                # CSI final byte, so without this we'd resolve at ESC[M and leak
+                # the 3 coordinate bytes as keystrokes. Buffer until all arrive,
+                # then drop the whole report.
+                if len(b) < 6:
+                    return None
+                _esc_buf[0] = ""
+                return None
             if "\x40" <= last <= "\x7e":
                 seq = b[1:]
                 _esc_buf[0] = ""
-                if seq[:1] in ("<", "M"):
-                    return None  # SGR / X10 mouse report — ignore cleanly
+                if second == "<":
+                    return None  # SGR mouse report (ESC [ < … M/m) — ignore cleanly
                 return _NAV_SEQ.get(seq)
             return None  # still accumulating CSI parameters
         _esc_buf[0] = ""
@@ -580,6 +628,14 @@ RESET_HALFWAY_PCT = 50.0
 
 def truncate(s, maxw):
     """Truncate string to maxw visible columns, preserving ANSI codes. CJK-aware."""
+    # Fast path: a plain ASCII string with no ANSI escapes and no wide/zero-
+    # width chars has visible width == len(s), so when it already fits there is
+    # nothing to do. Skips the per-char scan for the common short-line case in
+    # the 20Hz render hot path. isprintable() is False for ESC and every other
+    # C0 control, so any ANSI-coloured or control-bearing line falls through to
+    # the accurate scan below.
+    if len(s) <= maxw and s.isascii() and s.isprintable():
+        return s
     vis = 0
     i = 0
     truncated = False
@@ -813,8 +869,11 @@ def _baseline_delta(entries, cutoff_ts):
     final = 0.0
     first_in_window = None
     for e in entries:
+        t = _num(e.get("t"), 0)
+        if t <= 0:
+            continue  # unplaceable (missing/invalid t) — can't partition it
         cost = _num((e.get("cost") or {}).get("total_cost_usd"))
-        if _num(e.get("t"), 0) < cutoff_ts:
+        if t < cutoff_ts:
             baseline = cost
         else:
             if first_in_window is None:
@@ -867,14 +926,42 @@ def calc_cross_session_costs():
     return today_total, week_total
 
 
-def cached_cross_session_costs(ttl=30.0):
-    """Cached version — refreshes every ttl seconds."""
-    now = time.monotonic()
-    if now - _cost_cache["t"] < ttl:
-        return _cost_cache["today"], _cost_cache["week"]
+_cost_scan_thread = None
+_cost_scan_lock = threading.Lock()
+
+
+def _cost_scan_worker():
+    """Off-thread cross-session cost aggregation. Writes _cost_cache."""
     today, week = calc_cross_session_costs()
-    _cost_cache.update({"t": now, "today": today, "week": week})
-    return today, week
+    _cost_cache.update({"t": time.monotonic(), "today": today, "week": week})
+
+
+def _cost_refresh_async(ttl=30.0):
+    """Kick a background calc_cross_session_costs when the cache is stale and
+    none is in flight. The glob + per-line JSONL re-parse of every session's
+    history (up to HISTORY_AGGREGATE_MAX each) used to run inline in render_frame
+    every TTL — a ~tens-of-ms render-thread stall that was most visible right
+    after waking from stale (largest transcripts, active interaction). That was
+    the deferred P1-4, re-opened on user feedback. Mirrors _stats_refresh_async
+    / _subagents_refresh_async; render reads the last _cost_cache and never
+    blocks."""
+    global _cost_scan_thread
+    if time.monotonic() - _cost_cache["t"] < ttl:
+        return  # fresh enough — no scan needed
+    with _cost_scan_lock:
+        if _cost_scan_thread is not None and _cost_scan_thread.is_alive():
+            return
+        t = threading.Thread(target=_cost_scan_worker, name="cost-scan", daemon=True)
+        _cost_scan_thread = t
+        t.start()
+
+
+def cached_cross_session_costs(ttl=30.0):
+    """Non-blocking: kick an off-thread refresh when the TTL has expired, then
+    return the last cached (today, week). The aggregation runs in the cost-scan
+    daemon so the render thread never re-parses transcripts inline."""
+    _cost_refresh_async(ttl)
+    return _cost_cache["today"], _cost_cache["week"]
 
 
 # Session picker cache — main-thread only, mirrors _cost_cache contract.
@@ -1081,20 +1168,15 @@ _modal_scroll = 0  # vertical scroll offset for the active modal (clamped in _wi
 _MODAL_HEADER_LINES = 3  # sep + title bar + sep — every modal opens with these
 
 
-def _scroll_indicator(off, vis, total, width):
-    """One-line position bar: a proportional thumb whose LENGTH shows how much
-    of the content is visible and whose POSITION shows where in it we are."""
-    barw = max(6, min(20, width - 28))
-    max_off = max(1, total - vis)
-    thumb = max(1, min(barw, round(vis / total * barw)))
-    pos = round(off / max_off * (barw - thumb)) if total > vis else 0
-    pos = max(0, min(pos, barw - thumb))
-    bar = "·" * pos + "█" * thumb + "·" * (barw - pos - thumb)
+def _scroll_indicator(off, vis, total):
+    """One-line scroll hint at the bottom of a windowed modal: a direction arrow
+    (more above ↑ / below ↓), the visible range, and how to scroll. No
+    proportional bar — the plain hint reads cleaner."""
+    max_off = max(0, total - vis)
     up = "↑" if off > 0 else " "
     dn = "↓" if off < max_off else " "
-    label = f"{off + 1}-{off + vis}/{total}"
-    return (f"{C_DIM}{up}[{R}{C_CYN}{bar}{R}{C_DIM}]{dn}"
-            f" {label}  {C_DIM}↑↓/jk/PgUp-Dn{R}")
+    return (f"{C_DIM}{up}{dn} {off + 1}-{off + vis}/{total}"
+            f"   ↑↓/jk · PgUp/Dn · Home/End{R}")
 
 
 def _window_buf(buf, rows, header_n=_MODAL_HEADER_LINES):
@@ -1116,8 +1198,11 @@ def _window_buf(buf, rows, header_n=_MODAL_HEADER_LINES):
     if len(buf) <= rows:
         _modal_scroll = 0
         return buf
-    width = len(_ANSI_RE.sub("", buf[0])) if buf else 80
-    hn = max(0, min(header_n, len(buf) - 2))
+    # Cap pinned-header lines at rows-2 (reserve >=1 body + 1 indicator line) so
+    # the emitted head+window+indicator never exceeds the terminal height on a
+    # very short terminal — without this, a 3-line pinned header on rows<=4
+    # overflowed past the bottom.
+    hn = max(0, min(header_n, len(buf) - 2, rows - 2))
     head = buf[:hn]
     body = buf[hn:]
     visible = max(1, rows - hn - 1)  # reserve one line for the indicator
@@ -1125,7 +1210,7 @@ def _window_buf(buf, rows, header_n=_MODAL_HEADER_LINES):
     off = min(max(0, _modal_scroll), max_off)
     _modal_scroll = off  # persist the clamped value
     win = body[off:off + visible]
-    indicator = _scroll_indicator(off, len(win), len(body), width)
+    indicator = _scroll_indicator(off, len(win), len(body))
     buf[:] = head + win + [indicator]
     return buf
 
@@ -1171,7 +1256,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # -- Extract data (sanitize to prevent terminal escape injection) --
     # `or {}` pattern guards against explicit JSON `null` values (not just missing keys).
     m = data.get("model") or {}
-    model_str = _sanitize(m.get("display_name", "?")).replace("(1M context)", "(1M CTX)")
+    model_str = badge_context_suffix(_sanitize(m.get("display_name", "?")))
     sname = _sanitize(data.get("session_name", ""))
 
     cw = data.get("context_window") or {}
@@ -1221,9 +1306,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
                 _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
             except OSError:
                 pass
-        buf.append(f"{C_RED}{B}Session Inactive {spin_session()}{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
+        buf.append(f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
     else:
-        buf.append(f"{C_GRN}{B}Session Active {spin_session()}{R} {C_FG}{session_label}{R}")
+        buf.append(f"{C_GRN}{B}{spin_session()} Session Active{R} {C_FG}{session_label}{R}")
 
     buf.append(sep(SW))
 
@@ -1362,7 +1447,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
 
     # ── Footer ──
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}] menu{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}] menu   [{R}{C_WHT}l{R}{C_DIM}] legend   [{R}{C_WHT}q{R}{C_DIM}] quit{R}")
 
     _fit_buf_height(buf, rows, clip_tail=False)
     return buf
@@ -1378,7 +1463,28 @@ def render_legend(cols, rows):
     lg_pad = max(0, SW - 6)  # "LEGEND" = 6 chars
     buf.append(f"{BG_BAR}{C_WHT}{B}LEGEND{R}{BG_BAR}{' ' * lg_pad}{R}")
     buf.append(sep(SW))
+    # ── Hotkeys (most-used — kept at the top) ──
+    hp = max(0, SW - 7)
+    buf.append(f"{BG_BAR}{C_WHT}{B}HOTKEYS{R}{BG_BAR}{' ' * hp}{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R}   {C_DIM}Quit{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}]{R}   {C_DIM}Menu{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R}   {C_DIM}Refresh{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal{R} {C_DIM}PgUp/Dn Home/End{R}")
     # ── Dashboard metrics ──
+    buf.append(sep(SW))
+    dp = max(0, SW - 9)  # "DASHBOARD" = 9 chars
+    buf.append(f"{BG_BAR}{C_WHT}{B}DASHBOARD{R}{BG_BAR}{' ' * dp}{R}")
+    buf.append(sep(SW))
     buf.append(f"{C_GRN}APR{R} {C_DIM}API Ratio{R}")
     buf.append(f"{C_DIM} DUR  Duration - API  API Time{R}")
     buf.append(f"{C_GRN}CHR{R} {C_DIM}Cache Hit Rate{R}")
@@ -1396,24 +1502,6 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}LNS{R} {C_DIM}Lines Changed{R} {C_GRN}+{R}{C_DIM}added{R} {C_RED}-{R}{C_DIM}removed{R}")
     buf.append(f"{C_WHT}NOW{R} {C_DIM}Current Time{R} {C_WHT}UPD{R} {C_DIM}Last Update{R}")
     buf.append(f"{C_WHT}RLS{R} {C_DIM}Release Status{R}")
-    # ── Hotkeys ──
-    buf.append(sep(SW))
-    hp = max(0, SW - 7)
-    buf.append(f"{BG_BAR}{C_WHT}{B}HOTKEYS{R}{BG_BAR}{' ' * hp}{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R}   {C_DIM}Quit{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}]{R}   {C_DIM}Menu{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R}   {C_DIM}Refresh{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal{R} {C_DIM}PgUp/Dn Home/End{R}")
     # ── Token Stats ──
     buf.append(sep(SW))
     tp = max(0, SW - 11)
@@ -2100,6 +2188,11 @@ def render_menu(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
     buf.append(sep(SW))
+    np = max(0, SW - 10)  # "NAVIGATION" = 10 chars
+    buf.append(f"{BG_BAR}{C_WHT}{B}NAVIGATION{R}{BG_BAR}{' ' * np}{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll{R}  {C_DIM}[{R}{C_WHT}PgUp/Dn{R}{C_DIM}]{R} {C_DIM}Page{R}  {C_DIM}[{R}{C_WHT}Home/End{R}{C_DIM}]{R} {C_DIM}Jump{R}")
+    buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
     _window_buf(buf, rows)
@@ -2116,6 +2209,22 @@ _update_lock = threading.Lock()
 # would kill the daemon before its post-pull syntax check runs (M-cross-1).
 # Written and read only on the main thread; is_alive() is thread-safe.
 _update_thread = None
+# cleanup() joins an in-flight update worker for at most this long so signals
+# (SIGTERM / Ctrl-C) and KeyboardInterrupt — which bypass the `q`-gate — still
+# let the post-pull syntax check finish, while staying bounded so a hung pull
+# can never wedge the exit path.
+_UPDATE_JOIN_TIMEOUT = 2.0
+
+
+def _join_update_worker(timeout=_UPDATE_JOIN_TIMEOUT):
+    """Block up to ``timeout`` seconds for an in-flight self-update worker to
+    finish its (atomic pull +) post-pull syntax check. The git pull is atomic,
+    but killing the daemon mid-check would skip the integrity verification
+    (M-cross-1). Bounded, so any exit path — q, SIGTERM, Ctrl-C — stays prompt
+    even if the pull hangs on the network."""
+    t = _update_thread
+    if t is not None and t.is_alive():
+        t.join(timeout=timeout)
 
 # Update modal git-helper cache — 30s TTL, invalidated on remote_ver change.
 # Eliminates per-tick (50ms) synchronous git subprocess spam from render path
@@ -2477,9 +2586,6 @@ def _read_stats_cache():
 
 
 _HEATMAP_GLYPHS = " ▁▂▃▄▅▆▇█"  # 9 levels including blank for zero
-_LIFETIME_CORE_LINES = 7     # sep + title + sep + ses/msg + 1st/lss + heat-hdr + heat-row
-_LIFETIME_DAILY_LINES = 7    # sep + label + 5 days
-_STATS_FOOTER_LINES = 3      # sep + 2 footer lines
 
 
 def _append_lifetime_block(buf, rows, width):
@@ -2535,15 +2641,15 @@ def _append_lifetime_block(buf, rows, width):
         block.append(sep(width))
         block.append(f"{C_DIM}DAILY{R}")
         for d in items[:5]:
-                date_s = (d.get("date") or "")[5:]  # MM-DD
-                ses = int(_num(d.get("sessionCount", 0)))
-                msg = int(_num(d.get("messageCount", 0)))
-                tlc = int(_num(d.get("toolCallCount", 0)))
-                block.append(
-                    f"{date_s} {C_DIM}SES{R} {C_WHT}{ses:,}{R} "
-                    f"{C_DIM}MSG{R} {C_WHT}{msg:,}{R} "
-                    f"{C_DIM}TLC{R} {C_WHT}{tlc:,}{R}"
-                )
+            date_s = (d.get("date") or "")[5:]  # MM-DD
+            ses = int(_num(d.get("sessionCount", 0)))
+            msg = int(_num(d.get("messageCount", 0)))
+            tlc = int(_num(d.get("toolCallCount", 0)))
+            block.append(
+                f"{date_s} {C_DIM}SES{R} {C_WHT}{ses:,}{R} "
+                f"{C_DIM}MSG{R} {C_WHT}{msg:,}{R} "
+                f"{C_DIM}TLC{R} {C_WHT}{tlc:,}{R}"
+            )
 
     buf.extend(block)
 
@@ -2849,7 +2955,7 @@ _subagents_scan_thread = None
 _subagents_scan_lock = threading.Lock()
 
 
-def _subagents_refresh_async(transcript_path):
+def _subagents_refresh_async(transcript_path, d=None):
     """Kick a background scan when the cache is stale and none is in flight.
 
     Keeps the read+parse of up to 256 agent transcripts OFF the render thread so
@@ -2857,9 +2963,13 @@ def _subagents_refresh_async(transcript_path):
     the 20Hz loop for ~0.3s every TTL). The worker writes _subagents_cache;
     render_agents reads the last cached result without ever blocking. Mirrors
     the _rls_check_worker / pulse worker pattern.
+
+    ``d`` is the caller's already-resolved subagents dir; pass it to skip a
+    redundant per-tick lstat (render_agents resolves it for its own use).
     """
     global _subagents_scan_thread
-    d = _subagents_dir_for(transcript_path)
+    if d is None:
+        d = _subagents_dir_for(transcript_path)
     if d is None:
         return
     cached = _subagents_cache.get(str(d))
@@ -2875,6 +2985,32 @@ def _subagents_refresh_async(transcript_path):
         t.start()
 
 
+# Compact tool labels for the agents modal — keeps each per-agent line short and
+# consistent with the monitor's 3-4 letter uppercase codes (APR/CHR/CTX...).
+# Built-ins map to a curated code; anything else (incl. long mcp__server__method
+# names) falls back to the first 4 letters of its method, uppercased.
+_TOOL_ABBR = {
+    "Read": "READ", "Write": "WRIT", "Edit": "EDIT", "MultiEdit": "MEDT",
+    "NotebookEdit": "NBED", "Bash": "BASH", "BashOutput": "BOUT",
+    "KillShell": "KILL", "Glob": "GLOB", "Grep": "GREP", "Task": "TASK",
+    "Agent": "AGNT", "WebFetch": "WFCH", "WebSearch": "WSCH",
+    "TodoWrite": "TODO", "ExitPlanMode": "PLAN", "Skill": "SKIL",
+    "AskUserQuestion": "ASK", "SlashCommand": "SLSH",
+}
+
+
+def _tool_abbr(name):
+    """Short uppercase code for an agent's last tool. Known built-ins use a
+    curated label; an MCP tool (mcp__server__method) uses the first 4 letters of
+    its method; anything else its first 4 letters. None -> '--'."""
+    if not name:
+        return "--"
+    if name in _TOOL_ABBR:
+        return _TOOL_ABBR[name]
+    base = name.split("__")[-1] if name.startswith("mcp__") else name
+    return base[:4].upper() or "--"
+
+
 def render_agents(data, cols, rows, active_only=False):
     """Modal: live subagent / Workflow fan-out for the watched session.
 
@@ -2885,15 +3021,17 @@ def render_agents(data, cols, rows, active_only=False):
     buf = []
     buf.append(sep(SW))
     title = "AGENTS  fan-out" + ("  [active]" if active_only else "")
-    tp = max(0, SW - len(title))
-    buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
+    pad = max(0, SW - len(title))
+    buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * pad}{R}")
     buf.append(sep(SW))
 
-    tp = (data or {}).get("transcript_path")
-    d = _subagents_dir_for(tp)
+    tpath = (data or {}).get("transcript_path")
+    d = _subagents_dir_for(tpath)
     info = None
     if d is not None:
-        _subagents_refresh_async(tp)  # off-thread scan; render never blocks
+        # Pass the dir we already resolved so the refresh helper doesn't
+        # re-lstat it every render tick while the modal is open.
+        _subagents_refresh_async(tpath, d=d)  # off-thread scan; render never blocks
         cached = _subagents_cache.get(str(d))
         info = cached["data"] if cached else None
         if info is None:
@@ -2926,7 +3064,7 @@ def render_agents(data, cols, rows, active_only=False):
     # rows-8 cap + "+N more" is gone — the list is now scrollable instead).
     for a in shown:
         dot = f"{C_GRN}●{R}" if a["active"] else f"{C_DIM}○{R}"
-        tool = a["tool"] or "--"
+        tool = _tool_abbr(a["tool"])
         # Fixed-width columns so the token / tool columns line up regardless of
         # how wide each agent's formatted token count is (pad the plain text
         # before wrapping it in ANSI, or the escape bytes would skew alignment).
@@ -2948,6 +3086,15 @@ def render_agents(data, cols, rows, active_only=False):
 # ---------------------------------------------------------------------------
 # Session picker
 # ---------------------------------------------------------------------------
+def _picker_order(sessions):
+    """Single source of truth for picker ordering: active sessions first, then
+    stale, capped at 9 (the keyboard 1-9 limit). render_picker and main()'s
+    digit-selection MUST share this so position N on screen maps to the Nth
+    session a keypress selects — two hand-synced copies risked an index->sid
+    desync where [3] picked a different session than the one shown at slot 3."""
+    return sorted(sessions, key=lambda s: s["stale"])[:9]
+
+
 def render_picker(sessions, cols, rows):
     W = cols
     buf = []
@@ -2963,8 +3110,7 @@ def render_picker(sessions, cols, rows):
         buf.append(f"{C_WHT}{B}SESSIONS{R}")
         buf.append(sep(W))
         # Sort: active first, then stale. Limit to 9 (keyboard limit).
-        sorted_s = sorted(sessions, key=lambda s: s["stale"])
-        shown = sorted_s[:9]
+        shown = _picker_order(sessions)
         for i, s in enumerate(shown):
             tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
             nm = s["session_name"] or s.get("ai_title") or s["id"][:8]
@@ -3109,6 +3255,11 @@ def main():
     sys.stdout.flush()
 
     def cleanup(*_args):
+        # Give an in-flight self-update worker a bounded moment to finish its
+        # post-pull syntax check before teardown (M-cross-1). The q-gate covers
+        # interactive 'q'; this backstops signals and KeyboardInterrupt, which
+        # bypass it.
+        _join_update_worker()
         _restore_term()
         sys.stdout.write(SHOW_CUR + ALT_SCROLL_OFF + ALT_OFF)
         sys.stdout.flush()
@@ -3364,7 +3515,7 @@ def main():
                     time.sleep(tick)
                     continue
                 else:
-                    sorted_s = sorted(sessions, key=lambda s: s["stale"])[:9]
+                    sorted_s = _picker_order(sessions)
                     flush(render_picker(sessions, cols, rows), cols)
                     if k and k.isdigit():
                         idx = int(k) - 1

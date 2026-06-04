@@ -619,11 +619,16 @@ class TestCachedCrossSessionCosts(unittest.TestCase):
         self._orig_cache = _cost_cache.copy()
         monitor.DATA_DIR = pathlib.Path(self.tmpdir)
         _cost_cache.update({"t": 0, "today": 0.0, "week": 0.0})
+        monitor._cost_scan_thread = None
 
     def tearDown(self):
         import shutil, monitor
+        t = monitor._cost_scan_thread
+        if t is not None:
+            t.join(timeout=2.0)  # don't let a worker outlive the patched DATA_DIR
         monitor.DATA_DIR = self._orig
         _cost_cache.update(self._orig_cache)
+        monitor._cost_scan_thread = None
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_ttl_returns_cached(self):
@@ -633,12 +638,26 @@ class TestCachedCrossSessionCosts(unittest.TestCase):
         self.assertEqual(today, 42.0)
         self.assertEqual(week, 99.0)
 
-    def test_ttl_expired_refreshes(self):
+    def test_ttl_expired_kicks_async_refresh(self):
+        # Non-blocking: an expired TTL returns the STALE value immediately and
+        # refreshes off-thread (render never re-parses transcripts inline).
+        import monitor
         _cost_cache.update({"t": 0, "today": 42.0, "week": 99.0})
         today, week = cached_cross_session_costs(ttl=0)
-        # Empty dir → 0.0
-        self.assertEqual(today, 0.0)
-        self.assertEqual(week, 0.0)
+        self.assertEqual((today, week), (42.0, 99.0))  # stale value, not blocked
+        # Worker finishes and updates the cache; empty dir -> 0.0/0.0.
+        t = monitor._cost_scan_thread
+        self.assertIsNotNone(t)
+        t.join(timeout=2.0)
+        self.assertEqual((_cost_cache["today"], _cost_cache["week"]), (0.0, 0.0))
+
+    def test_worker_aggregates_into_cache(self):
+        # The worker itself computes and writes the cache (empty dir -> zeros).
+        import monitor
+        _cost_cache.update({"t": 0, "today": 1.0, "week": 2.0})
+        monitor._cost_scan_worker()
+        self.assertEqual((_cost_cache["today"], _cost_cache["week"]), (0.0, 0.0))
+        self.assertGreater(_cost_cache["t"], 0)
 
 
 # ---------------------------------------------------------------------------
@@ -3050,23 +3069,25 @@ class TestAuditRegressionV1105(unittest.TestCase):
     def test_debt016_monitor_loc_tripwire(self):
         """DEBT-016 / Audit P1-13: monitor.py is the single most likely
         place for the project to outgrow its "5 runtime files" constraint.
-        The 24.05.2026 audit set 3500 LOC as the discussion trigger: at or
-        above that line count, contributors must open an ADR for the
-        monitor.py size strategy (pseudo-namespace classes vs relaxing the
-        5-file constraint). See PROJECTS/cc-aio-mon/ROZHODNUTIA.md.
+        The 24.05.2026 audit set 3500 LOC as the discussion trigger; when it
+        first fired (03.06.2026, agents + scroll work), ADR-002 was resolved as
+        variant C — keep the single-module event loop (splitting flow control
+        across files is higher-risk and erodes the "5 stdlib files" product
+        constraint), add an explicit section index to the module docstring, and
+        raise this trigger to 3800. See PROJECTS/cc-aio-mon/ROZHODNUTIA.md.
 
         This is a *trigger*, not a hard ceiling — a failing test here means
-        "have the conversation", not "revert your work".
+        "have the conversation" (revisit ADR-002), not "revert your work".
         """
         import monitor
         src = pathlib.Path(monitor.__file__).read_text(encoding="utf-8")
         loc = src.count("\n") + (0 if src.endswith("\n") else 1)
-        # Trigger threshold per audit 24.05.2026
+        # Trigger threshold per ADR-002 variant C (raised from 3500, 03.06.2026)
         self.assertLess(
-            loc, 3500,
-            f"monitor.py is {loc} LOC, past the 3500-line audit trigger. "
-            f"Open an ADR (see PROJECTS/cc-aio-mon/ROZHODNUTIA.md) before "
-            f"adding more, OR raise this trigger after the ADR is filed."
+            loc, 3800,
+            f"monitor.py is {loc} LOC, past the 3800-line audit trigger. "
+            f"Re-open ADR-002 (see PROJECTS/cc-aio-mon/ROZHODNUTIA.md) before "
+            f"adding more, OR raise this trigger after the ADR is revisited."
         )
 
     def test_h1_render_loop_catches_attributeerror(self):
@@ -4260,6 +4281,18 @@ class TestPollKeyEscape(unittest.TestCase):
         # SGR mouse wheel report must be consumed, not leaked as keystrokes.
         self.assertIsNone(self._poll_with(list("\x1b[<64;1;1M")))
 
+    def test_x10_mouse_report_consumed_no_leak(self):
+        import monitor
+        if monitor.IS_WIN:
+            self.skipTest("Unix poll_key only")
+        # X10 mouse: ESC [ M + 3 coordinate bytes. The coords are chosen as 'A'
+        # (0x41), which is itself a CSI final byte — so without the X10-specific
+        # buffering the parser would resolve at ESC[M and leak the three 'A's as
+        # key presses. All six bytes must be consumed and yield no key.
+        monitor._esc_buf[0] = ""
+        self.assertIsNone(self._poll_with(list("\x1b[MAAA")))
+        self.assertEqual(monitor._esc_buf[0], "")
+
     def test_arrow_sequence_maps_to_nav_token(self):
         import monitor
         if monitor.IS_WIN:
@@ -4285,6 +4318,196 @@ class TestPollKeyEscape(unittest.TestCase):
                           side_effect=lambda *a, **k: ([sys.stdin], [], [])), \
              patch.object(sys.stdin, "read", side_effect=lambda n=1: "q"):
             self.assertEqual(monitor.poll_key(), "q")
+
+
+class TestAuditFixesV1130(unittest.TestCase):
+    """Behavioural coverage for the v1.13.0 audit-remediation batch: agents/
+    scroll inline findings (L2-L7) + audit #4 backlog (timestamp robustness,
+    error edge-cases, concurrency, perf, quality)."""
+
+    # ---- #4: truncate fast-path is equivalent to the per-char scan ----
+    def test_truncate_fast_path_plain_ascii_unchanged(self):
+        s = "a plain ascii status line"
+        self.assertEqual(monitor.truncate(s, 80), s)
+
+    def test_truncate_still_clips_when_over_width(self):
+        # Over-width still clips to 3 visible cols (a trailing reset may be
+        # appended to guard against colour bleed — strip ANSI to compare).
+        self.assertEqual(_ANSI_RE.sub("", monitor.truncate("abcdef", 3)), "abc")
+
+    def test_truncate_fast_path_bypassed_for_ansi(self):
+        # ANSI escapes make isprintable() False, so coloured lines take the
+        # accurate path and keep their escape bytes intact.
+        colored = f"{C_RED}hi{monitor.R}"
+        self.assertEqual(monitor.truncate(colored, 80), colored)
+
+    def test_truncate_control_char_does_not_crash(self):
+        # A tab is ASCII but not printable -> fast path is skipped; the accurate
+        # scan handles it without raising.
+        self.assertIsInstance(monitor.truncate("a\tb", 80), str)
+
+    # ---- agents modal: compact tool labels ----
+    def test_tool_abbr_builtin_and_mcp(self):
+        self.assertEqual(monitor._tool_abbr("Read"), "READ")
+        self.assertEqual(monitor._tool_abbr("Bash"), "BASH")
+        # Long MCP name compacts to the first 4 letters of its method.
+        self.assertEqual(
+            monitor._tool_abbr("mcp__google-ads__execute_gaql_query"), "EXEC")
+        # Unknown tool -> first 4 letters uppercased; None -> placeholder.
+        self.assertEqual(monitor._tool_abbr("CustomThing"), "CUST")
+        self.assertEqual(monitor._tool_abbr(None), "--")
+        # Every label stays short enough to keep the agent line compact.
+        for v in monitor._TOOL_ABBR.values():
+            self.assertLessEqual(len(v), 4)
+
+    # ---- #6: _picker_order is the single source of truth ----
+    def test_picker_order_active_first_and_capped(self):
+        sessions = [{"id": str(i), "stale": (i % 2 == 0)} for i in range(20)]
+        order = monitor._picker_order(sessions)
+        self.assertEqual(len(order), 9)            # keyboard 1-9 cap
+        self.assertFalse(order[0]["stale"])        # active (stale=False) first
+        # Matches a plain stable sort+slice — what render_picker and main share.
+        self.assertEqual([s["id"] for s in order],
+                         [s["id"] for s in sorted(sessions, key=lambda s: s["stale"])[:9]])
+
+    # ---- L7: _window_buf never overflows a short terminal ----
+    def test_window_buf_never_exceeds_rows(self):
+        monitor._modal_scroll = 0
+        big = [f"line{i}" for i in range(40)]
+        for rows in (2, 3, 4, 5, 10, 24):
+            out = monitor._window_buf(list(big), rows)
+            self.assertLessEqual(
+                len(out), rows,
+                f"_window_buf emitted {len(out)} lines for rows={rows}")
+        monitor._modal_scroll = 0
+
+    def test_window_buf_returns_short_buffer_unchanged(self):
+        monitor._modal_scroll = 0
+        buf = ["alpha", "beta", "gamma"]
+        self.assertEqual(monitor._window_buf(list(buf), 24), buf)
+
+    # ---- #1b: _baseline_delta skips unplaceable (t<=0) entries ----
+    def test_baseline_delta_ignores_zero_t_entries(self):
+        # An entry with t<=0 (missing/invalid) must not be treated as a
+        # pre-cutoff baseline. Window cutoff at t=100: baseline is the t=50
+        # entry ($1.00), final is the t=150 entry ($3.00) -> delta 2.00. A
+        # leading t=0/$9.99 garbage entry must not become the baseline.
+        entries = [
+            {"t": 0, "cost": {"total_cost_usd": 9.99}},     # unplaceable
+            {"t": 50, "cost": {"total_cost_usd": 1.00}},    # pre-cutoff baseline
+            {"t": 150, "cost": {"total_cost_usd": 3.00}},   # in-window final
+        ]
+        self.assertAlmostEqual(monitor._baseline_delta(entries, 100), 2.00)
+
+    # ---- #1a: period scope excludes records with no parseable timestamp ----
+    def test_period_scope_excludes_unplaceable_ts(self):
+        import json, tempfile, pathlib, shutil
+        tmp = tempfile.mkdtemp()
+        orig_dir, orig_cache = monitor._CLAUDE_DIR, monitor._usage_cache.copy()
+        monitor._CLAUDE_DIR = pathlib.Path(tmp)
+        monitor._usage_cache.clear()
+        try:
+            rec = json.dumps({  # no "timestamp" -> _parse_ts == 0
+                "type": "assistant",
+                "message": {"model": "claude-opus-4-6",
+                            "usage": {"input_tokens": 100, "output_tokens": 0}},
+            })
+            _write_session(tmp, "proj1", "sess1", [rec])
+            models_all, _ = scan_transcript_stats("all", ttl=0)
+            self.assertEqual(models_all["claude-opus-4-6"]["input"], 100)
+            monitor._usage_cache.clear()
+            models_7d, _ = scan_transcript_stats("7d", ttl=0)
+            self.assertNotIn("claude-opus-4-6", models_7d)  # excluded from window
+        finally:
+            monitor._CLAUDE_DIR = orig_dir
+            monitor._usage_cache.clear()
+            monitor._usage_cache.update(orig_cache)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- #2a: a corrupt huge timestamp doesn't abort the whole transcript ----
+    def test_overflowing_timestamp_does_not_abort_aggregation(self):
+        import json, tempfile, pathlib, shutil, datetime as _dt
+
+        class _BoomDT(_dt.datetime):
+            @classmethod
+            def fromtimestamp(cls, *a, **k):
+                raise OverflowError("simulated out-of-range timestamp")
+
+        tmp = tempfile.mkdtemp()
+        orig_dir, orig_cache = monitor._CLAUDE_DIR, monitor._usage_cache.copy()
+        monitor._CLAUDE_DIR = pathlib.Path(tmp)
+        monitor._usage_cache.clear()
+        recs = [json.dumps({
+            "type": "assistant", "timestamp": f"2026-04-12T10:0{i}:00Z",
+            "message": {"model": "claude-opus-4-6",
+                        "usage": {"input_tokens": 10, "output_tokens": 0}},
+        }) for i in range(2)]
+        _write_session(tmp, "proj1", "sess1", recs)
+        try:
+            with patch.object(monitor, "datetime", _BoomDT):
+                models, ov = scan_transcript_stats("all", ttl=0)
+            # Both records' tokens are aggregated (fromtimestamp raising must not
+            # abort the file); only the per-day attribution is skipped.
+            self.assertEqual(models["claude-opus-4-6"]["input"], 20)
+            self.assertEqual(models["claude-opus-4-6"]["calls"], 2)
+            self.assertEqual(len(ov["active_days"]), 0)
+        finally:
+            monitor._CLAUDE_DIR = orig_dir
+            monitor._usage_cache.clear()
+            monitor._usage_cache.update(orig_cache)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- #3: cleanup join is bounded and finishes a quick worker ----
+    def test_join_update_worker_waits_for_quick_worker(self):
+        import threading
+        done = threading.Event()
+
+        def quick():
+            time.sleep(0.02)
+            done.set()
+
+        t = threading.Thread(target=quick, daemon=True)
+        orig = monitor._update_thread
+        monitor._update_thread = t
+        try:
+            t.start()
+            monitor._join_update_worker(timeout=1.0)
+            self.assertTrue(done.is_set())   # joined to completion
+            self.assertFalse(t.is_alive())
+        finally:
+            t.join(timeout=1.0)
+            monitor._update_thread = orig
+
+    def test_join_update_worker_is_bounded_on_hung_worker(self):
+        import threading
+        stop = threading.Event()
+
+        def hang():
+            stop.wait(5.0)
+
+        t = threading.Thread(target=hang, daemon=True)
+        orig = monitor._update_thread
+        monitor._update_thread = t
+        try:
+            t.start()
+            t0 = time.monotonic()
+            monitor._join_update_worker(timeout=0.05)
+            elapsed = time.monotonic() - t0
+            # Returns promptly even though the worker is still running.
+            self.assertLess(elapsed, 1.0)
+            self.assertTrue(t.is_alive())
+        finally:
+            stop.set()
+            t.join(timeout=1.0)
+            monitor._update_thread = orig
+
+    def test_join_update_worker_noop_when_idle(self):
+        orig = monitor._update_thread
+        monitor._update_thread = None
+        try:
+            monitor._join_update_worker(timeout=0.01)  # must not raise
+        finally:
+            monitor._update_thread = orig
 
 
 if __name__ == "__main__":

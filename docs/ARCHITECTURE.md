@@ -66,11 +66,15 @@ by `build_line()` when the terminal is too narrow. On Windows, terminal width
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~2 900 LOC. Owns the event
-loop, all `render_*` functions, the session picker, and three daemon worker
+**monitor.py** — Entry point 2 (interactive TUI). ~3 600 LOC. Owns the event
+loop, all `render_*` functions, the session picker, and the daemon worker
 threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
-otherwise swallow any traceback silently.
+otherwise swallow any traceback silently. It is intentionally a single large
+module: per ADR-002 (variant C, resolved when the 3500-LOC tripwire first
+fired) the "five runtime files" constraint is kept rather than splitting an
+event-loop module across files; navigate via the section index in the module
+docstring. The `test_debt016` discussion trigger now sits at 3800 LOC.
 
 **pulse.py** — Daemon thread module. Fetches `status.claude.com/api/v2/summary.json`
 and probes `api.anthropic.com/v1/messages` (any HTTP response counts as liveness).
@@ -154,7 +158,8 @@ CHANGELOG entry.
 
 `monitor.main()` runs a single-threaded event loop (the `while True:` loop in
 `main()`). Render-thread work is kept off the 50 ms loop by daemon workers —
-two run periodically, the rest are spawned on demand:
+three run on a recurring cadence while the dashboard renders (`pulse-worker`,
+`rls-check`, `cost-scan`), the rest are spawned on demand:
 
 | Thread | Spawned by | Purpose |
 |---|---|---|
@@ -163,11 +168,13 @@ two run periodically, the rest are spawned on demand:
 | `update-apply` | `_apply_update_action()` | Run `git pull --ff-only` when user presses `a` |
 | `stats-scan` | `_stats_refresh_async()` | Re-scan `~/.claude/projects` transcripts for the token-stats modal (off-thread refresh; only the first open scans synchronously) |
 | `subagents-scan` | `_subagents_refresh_async()` | Scan the watched session's `subagents/` dir for the agents fan-out modal |
+| `cost-scan` | `_cost_refresh_async()` | Aggregate cross-session TDY/WEK cost (glob + per-line JSONL re-parse of every session's history) off the render thread; refreshes every 30 s |
 
 All are `daemon=True`: they are killed automatically when the main thread exits,
 so they can never block the terminal restore or hang the process on `q`. The
-two scan workers write a shared cache (`_usage_cache` / `_subagents_cache`) that
-the corresponding modal reads without ever blocking the render thread.
+scan workers write a shared cache (`_usage_cache` / `_subagents_cache` /
+`_cost_cache`) that the dashboard / modal reads without ever blocking the render
+thread.
 
 **Lock inventory:**
 
@@ -179,6 +186,10 @@ the corresponding modal reads without ever blocking the render thread.
   daemon writer and the main render thread.
 - `_update_lock` (`threading.Lock`) — protects `_update_result` (the shared
   state between `_apply_update_worker` and `render_update_modal`).
+- `_cost_scan_lock` / `_stats_scan_lock` / `_subagents_scan_lock`
+  (`threading.Lock`) — worker-spawn single-flight guards for the `cost-scan`,
+  `stats-scan` and `subagents-scan` daemons; each ensures only one of its scans
+  is in flight while the dashboard / modal reads the corresponding cache.
 - `_SINGLETON_LOCK_HANDLE` (module-level file handle) — not a `threading.Lock`;
   it is an OS-level file lock held via `msvcrt.locking` / `fcntl.flock` for
   the process lifetime. Python must not GC it, hence the module-level reference.
@@ -322,7 +333,7 @@ for `git rev-list --left-right --count` output in both files.
 | Change how burn rate or context rate is computed | `shared.calc_rates()` — reads last `HISTORY_RATE_SAMPLES` JSONL history entries |
 | Change hardcoded model pricing | `monitor._aggregate_session_cost()` and the per-model rate dicts above it |
 | Add a field to the IPC snapshot | `statusline.write_shared_state()` → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` (and extend `pulse.PulseSnapshot` if it is a pulse field) |
-| Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()`, end it with `_window_buf(buf, rows)` so it scrolls (pinned header + proportional scroll bar), and wire a key in the event loop |
+| Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()`, end it with `_window_buf(buf, rows)` so it scrolls (pinned header + scroll-position hint), and wire a key in the event loop |
 | Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` |
 | Change the Anthropic Pulse scoring weights | `pulse.py` constants `_W_INDICATOR`, `_W_INCIDENTS`, `_W_LATENCY` and `_INDICATOR_SCORE` / `_IMPACT_DEDUCT` dicts |
 | Add a new Python file to the project | Append the filename to `shared.PY_FILES` — this propagates to the post-update syntax check and the compile-check in the test suite |

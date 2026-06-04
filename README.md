@@ -16,9 +16,15 @@
 | **Files** | `statusline.py` (statusline renderer + IPC writer), `monitor.py` (TUI dashboard), `shared.py` (shared helpers + rate math), `update.py` (self-updater), `pulse.py` (Anthropic backend stability monitor) |
 | **IPC** | Atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/` — no sockets, no databases |
 
-<p align="center"><a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></a></p>
+<p align="center">
+  <a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></a><br>
+  <sub><b>Fullscreen dashboard</b> — context window, API ratio, cache hit rate, rate limits, burn rate and cross-session cost at a glance.</sub>
+</p>
 
-<p align="center"><a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — single-line ANSI status bar showing Model, CTX, 5HL, 7DL, CST, BRN segments with reset countdown"></a></p>
+<p align="center">
+  <a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — single-line ANSI status bar showing Model, CTX, 5HL, 7DL, CST, BRN segments with reset countdown"></a><br>
+  <sub><b>Statusline</b> — a single-line status bar (model, context, rate limits, cost, burn) for your Claude Code prompt.</sub>
+</p>
 
 ## Why CC AIO MON?
 
@@ -31,9 +37,15 @@
 
 Other monitors scrape log files or estimate costs from token counts. CC AIO MON reads the **official Claude Code statusline JSON** — the same data Claude Code uses internally. No estimation, no guessing, no stale logs.
 
-<p align="center"><a href="screenshots/cc-aio-mon-menu.png"><img src="screenshots/cc-aio-mon-menu.png" alt="CC AIO MON — menu modal with navigation hub, views, and system sections"></a></p>
+<p align="center">
+  <a href="screenshots/cc-aio-mon-menu.png"><img src="screenshots/cc-aio-mon-menu.png" alt="CC AIO MON — menu modal with navigation hub, views, and system sections"></a><br>
+  <sub><b>Menu</b> (<code>m</code>) — the navigation hub: views, system actions, and the scroll-key reference.</sub>
+</p>
 
-<p align="center"><a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay showing all metric codes, hotkeys, token stats, cost breakdown, and update sections"></a></p>
+<p align="center">
+  <a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay showing all metric codes, hotkeys, token stats, cost breakdown, and update sections"></a><br>
+  <sub><b>Legend</b> (<code>l</code>) — hotkeys first, then the full glossary of every metric code (scroll for more).</sub>
+</p>
 
 ## Setup
 
@@ -47,7 +59,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 
 ## Features
 
-- **Compact** — every critical metric fits on one dashboard screen, no tabs, no wasted space. Detail modals (token stats, agents, legend, cost) scroll — mouse wheel or keyboard — when they outgrow the terminal, with a pinned header and a proportional scroll bar.
+- **Compact** — every critical metric fits on one dashboard screen, no tabs, no wasted space. Detail modals (token stats, agents, legend, cost) scroll — mouse wheel or keyboard — when they outgrow the terminal, with a pinned header and a scroll-position hint.
 - **Stdlib only** — Python 3.8+. No pip install, no venv, no node_modules.
 - **Simple setup** — clone the repo, add one block to `~/.claude/settings.json`, launch the monitor. See [platform setup guide](#setup).
 - **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin. No log scraping, no file watching, no API polling. Real data, real-time.
@@ -59,21 +71,38 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (TOP) count all token types: input + output + cache_read + cache_write. Appended **LIFETIME** block reads `~/.claude/stats-cache.json` (Claude Code's pre-aggregated lifetime stats) and adds: total messages, tool-call count, first session date, longest session, a 24-hour heatmap (UTC), and the last 5 daily activity rows. Auto-collapses on small terminals.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
 <p align="center">
-<a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal with per-model breakdown using 3-char codes, includes cache tokens in bar"></a>
-<a href="screenshots/cc-aio-mon-cost.png"><img src="screenshots/cc-aio-mon-cost.png" alt="CC AIO MON — cost breakdown modal with LAST REQUEST + SESSION BREAKDOWN sections, cache savings, burn rate over time"></a>
-<a href="screenshots/cc-aio-mon-pulse.png"><img src="screenshots/cc-aio-mon-pulse.png" alt="CC AIO MON — Anthropic Pulse modal showing stability score, indicator, incidents, latency p50/p95, and component status"></a>
-<a href="screenshots/cc-aio-mon-update.png"><img src="screenshots/cc-aio-mon-update.png" alt="CC AIO MON — update manager showing current vs remote version, freshness timestamp, GitHub repo link, and apply option"></a>
+  <a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal with per-model breakdown using 3-char codes, includes cache tokens in bar"></a><br>
+  <sub><b>Token stats</b> (<code>t</code>) — per-model token breakdown, sessions, streaks and a lifetime-activity block.</sub>
+</p>
+
+<p align="center">
+  <a href="screenshots/cc-aio-mon-cost.png"><img src="screenshots/cc-aio-mon-cost.png" alt="CC AIO MON — cost breakdown modal with LAST REQUEST + SESSION BREAKDOWN sections, cache savings, burn rate over time"></a><br>
+  <sub><b>Cost breakdown</b> (<code>c</code>) — last-request and whole-session cost, cache savings, and burn rate over time.</sub>
+</p>
+
+<p align="center">
+  <a href="screenshots/cc-aio-mon-pulse.png"><img src="screenshots/cc-aio-mon-pulse.png" alt="CC AIO MON — Anthropic Pulse modal showing stability score, indicator, incidents, latency p50/p95, and component status"></a><br>
+  <sub><b>Anthropic Pulse</b> (<code>p</code>) — backend stability score, active incidents, and API latency.</sub>
+</p>
+
+<p align="center">
+  <a href="screenshots/cc-aio-mon-update.png"><img src="screenshots/cc-aio-mon-update.png" alt="CC AIO MON — update manager showing current vs remote version, freshness timestamp, GitHub repo link, and apply option"></a><br>
+  <sub><b>Update manager</b> (<code>u</code>) — current vs remote version, changelog preview, and one-key apply.</sub>
 </p>
 
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12), macOS (Python 3.12).
 - **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
-- **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. Dashboard label is capped at 24 characters; the picker shows the full title.
+- **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. On the dashboard, an auto-generated ai-title label is capped at 24 characters; the picker shows the full title.
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
 - **Auto-purge** — dead session files older than 48 hours are automatically cleaned up from the temp directory.
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
 - **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, agents fan-out, cost breakdown, Anthropic Pulse, update manager.
 - **Agents fan-out** — press `a` for a live view of the subagents / Workflow agents spawned by the watched session: active/total count, summed token usage, and a per-agent list (id, tokens, last tool) sorted by recency, refreshed while the modal is open. Press `f` to toggle an **active-only** filter that hides idle agents (a non-destructive "clear board" — nothing on disk is touched). Reads each agent's transcript under `~/.claude/projects/<proj>/<session>/subagents/agent-*.jsonl` (lazy, TTL-cached, containment-checked). When a Task or Workflow fans out across dozens of agents, you can see it happen in real time.
+<p align="center">
+  <a href="screenshots/cc-aio-mon-agents.png"><img src="screenshots/cc-aio-mon-agents.png" alt="CC AIO MON — agents fan-out modal showing active/total agent count, summed token usage, and a per-agent list with compact tool codes"></a><br>
+  <sub><b>Agents fan-out</b> (<code>a</code>) — live subagent / Workflow view: active/total, summed tokens, per-agent tokens and last tool.</sub>
+</p>
 - **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). Also shows cache savings percentage and burn rate over time bars. When non-zero, **WSR / WFR** rows surface server-side tool calls (`web_search_requests` / `web_fetch_requests` from `usage.server_tool_use`) and **TIE / T5M** rows split cache-creation tokens between the 1-hour and 5-minute ephemeral TTLs.
 - **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.claude.com` (indicator + incidents) + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku) — prefers `incidents[].components[]` array, falls back to regex on title. JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`) with Windows reserved-device-name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink/junction rejection on the temp data directory and `~/.claude/projects/`, transcript containment checks, and bounded reads for JSON, JSONL, transcripts, Pulse responses, and post-update source checks.
@@ -86,7 +115,10 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 
 The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes, `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
-<p align="center"><a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with compact display, 8-char UUID, model codes, live/stale tags, max 9 sessions"></a></p>
+<p align="center">
+  <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with compact display, 8-char UUID, model codes, live/stale tags, max 9 sessions"></a><br>
+  <sub><b>Session picker</b> (<code>s</code>) — pick among active Claude Code sessions; live / stale tags, model codes.</sub>
+</p>
 
 Press `r` to force a refresh (resets the stale timer if new data has arrived), or `s` to switch to a different session from the picker. If the session has truly ended and you want it out of the picker, delete its JSON/JSONL pair from `$TMPDIR/claude-aio-monitor/`.
 
@@ -261,7 +293,7 @@ export CLAUDE_STATUS_CRIT=90
 ## Known Limitations
 
 - **Delayed refresh after context compaction** — when Claude Code compacts the context window, the dashboard continues showing the pre-compaction CTX value until Claude Code emits the next statusline event (typically the next assistant message). This is a Claude Code protocol limitation — `statusline.py` is only invoked on assistant messages, permission mode changes, or vim mode toggles. There is no external API to trigger a refresh on demand.
-- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown uses per-model cached-input multipliers (0.1×) and cache-write multipliers (1.25×). Current priced families: Opus (4.1 / 4.5 / 4.6 / 4.7), Sonnet (4.5 / 4.6), Haiku (3.5 / 4.5).
+- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown stores explicit per-model per-1M-token rates; cache-read rates are roughly 0.1× and cache-write roughly 1.25× the model's input rate. Current priced families: Opus (4.1 / 4.5 / 4.6 / 4.7), Sonnet (4.5 / 4.6), Haiku (3.5 / 4.5).
 - **Local timezone everywhere** — all timestamps (header clock, daily aggregation, rollback tags like `pre-update-YYYYMMDD-HHMMSS`, pulse JSONL entries) use the machine's local timezone, not UTC. If you ship temp-dir logs to a maintainer in a different zone, clock labels will not line up — report the date plus your TZ offset when filing an issue.
 
 ## Troubleshooting

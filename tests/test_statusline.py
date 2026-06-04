@@ -584,6 +584,32 @@ class TestStatuslineMainE2E(unittest.TestCase):
         self.assertGreater(len(fake_stdout.getvalue()), 0,
                            "main() must print the statusline to stdout")
 
+    def test_main_survives_broken_pipe_on_print(self):
+        # #2b: Claude Code may close the read end of the statusline pipe early.
+        # print() then raises BrokenPipeError — main() must swallow it (no
+        # uncaught traceback) and still feed the monitor via write_shared_state.
+        import json as _json
+        import statusline as _sl
+
+        class _BrokenStdout:
+            def write(self, *_a):
+                raise BrokenPipeError("EPIPE")
+            def flush(self):
+                pass
+
+        sid = "brokenpipe"
+        payload = {"session_id": sid,
+                   "model": {"id": "claude-opus-4-5", "display_name": "Opus 4.5"},
+                   "cost": {"total_cost_usd": 0.5, "total_duration_ms": 1000,
+                            "total_lines_added": 0, "total_lines_removed": 0}}
+        fake_stdin = self._fake_stdin(_json.dumps(payload).encode("utf-8"))
+        with patch.object(_sl.sys, "stdin", fake_stdin), \
+             patch.object(_sl.sys, "stdout", _BrokenStdout()), \
+             patch.object(_sl, "ensure_utf8_stdout", lambda: None):
+            _sl.main()  # must not raise despite the broken pipe
+        self.assertTrue((self._base / f"{sid}.json").exists(),
+                        "snapshot must still be written after a broken pipe")
+
     def test_main_empty_stdin_returns_silently(self):
         import io
         import statusline as _sl

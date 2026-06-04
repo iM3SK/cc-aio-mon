@@ -52,7 +52,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.12.6"
+VERSION = "1.13.0"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -131,6 +131,14 @@ def strip_context_suffix(name: str) -> str:
 def compact_context_suffix(name: str) -> str:
     """Compact to trailing unit. 'Opus 4.7 (1M context)' -> 'Opus 4.7 1M'."""
     return _CONTEXT_SUFFIX_RE.sub(r" \1", name).strip()
+
+
+def badge_context_suffix(name: str) -> str:
+    """Compact the verbose context suffix to a parenthesised badge for the
+    dashboard header: 'Opus 4.7 (1M context)' -> 'Opus 4.7 (1M CTX)'.
+    Generalises the previously hardcoded '(1M context)' literal to any unit
+    (e.g. a future '(200k context)' becomes '(200k CTX)')."""
+    return _CONTEXT_SUFFIX_RE.sub(r" (\1 CTX)", name).strip()
 
 
 def _num(v, default=0):
@@ -534,6 +542,12 @@ def acquire_singleton_lock(lock_path) -> Optional[IO]:
 
 def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:
     """Return (brn $/min, ctr %/min) from history, or (None, None) if insufficient data."""
+    # Drop non-dict rows up front so one corrupt entry can't void the whole
+    # computation, then order by time: the first/last entries drive the rate, and
+    # callers' append-ordered JSONL can be scrambled by a wall-clock step backwards
+    # (NTP adjustment between two snapshots), which would otherwise compute the
+    # rate over the wrong interval.
+    hist = sorted((e for e in hist if isinstance(e, dict)), key=lambda e: _num(e.get("t"), 0))
     if len(hist) < 2:
         return None, None
     try:
