@@ -58,7 +58,7 @@
 When changing the JSON shape that `statusline.py` writes and `monitor.py` reads:
 
 1. Bump `shared.SCHEMA_VERSION` (currently `1`).
-2. Document the new field or structural change in [docs/FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
+2. Document the new field or structural change in [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md).
 3. Read new fields via `dict.get(key, default)` so older snapshots (without the field) remain loadable — forward-compat reads are required, not optional.
 
 ## Pull requests
