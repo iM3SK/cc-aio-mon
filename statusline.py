@@ -23,6 +23,7 @@ import time
 from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, atomic_write_text,
                     f_tok, f_cost, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
+                    lock_file_handle, unlock_file_handle,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
                     DATA_DIR, RESERVED_SIDS, SCHEMA_VERSION,
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
@@ -331,14 +332,24 @@ def write_shared_state(data: dict):
     if not snapshot_ok:
         return
 
-    # Append to history JSONL + trim if needed
+    # Append to history JSONL + trim if needed. Append and the read→rewrite
+    # trim are serialized via a sidecar lock file — without it, a concurrent
+    # statusline append landing between the trim's read and its atomic
+    # replace would be silently lost. Lock failure degrades to the old
+    # unlocked best-effort behaviour.
     hist = base / f"{sid}.jsonl"
     try:
-        with open(hist, "a", encoding="utf-8") as f:
-            f.write(entry + "\n")
-        # Trim based on actual file size
-        if hist.stat().st_size > MAX_FILE_SIZE:
-            _trim_history(hist)
+        with open(hist.with_name(hist.name + ".lock"), "a", encoding="utf-8") as lf:
+            locked = lock_file_handle(lf)
+            try:
+                with open(hist, "a", encoding="utf-8") as f:
+                    f.write(entry + "\n")
+                # Trim based on actual file size
+                if hist.stat().st_size > MAX_FILE_SIZE:
+                    _trim_history(hist)
+            finally:
+                if locked:
+                    unlock_file_handle(lf)
     except OSError:
         pass
 
@@ -349,7 +360,17 @@ def _trim_history(path: pathlib.Path):
         return
     lines = raw.decode("utf-8", errors="replace").splitlines()
     if len(lines) > HISTORY_TRIM_TO:
-        trimmed = "\n".join(lines[-HISTORY_TRIM_TO:]) + "\n"
+        kept = lines[-HISTORY_TRIM_TO:]
+        # FILE-IPC "Trim Policy": malformed JSON lines are dropped during the
+        # trim so a torn/corrupted line cannot survive rewrites forever.
+        valid = []
+        for ln in kept:
+            try:
+                json.loads(ln)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            valid.append(ln)
+        trimmed = "\n".join(valid) + "\n" if valid else ""
         atomic_write_text(path, trimmed)
 
 

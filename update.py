@@ -19,7 +19,7 @@ from typing import List, Optional, Tuple
 from shared import (
     VERSION_RE, MAX_FILE_SIZE, _sanitize, run_git as _shared_run_git,
     ensure_utf8_stdout, extract_changelog_entry, PY_FILES, safe_read,
-    check_syntax_after_pull, parse_ahead_behind,
+    check_syntax_after_pull, parse_ahead_behind, verify_origin_remote,
     DATA_DIR, ensure_data_dir, acquire_singleton_lock,
 )
 
@@ -29,18 +29,30 @@ if sys.platform == "win32":
 
 # ---------- ANSI colors (Windows VT enable) ----------
 def _enable_vt_on_windows():
-    if sys.platform == "win32":
-        try:
-            h = ctypes.windll.kernel32.GetStdHandle(-11)
-            ctypes.windll.kernel32.SetConsoleMode(h, 7)
-        except Exception:
-            pass
+    """Best-effort VT enable. Returns True when ANSI escapes are safe to emit."""
+    if sys.platform != "win32":
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        # HANDLE is pointer-sized — without restype, ctypes truncates the
+        # return value to c_int on 64-bit Windows and SetConsoleMode gets a
+        # corrupted handle (same class of fix as statusline's CONOUT$ branch).
+        kernel32.GetStdHandle.restype = ctypes.c_void_p
+        kernel32.SetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        h = kernel32.GetStdHandle(-11)
+        if h is None or h == ctypes.c_void_p(-1).value:
+            return False
+        return bool(kernel32.SetConsoleMode(h, 7))
+    except Exception:
+        return False
 
 
 def _init_terminal():
-    """Set up UTF-8 stdout and VT processing. Called from main() only."""
+    """Set up UTF-8 stdout and VT processing. Called from main() only.
+    Returns True when ANSI escapes are safe to emit (gates the color palette
+    so a failed VT enable doesn't spray raw escapes into the console)."""
     ensure_utf8_stdout()
-    _enable_vt_on_windows()
+    return _enable_vt_on_windows()
 
 
 # Colors are set lazily after _init_terminal() — defaults for import safety.
@@ -188,12 +200,12 @@ def apply_update():
             note(f"Lock file: {DATA_DIR / 'monitor.lock'} (inspect for PID)")
             sys.exit(1)
     else:
-        _lock_handle = None  # data dir unusable — proceed without lock (best effort)
-        print(
-            "Warning: lock dir unavailable; proceeding without singleton guard. "
-            "If monitor.py is running, file replacement may race.",
-            file=sys.stderr,
-        )
+        # FILE-IPC contract: --apply replaces the runtime files and must hold
+        # the singleton lock — racing a live monitor.py on file replacement
+        # can leave a half-updated install. Fail fast instead of best-effort.
+        err("Data directory unusable — cannot take the singleton lock.")
+        note(f"Data dir: {DATA_DIR} (check permissions/ownership)")
+        sys.exit(1)
 
     # Rollback point — created before pull so user can revert via `git reset --hard <tag>`
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -249,8 +261,8 @@ def main():
             signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         except (AttributeError, ValueError):
             pass
-    _init_terminal()
-    if sys.stdout.isatty():
+    vt_ok = _init_terminal()
+    if sys.stdout.isatty() and vt_ok:
         GRN = "\033[32m"; YEL = "\033[33m"; RED = "\033[31m"
         CYN = "\033[36m"; DIM = "\033[2m"; R = "\033[0m"
 
@@ -276,6 +288,15 @@ def main():
     check_clean()
 
     hdr("Remote check")
+    # SEC: pin self-update to the canonical repo — a rewritten origin must not
+    # be able to feed the updater foreign code.
+    remote_problem = verify_origin_remote(REPO_ROOT)
+    if remote_problem:
+        err(f"Origin check failed: {remote_problem}")
+        note("Self-update pulls only from the canonical repo. "
+             "Forks: set CC_AIO_MON_REMOTE to your remote URL.")
+        sys.exit(1)
+    ok("Origin: canonical remote verified")
     fetch_remote()
 
     hdr("Version comparison")
