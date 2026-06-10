@@ -44,6 +44,43 @@ If you add a new env var, add it here in the same commit.
 - **When to set:** offline use, restricted egress, CI environments,
   privacy-sensitive setups that should not emit any outbound HTTP.
 
+### `CC_AIO_MON_REMOTE`
+
+- **Type:** string (git remote URL, exact match)
+- **Default:** unset → `origin` must point at the canonical
+  `iM3SK/cc-aio-mon` GitHub repo (https / ssh forms accepted)
+- **Read by:** `shared.py` (`verify_origin_remote`), enforced by the
+  `update.py` CLI and the monitor's update modal before any `git pull`
+- **Effect:** overrides the pinned-origin check for self-update. Set it to
+  your fork's remote URL (must match `git remote get-url origin` exactly)
+  to keep self-update working on a fork.
+- **When to set:** forks only. Leave unset otherwise — the pin is a
+  supply-chain guard (a rewritten `origin` cannot feed the updater foreign
+  code).
+
+### `CC_MON_BRN_MAX`
+
+- **Type:** float ($/min)
+- **Default:** `10.0`
+- **Read by:** `monitor.py` (`_env_float` → `BRN_MAX`, `monitor.py:731`)
+- **Effect:** ceiling of the `BRN` progress bar and the `BRN OVER TIME`
+  axis. Raise if the bar pins (e.g. 24/7 Opus API workloads).
+
+### `CC_MON_CTR_MAX`
+
+- **Type:** float (%/min)
+- **Default:** `10.0`
+- **Read by:** `monitor.py` (`_env_float` → `CTR_MAX`, `monitor.py:732`)
+- **Effect:** ceiling of the `CTR` (context consumption rate) bar.
+
+### `CC_MON_CST_MAX`
+
+- **Type:** float ($)
+- **Default:** `1000.0`
+- **Read by:** `monitor.py` (`_env_float` → `CST_MAX`, `monitor.py:733`)
+- **Effect:** ceiling of the `CST` (session cost) bar. Raise for
+  long-running API sessions.
+
 ---
 
 ## Threshold variables (legacy `CLAUDE_*` prefix)
@@ -77,9 +114,9 @@ shells; new thresholds go under `CC_AIO_MON_*`.
 - **Default:** `3.0`
 - **Read by:** `monitor.py` (`_env_float` → `WARN_BRN`)
 - **Effect:** burn-rate threshold above which the `BRN` segment switches
-  to its alert color. The dashboard `BRN OVER TIME` axis is fixed at
-  `0–10 $/min` regardless of this value (axis is set by `BRN_MAX`, not
-  the warn threshold).
+  to its alert color. The dashboard `BRN OVER TIME` axis defaults to
+  `0–10 $/min` regardless of this value (axis is set by `BRN_MAX`,
+  overridable via `CC_MON_BRN_MAX`, not the warn threshold).
 
 ---
 

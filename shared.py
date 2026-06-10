@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import stat as _stat_mod
 import subprocess
 import sys
@@ -52,7 +53,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -357,15 +358,52 @@ def _git_env():
     return env
 
 
+# SEC (PATH injection): resolve git to an absolute path once at import. A bare
+# "git" argv is re-resolved at every call — on Windows CreateProcess even
+# consults the CWD, so a git.exe planted in the repo root would win. Pinning
+# the import-time resolution closes the call-time swap window.
+_GIT_BIN = shutil.which("git")
+
+
 def run_git(args: Iterable[str], cwd, timeout: float = 15) -> "subprocess.CompletedProcess[str]":
     """Safe git invocation with minimal env whitelist.
     Returns subprocess.CompletedProcess. Raises FileNotFoundError if git missing."""
+    if _GIT_BIN is None:
+        raise FileNotFoundError("git executable not found on PATH")
     return subprocess.run(
-        ["git"] + list(args),
+        [_GIT_BIN] + list(args),
         cwd=cwd, capture_output=True, text=True,
         encoding="utf-8", errors="replace",
         timeout=timeout, env=_git_env(),
     )
+
+
+# Canonical upstream for self-update. verify_origin_remote() pins `git pull`
+# to this repo so a rewritten origin can't feed the self-updater foreign code.
+# Forks: set CC_AIO_MON_REMOTE to your remote URL to keep self-update working.
+_CANONICAL_REMOTE_RE = re.compile(
+    r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+    r"iM3SK/cc-aio-mon(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def verify_origin_remote(repo_root) -> Optional[str]:
+    """Return None when `origin` points at the canonical repo (or matches the
+    CC_AIO_MON_REMOTE override exactly), else a short problem description."""
+    try:
+        r = run_git(["remote", "get-url", "origin"], cwd=repo_root)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "git unavailable (missing or timed out)"
+    if r.returncode != 0:
+        return "origin remote not configured"
+    url = r.stdout.strip()
+    override = os.environ.get("CC_AIO_MON_REMOTE", "").strip()
+    if override:
+        return None if url == override else f"origin is {url}, expected {override}"
+    if _CANONICAL_REMOTE_RE.match(url):
+        return None
+    return f"unexpected origin URL: {url}"
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +576,39 @@ def acquire_singleton_lock(lock_path) -> Optional[IO]:
     except OSError:
         pass
     return fh
+
+
+def lock_file_handle(fh) -> bool:
+    """Blocking advisory exclusive lock on an open file handle.
+
+    Used to serialize short critical sections across processes (e.g. the
+    statusline history append vs. its read→rewrite trim). Returns True when
+    the lock is held; False when the platform refused it — callers proceed
+    unlocked as best effort. Pair with unlock_file_handle().
+    """
+    try:
+        if sys.platform == "win32":
+            # Lock byte 0 — locking a range past EOF is allowed on Windows,
+            # so an empty sidecar lock file works without a placeholder byte.
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        return True
+    except OSError:
+        return False
+
+
+def unlock_file_handle(fh) -> None:
+    """Release a lock taken by lock_file_handle(). Best effort."""
+    try:
+        if sys.platform == "win32":
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:

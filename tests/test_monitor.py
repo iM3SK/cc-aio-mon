@@ -702,10 +702,54 @@ class TestParseTs(unittest.TestCase):
         self.assertEqual(_parse_ts("not-a-date"), 0)
 
     def test_consistent_across_formats(self):
-        """Z and no-tz should produce the same result (both naive local)."""
-        a = _parse_ts("2026-04-12T17:23:27")
-        b = _parse_ts("2026-04-12T17:23:27Z")
-        self.assertEqual(a, b)
+        """Z is UTC, explicit offsets are honoured; no-tz parses naive local."""
+        from datetime import datetime as _dt, timezone as _tz
+        naive = _parse_ts("2026-04-12T17:23:27")
+        zulu = _parse_ts("2026-04-12T17:23:27Z")
+        self.assertEqual(
+            zulu, _dt(2026, 4, 12, 17, 23, 27, tzinfo=_tz.utc).timestamp())
+        self.assertEqual(naive, _dt(2026, 4, 12, 17, 23, 27).timestamp())
+        # The same instant written with a +02:00 offset must equal the Z form
+        # (the pre-fix parser stripped the offset and drifted by the local
+        # UTC offset).
+        self.assertEqual(_parse_ts("2026-04-12T19:23:27+02:00"), zulu)
+
+
+# ---------------------------------------------------------------------------
+# _aggregate_transcript — malformed-record guards
+# ---------------------------------------------------------------------------
+class TestAggregateTranscriptGuards(unittest.TestCase):
+    """A record whose "message" is a *string* containing the substring
+    "usage" used to crash the stats aggregation with AttributeError
+    (str.get) — uncaught by the OSError/UnicodeDecodeError handler."""
+
+    def test_non_dict_message_and_usage_are_skipped(self):
+        import monitor
+        with tempfile.TemporaryDirectory() as td:
+            jl = pathlib.Path(td) / "sess.jsonl"
+            ts = "2026-04-12T17:23:27Z"
+            lines = [
+                json.dumps({"type": "assistant", "timestamp": ts,
+                            "message": "free text mentioning usage"}),
+                json.dumps({"type": "assistant", "timestamp": ts,
+                            "message": {"model": "m1", "usage": "not-a-dict"}}),
+                json.dumps({"type": "assistant", "timestamp": ts,
+                            "message": {"model": {"x": 1},
+                                        "usage": {"input_tokens": 1}}}),
+                json.dumps({"type": "assistant", "timestamp": ts,
+                            "message": {"model": "m1",
+                                        "usage": {"input_tokens": 5,
+                                                  "output_tokens": 7}}}),
+            ]
+            jl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            st = jl.lstat()
+            models, active_days, daily_tokens, session_times = {}, set(), {}, {}
+            monitor._aggregate_transcript(
+                jl, st, "sess", False, 0,
+                models, active_days, daily_tokens, session_times)
+            self.assertEqual(list(models), ["m1"])
+            self.assertEqual(models["m1"]["input"], 5)
+            self.assertEqual(models["m1"]["calls"], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -2135,6 +2179,14 @@ class TestLoadState(unittest.TestCase):
     def test_invalid_sid_returns_none(self):
         result = load_state("../evil")
         self.assertIsNone(result)
+
+    def test_reserved_sid_returns_none(self):
+        # FILE-IPC "Invalid SID Handling": reserved stems are internal files
+        # (release state / stats / pulse), never session snapshots.
+        for sid in ("rls", "stats", "pulse"):
+            p = pathlib.Path(self._tmp) / f"{sid}.json"
+            p.write_text(json.dumps({"session_id": sid}), encoding="utf-8")
+            self.assertIsNone(load_state(sid), sid)
 
     def test_missing_file_returns_none(self):
         result = load_state("nonExistentSid")
@@ -4395,7 +4447,7 @@ class TestAuditFixesV1130(unittest.TestCase):
     def test_window_buf_never_exceeds_rows(self):
         monitor._modal_scroll = 0
         big = [f"line{i}" for i in range(40)]
-        for rows in (2, 3, 4, 5, 10, 24):
+        for rows in (1, 2, 3, 4, 5, 10, 24):
             out = monitor._window_buf(list(big), rows)
             self.assertLessEqual(
                 len(out), rows,

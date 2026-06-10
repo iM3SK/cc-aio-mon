@@ -264,6 +264,72 @@ class TestRunGitEnvWhitelist(unittest.TestCase):
             run_git(["status"], cwd=".", timeout=5)
         self.assertEqual(m.call_args[1]["env"].get("GIT_TERMINAL_PROMPT"), "0")
 
+    def test_git_binary_resolved_to_absolute_path(self):
+        # SEC (PATH injection): argv[0] must be the import-time absolute
+        # resolution, not a bare "git" re-resolved per call (on Windows
+        # CreateProcess would even consult the CWD).
+        from unittest.mock import patch as _patch, MagicMock
+        if shared._GIT_BIN is None:
+            self.skipTest("git not installed")
+        with _patch("subprocess.run",
+                    return_value=MagicMock(returncode=0, stdout="", stderr="")) as m:
+            shared.run_git(["status"], cwd=".", timeout=5)
+        argv0 = m.call_args[0][0][0]
+        self.assertEqual(argv0, shared._GIT_BIN)
+        self.assertTrue(os.path.isabs(argv0))
+
+
+# ---------------------------------------------------------------------------
+# Security: self-update origin pinning
+# ---------------------------------------------------------------------------
+class TestVerifyOriginRemote(unittest.TestCase):
+
+    @staticmethod
+    def _cp(rc=0, out=""):
+        import subprocess as _sp
+        return _sp.CompletedProcess(["git"], rc, stdout=out, stderr="")
+
+    def test_canonical_urls_pass(self):
+        for url in ("https://github.com/iM3SK/cc-aio-mon",
+                    "https://github.com/iM3SK/cc-aio-mon.git",
+                    "git@github.com:iM3SK/cc-aio-mon.git",
+                    "ssh://git@github.com/iM3SK/cc-aio-mon"):
+            with patch("shared.run_git", return_value=self._cp(out=url + "\n")):
+                self.assertIsNone(shared.verify_origin_remote(pathlib.Path(".")), url)
+
+    def test_foreign_url_rejected(self):
+        with patch("shared.run_git",
+                   return_value=self._cp(out="https://github.com/evil/cc-aio-mon\n")):
+            problem = shared.verify_origin_remote(pathlib.Path("."))
+            self.assertIsNotNone(problem)
+            self.assertIn("evil", problem)
+
+    def test_missing_origin_rejected(self):
+        with patch("shared.run_git", return_value=self._cp(rc=2)):
+            self.assertIsNotNone(shared.verify_origin_remote(pathlib.Path(".")))
+
+    def test_override_env_exact_match(self):
+        url = "https://example.com/fork/cc-aio-mon.git"
+        with patch("shared.run_git", return_value=self._cp(out=url + "\n")):
+            with patch.dict(os.environ, {"CC_AIO_MON_REMOTE": url}):
+                self.assertIsNone(shared.verify_origin_remote(pathlib.Path(".")))
+            with patch.dict(os.environ,
+                            {"CC_AIO_MON_REMOTE": "https://example.com/other.git"}):
+                self.assertIsNotNone(shared.verify_origin_remote(pathlib.Path(".")))
+
+
+# ---------------------------------------------------------------------------
+# lock_file_handle / unlock_file_handle (statusline history append/trim lock)
+# ---------------------------------------------------------------------------
+class TestLockFileHandle(unittest.TestCase):
+
+    def test_lock_roundtrip(self):
+        with tempfile.TemporaryDirectory() as td:
+            lockf = pathlib.Path(td) / "x.jsonl.lock"
+            with open(lockf, "a", encoding="utf-8") as fh:
+                self.assertTrue(shared.lock_file_handle(fh))
+                shared.unlock_file_handle(fh)  # must not raise
+
 
 # ---------------------------------------------------------------------------
 # Security: pre-push hook scans new branch tips
@@ -661,10 +727,14 @@ class TestEnvPct(unittest.TestCase):
             self.assertEqual(shared._env_pct("CLAUDE_STATUS_TESTVAR", 50.0), 50.0)
 
     def test_missing_uses_default(self):
-        # patch.dict with clear=False + setdefault-style pop won't run reliably;
-        # set then remove so we know the env var is absent.
-        os.environ.pop("CLAUDE_STATUS_TESTVAR", None)
-        self.assertEqual(shared._env_pct("CLAUDE_STATUS_TESTVAR", 50.0), 50.0)
+        # Remove the var for the assertion, then restore whatever was there
+        # so test order can't leak state between tests.
+        prev = os.environ.pop("CLAUDE_STATUS_TESTVAR", None)
+        try:
+            self.assertEqual(shared._env_pct("CLAUDE_STATUS_TESTVAR", 50.0), 50.0)
+        finally:
+            if prev is not None:
+                os.environ["CLAUDE_STATUS_TESTVAR"] = prev
 
     def test_integer_string_parsed(self):
         with patch.dict(os.environ, {"CLAUDE_STATUS_TESTVAR": "80"}):
