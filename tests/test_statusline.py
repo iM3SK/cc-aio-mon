@@ -402,6 +402,25 @@ class TestTrimHistory(unittest.TestCase):
         self.assertEqual(len(result), HISTORY_TRIM_TO)
         p.unlink()
 
+    def test_trim_drops_malformed_lines(self):
+        # FILE-IPC "Trim Policy": lines that fail json.loads() are dropped
+        # during trim so a torn write cannot survive rewrites forever.
+        import json, tempfile, pathlib
+        from statusline import _trim_history, HISTORY_TRIM_TO
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl",
+                                          delete=False, encoding="utf-8")
+        lines = [f'{{"i": {i}}}' for i in range(HISTORY_TRIM_TO + 10)]
+        lines[-5] = '{"torn": '  # malformed line inside the kept tail
+        tmp.write("\n".join(lines) + "\n")
+        tmp.close()
+        p = pathlib.Path(tmp.name)
+        _trim_history(p)
+        result = p.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(result), HISTORY_TRIM_TO - 1)
+        for ln in result:
+            json.loads(ln)  # every surviving line is valid JSON
+        p.unlink()
+
 
 # ---------------------------------------------------------------------------
 # _load_history_for_rates

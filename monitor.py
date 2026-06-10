@@ -67,7 +67,7 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     badge_context_suffix,
                     extract_changelog_entry,
-                    check_syntax_after_pull, parse_ahead_behind,
+                    check_syntax_after_pull, parse_ahead_behind, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
@@ -85,7 +85,18 @@ def _parse_ts(ts_str):
     if not ts_str:
         return 0
     try:
-        # Strip timezone suffix for 3.8 compat: Z, +HH:MM, -HH:MM
+        # Timezone-aware parse. 3.8's fromisoformat() accepts ±HH:MM offsets
+        # but not "Z", so map Z → +00:00. Stripping the offset and parsing
+        # naive (pre-fix behaviour) interpreted the wall-clock as *local*
+        # time, shifting cutoff filters and daily aggregation by the local
+        # UTC offset.
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        pass
+    try:
+        # Fallback for shapes fromisoformat can't parse with an offset
+        # attached (e.g. non-colon offsets on 3.8): strip the suffix and
+        # parse naive — approximate, but better than dropping the record.
         clean = ts_str.replace("Z", "")
         # Remove +/-offset after the time portion (T required)
         t_pos = clean.find("T")
@@ -189,14 +200,19 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
 
                 if obj.get("type") != "assistant":
                     continue
+                # `"usage" in msg` on a *string* message is a substring test —
+                # msg.get() would then raise AttributeError, which the outer
+                # except (OSError, UnicodeDecodeError) does not catch.
                 msg = obj.get("message")
-                if not msg or "usage" not in msg:
+                if not isinstance(msg, dict) or "usage" not in msg:
                     continue
 
                 model = msg.get("model") or "unknown"
-                if model.startswith("<"):
+                if not isinstance(model, str) or model.startswith("<"):
                     continue  # skip synthetic/internal entries
                 u = msg["usage"]
+                if not isinstance(u, dict):
+                    continue
                 inp = int(_num(u.get("input_tokens", 0)))
                 out = int(_num(u.get("output_tokens", 0)))
                 cr = int(_num(u.get("cache_read_input_tokens", 0)))
@@ -454,10 +470,18 @@ if IS_WIN:
         except Exception:
             pass
         try:
+            # HANDLE is pointer-sized — the default ctypes restype (c_int)
+            # truncates/sign-extends it on 64-bit Windows and the console-mode
+            # calls then operate on a corrupted handle (same fix as
+            # statusline's CONOUT$ branch and update.py's VT enable).
+            kernel32.GetStdHandle.restype = ctypes.c_void_p
+            kernel32.GetConsoleMode.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+            kernel32.SetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
             handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
         except Exception:
             sys.exit(_WIN10_ANSI_REQUIRED_MSG)
-        if handle == -1 or handle == 0:
+        if handle is None or handle == 0 or handle == ctypes.c_void_p(-1).value:
             sys.exit(_WIN10_ANSI_REQUIRED_MSG)
         mode = ctypes.c_ulong(0)
         if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
@@ -1064,7 +1088,10 @@ def list_sessions():
 
 
 def load_state(sid):
-    if not _SID_RE.match(str(sid)):
+    # FILE-IPC "Invalid SID Handling": reserved stems (rls/stats/pulse) are
+    # internal files, never session snapshots — early-return like
+    # list_sessions / load_history already do.
+    if sid in RESERVED_SIDS or not _SID_RE.match(str(sid)):
         return None
     if not is_safe_dir(DATA_DIR):
         return None
@@ -1197,6 +1224,15 @@ def _window_buf(buf, rows, header_n=_MODAL_HEADER_LINES):
     rows = max(1, rows)
     if len(buf) <= rows:
         _modal_scroll = 0
+        return buf
+    if rows == 1:
+        # rows=1: no room for header or indicator — emit exactly one body
+        # line at the scroll offset (the general math below always reserves
+        # an indicator line, which would emit 2 lines into a 1-row terminal).
+        body = buf[header_n:] or buf
+        off = min(max(0, _modal_scroll), len(body) - 1)
+        _modal_scroll = off
+        buf[:] = body[off:off + 1]
         return buf
     # Cap pinned-header lines at rows-2 (reserve >=1 body + 1 indicator line) so
     # the emitted head+window+indicator never exceeds the terminal height on a
@@ -1555,9 +1591,13 @@ _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_wri
 # Single source of truth for model metadata — keyed by Anthropic model ID.
 # Each entry: {"name": "...", "code": ("XX", "V.v"), "pricing": {...} | None}
 # Pricing is per-1M-token USD (input / output / cache_read / cache_write).
-# Adding a new model = one entry here, not three. Used by _get_pricing (below),
-# _model_code / _model_label (token-stats modal section, ~line 2200).
+# Adding a new model = one entry here, not three. Used by _get_pricing (below)
+# and _model_code (token-stats modal section).
 _MODELS = {
+    "claude-fable-5": {"name": "Fable 5", "code": ("FA", "5"),
+                       "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
+    "claude-opus-4-8": {"name": "Opus 4.8", "code": ("OP", "4.8"),
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
     "claude-opus-4-7": {"name": "Opus 4.7", "code": ("OP", "4.7"),
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
     "claude-opus-4-6": {"name": "Opus 4.6", "code": ("OP", "4.6"),
@@ -1572,6 +1612,7 @@ _MODELS = {
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
     "claude-haiku-4-5-20251001": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
                                    "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
+    # Retired model — kept for correct pricing of historical transcripts.
     "claude-haiku-3-5": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
                          "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
     # Short-ID fallbacks (some transcript entries use abbreviated IDs). No pricing.
@@ -1680,7 +1721,7 @@ def _scan_ai_title(transcript_path):
             # S-P2-2 (CWE-367): TOCTOU mitigation — re-stat the *open*
             # file descriptor and require (st_ino, st_dev) to match the
             # pre-open stat. If they differ, the underlying inode was
-            # swapped between resolve() (line ~1250) and open(), which on
+            # swapped between resolve() (in _safe_transcript_path) and open(), which on
             # a shared filesystem could let another user point us at a
             # different file via fast unlink/link or symlink-flip races.
             # st_dev guard ensures the swap can't move us to a different
@@ -1759,10 +1800,10 @@ def _aggregate_session_cost(data):
         return None
 
     try:
-        size = path.stat().st_size
+        st = path.stat()
     except OSError:
         return None
-    if size > TRANSCRIPT_MAX_BYTES:
+    if st.st_size > TRANSCRIPT_MAX_BYTES:
         return None
 
     inp = out = cr = cw = 0.0
@@ -1771,6 +1812,15 @@ def _aggregate_session_cost(data):
     c1h = c5m = 0
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
+            # S-P2-2 (CWE-367): TOCTOU guard — same fstat identity check as
+            # _scan_ai_title: if the inode/device pair diverged between the
+            # stat above and this open, the file was swapped underneath us.
+            try:
+                fst = os.fstat(f.fileno())
+            except OSError:
+                return None
+            if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+                return None
             for line in f:
                 line = line.strip()
                 if not line or not line.startswith("{"):
@@ -1781,9 +1831,17 @@ def _aggregate_session_cost(data):
                     continue
                 if rec.get("type") != "assistant":
                     continue
+                # Same crash class as the stats-modal aggregator: a string
+                # "message" would turn the .get() calls into AttributeError.
                 msg = rec.get("message") or {}
+                if not isinstance(msg, dict):
+                    continue
                 u = msg.get("usage") or {}
+                if not isinstance(u, dict):
+                    u = {}
                 mid = msg.get("model") or ""
+                if not isinstance(mid, str):
+                    mid = ""
                 pricing = _get_pricing(mid)
                 # Per-record token deltas — name with cr_inc/cw_inc (not r/w)
                 # to avoid visual collision with module-level `R` ANSI reset.
@@ -2266,6 +2324,10 @@ def _update_checks():
             ahead = behind = 0
         if ahead > 0 and behind > 0:
             warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+    # SEC: pin self-update to the canonical repo (same guard as update.py CLI).
+    remote_problem = verify_origin_remote(_REPO_ROOT)
+    if remote_problem:
+        warns.append(f"Origin check: {remote_problem}")
     return warns
 
 
@@ -2358,8 +2420,17 @@ def _get_update_result():
 
 
 def _apply_update_worker():
-    """Background worker: git pull --ff-only + syntax check. Sets _update_result."""
+    """Background worker: re-run safety checks, then git pull --ff-only +
+    syntax check. Sets _update_result. The checks mirror the update.py CLI
+    guards (branch / clean tree / divergence / pinned origin) — the modal
+    render is advisory only, so the worker must enforce them itself."""
     try:
+        warns = _update_checks()
+        if warns:
+            _set_update_result(
+                "Update blocked: " + "; ".join(_sanitize(w) for w in warns)
+            )
+            return
         rc, out, err = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
         if rc == 0:
             # Drop modal git cache so post-pull state (no commits ahead, etc.)
@@ -2461,7 +2532,7 @@ def render_update_modal(cols, rows):
             buf.append(f"{C_DIM}press any key to close{R}")
         elif warns:
             buf.append(sep(SW))
-            buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (risky){R}")
+            buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (blocked by warnings above){R}")
             buf.append(f"{C_DIM}press any key to close{R}")
         else:
             buf.append(sep(SW))
@@ -2846,14 +2917,13 @@ def _subagents_dir_for(transcript_path):
     path = _safe_transcript_path(transcript_path)
     if path is None:
         return None
-    try:
-        d = path.parent / path.stem / "subagents"
-        st = d.lstat()
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-            return None
-        return d
-    except OSError:
+    d = path.parent / path.stem / "subagents"
+    # is_safe_dir = lstat + S_ISDIR + Windows reparse-point check. A plain
+    # S_ISLNK test misses NTFS junctions, which would let a junction point
+    # the subagent scan outside ~/.claude/projects.
+    if not is_safe_dir(d):
         return None
+    return d
 
 
 def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
@@ -2881,7 +2951,7 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
     try:
         files.extend(sorted(d.glob("agent-*.jsonl")))
         wf = d / "workflows"
-        if wf.is_dir() and not wf.is_symlink():
+        if is_safe_dir(wf):  # rejects symlinks AND Windows junctions
             files.extend(f for f in wf.glob("**/*.jsonl") if f.name != "journal.jsonl")
     except OSError:
         return None
@@ -3237,6 +3307,16 @@ def main():
                 f"Lock file: {DATA_DIR / 'monitor.lock'} (inspect for PID)\n"
                 "Close the other instance, or delete the lock file if it is stale."
             )
+    else:
+        # FILE-IPC contract: the interactive monitor must hold the singleton
+        # lock — running unlocked would race a second instance on snapshot
+        # polling and corrupt the crash log. No usable data dir also means no
+        # snapshots to render, so fail fast instead of degrading silently.
+        sys.exit(
+            f"Error: data directory unusable: {DATA_DIR}\n"
+            "Check permissions/ownership — the monitor needs it for IPC "
+            "snapshots and its singleton lock."
+        )
 
     # Terminal capability checks — must run before any ANSI output
     if not sys.stdout.isatty():
