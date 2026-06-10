@@ -428,14 +428,30 @@ class TestApplyUpdateAction(unittest.TestCase):
             os.environ["CC_AIO_MON_NO_UPDATE_CHECK"] = self._orig_env
 
     def test_zero_rc_with_valid_syntax_marks_complete(self):
-        # Test the synchronous worker directly (not the thread-spawning wrapper)
-        with patch("monitor._git_cmd", return_value=(0, "ok", "")):
-            with patch("pathlib.Path.exists", return_value=True):
-                with patch("pathlib.Path.read_text", return_value="# valid python\nx = 1\n"):
-                    _apply_update_worker()
+        # Test the synchronous worker directly (not the thread-spawning wrapper).
+        # _update_checks is patched clean — the worker now blocks on warnings.
+        with patch("monitor._update_checks", return_value=[]):
+            with patch("monitor._git_cmd", return_value=(0, "ok", "")):
+                with patch("pathlib.Path.exists", return_value=True):
+                    with patch("pathlib.Path.read_text", return_value="# valid python\nx = 1\n"):
+                        _apply_update_worker()
 
         import monitor
         self.assertIn("complete", monitor._update_result)
+
+    def test_warnings_block_apply(self):
+        # SEC: the worker re-runs the CLI-equivalent safety checks itself —
+        # any warning must block the pull entirely (the modal is advisory).
+        import monitor
+
+        def _no_git(args, timeout=15):
+            raise AssertionError(f"git must not run when checks warn: {args}")
+
+        with patch("monitor._update_checks",
+                   return_value=["Uncommitted changes in working tree"]):
+            with patch("monitor._git_cmd", side_effect=_no_git):
+                _apply_update_worker()
+        self.assertIn("Update blocked", monitor._update_result)
 
     def test_syntax_check_uses_safe_read(self):
         # After the shared.check_syntax_after_pull extraction, the loop +
@@ -450,17 +466,19 @@ class TestApplyUpdateAction(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo_root = pathlib.Path(td)
             (repo_root / "monitor.py").write_text("# stub")
-            with patch("monitor._git_cmd", return_value=(0, "ok", "")):
-                with patch.object(shared, "PY_FILES", ("monitor.py",)):
-                    with patch.object(monitor, "_REPO_ROOT", repo_root):
-                        with patch("shared.safe_read", return_value=None) as mock_safe_read:
-                            _apply_update_worker()
+            with patch("monitor._update_checks", return_value=[]):
+                with patch("monitor._git_cmd", return_value=(0, "ok", "")):
+                    with patch.object(shared, "PY_FILES", ("monitor.py",)):
+                        with patch.object(monitor, "_REPO_ROOT", repo_root):
+                            with patch("shared.safe_read", return_value=None) as mock_safe_read:
+                                _apply_update_worker()
             mock_safe_read.assert_called_once()
             self.assertIn("syntax errors", monitor._update_result)
 
     def test_nonzero_rc_marks_failed_with_stderr(self):
-        with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
-            _apply_update_worker()
+        with patch("monitor._update_checks", return_value=[]):
+            with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
+                _apply_update_worker()
 
         import monitor
         self.assertIn("failed", monitor._update_result)

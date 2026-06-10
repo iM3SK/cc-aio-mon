@@ -1,5 +1,81 @@
 # Changelog
 
+## v1.14.0 — 2026-06-10
+
+Cross-model review remediation: an independent multi-dimensional review of
+v1.13.0; every finding was verified against the code before fixing.
+
+**Features:**
+- **Model table: Fable 5 and Opus 4.8 pricing entries** (`monitor.py:_MODELS`)
+  — cost estimates for the newest models; the retired Haiku 3.5 entry stays
+  for correct pricing of historical transcripts.
+- **Gauge-ceiling env vars documented:** `CC_MON_BRN_MAX` / `CC_MON_CTR_MAX` /
+  `CC_MON_CST_MAX` (docs/CONFIGURATION.md); FILE-IPC contract now names the
+  model-ID field correctly (`model.id`, drives cost-estimate pricing).
+
+**Security:**
+- **Self-update origin pinning.** Both the `update.py` CLI and the TUI update
+  modal verify `git remote get-url origin` against the canonical
+  `iM3SK/cc-aio-mon` repo before any `git pull`
+  (`shared.verify_origin_remote`) — a rewritten origin can no longer feed the
+  self-updater foreign code. Forks: set the new **`CC_AIO_MON_REMOTE`** env
+  var to your remote URL (see docs/CONFIGURATION.md).
+- **TUI apply now enforces the CLI safety guards.** `_apply_update_worker`
+  re-runs the checks (branch, clean tree, divergence, pinned origin) and
+  blocks the pull on any warning; the modal's `apply (risky)` action became
+  `apply (blocked by warnings above)`. Previously the warning list was
+  advisory-only and `a` pulled anyway.
+- **git resolved to an absolute path at import** (`shared.run_git`). A bare
+  `"git"` argv was re-resolved at every call — on Windows CreateProcess even
+  consults the CWD, so a `git.exe` planted in the repo root could win.
+- **TOCTOU guard in `_aggregate_session_cost`** (CWE-367): fstat identity
+  check after open, same pattern `_scan_ai_title` already used.
+- **Junction-safe subagents scan.** `_subagents_dir_for` and the `workflows/`
+  subdir check now use `shared.is_safe_dir`, which rejects NTFS junctions —
+  the previous `S_ISLNK`/`is_symlink()` tests missed them, allowing a junction
+  to point the scan outside `~/.claude/projects`.
+
+**Bug fixes:**
+- **Malformed transcript records can no longer crash the monitor.** A JSONL
+  record whose `message` is a *string* containing the substring "usage" made
+  `msg.get()` raise `AttributeError` past the OSError-only handler, killing
+  the stats modal and the monitor. Both transcript aggregators now type-check
+  `message` / `usage` / `model` and skip bad records.
+- **Timestamps parse timezone-aware.** `_parse_ts` used to strip `Z`/offsets
+  and parse the wall-clock as *local* time, shifting cutoff filters and daily
+  aggregation by the local UTC offset. Now `Z` maps to `+00:00` and offsets
+  are honoured (naive fallback kept for unparseable shapes).
+- **History trim can no longer lose a concurrent append.** The statusline
+  history append and the read→rewrite trim are serialized via a
+  `<sid>.jsonl.lock` sidecar (new `shared.lock_file_handle` /
+  `unlock_file_handle`, fcntl/msvcrt); the trim also drops malformed JSON
+  lines, matching what the FILE-IPC contract already promised.
+- **Fail-fast when the data dir is unusable.** The interactive monitor and
+  `update.py --apply` exit with a clear error instead of silently proceeding
+  without the singleton lock (IPC-contract violation: racing instances /
+  file replacement against a live monitor).
+- **`load_state()` rejects reserved SIDs** (`rls`/`stats`/`pulse`) per the
+  FILE-IPC contract, matching `list_sessions` / `load_history`.
+- **Windows HANDLE truncation fixed in monitor and update.**
+  `GetStdHandle`/`GetConsoleMode`/`SetConsoleMode` get explicit
+  `restype`/`argtypes` (a pointer-sized HANDLE was truncated to c_int on
+  64-bit Windows); a failed VT enable in `update.py` now disables colors
+  instead of spraying raw escape sequences.
+- **`_window_buf` off-by-one at `rows=1`** — emitted 2 lines into a 1-row
+  terminal; now exactly one.
+
+**Docs & tests:**
+- FILE-IPC contract corrections: `pulse.jsonl` is persistence-only (the modal
+  renders from in-memory `get_pulse_snapshot()`, not the file); snapshots
+  tagged with a newer `_schema_version` *are* gated by `load_state()`; the
+  new history lock sidecar is documented.
+- `CC_AIO_MON_REMOTE` documented in docs/CONFIGURATION.md; new shared helpers
+  added to the CONTRIBUTING.md SSoT list.
+- **+10 tests (688 total):** aggregator type guards, origin pinning (4 cases),
+  blocked TUI apply, trim malformed-line drop, `rows=1` window, reserved-SID
+  snapshots, absolute git argv, lock round-trip; the `_env_pct` test no
+  longer leaks env state between tests.
+
 ## v1.13.0 — 2026-06-04
 
 **Features:**

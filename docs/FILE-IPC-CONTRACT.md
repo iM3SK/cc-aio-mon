@@ -187,9 +187,9 @@ def load_state(sid):
 |---|---|---|---|
 | `_schema_version` | int | statusline.write_shared_state() | Contract version (current: 1); added at write time |
 | `session_id` | str | Claude Code (stdin) | Session name / UUID passed by CC; validated & defaulted to "default" if invalid |
-| `model` | dict | CC | Model metadata: `{display_name, name, ...}` |
+| `model` | dict | CC | Model metadata: `{display_name, id, ...}` |
 | `model.display_name` | str | CC | Human-readable model name, e.g. "Opus 4.7 (1M context)" |
-| `model.name` | str | CC | Internal model ID, e.g. "claude-opus-4-1-20250805" |
+| `model.id` | str | CC | Internal model ID, e.g. "claude-opus-4-1-20250805"; drives cost-estimate pricing |
 | `context_window` | dict | CC | `{context_window_size: int, used_percentage: 0–100, ...}` |
 | `context_window.context_window_size` | int | CC | Total context tokens available (e.g., 200000) |
 | `context_window.used_percentage` | float | CC | 0–100; monitor displays as "CTX NN%" |
@@ -251,6 +251,14 @@ After successful snapshot write:
 2. Each line: `{**snapshot_dict, "_schema_version": SCHEMA_VERSION, "t": time.time()}`
 3. No fsync (relies on OS buffering + rename for atomicity)
 4. Check file size after write; if `> MAX_FILE_SIZE`, call `_trim_history()`
+
+**Concurrency**: the append and the read→rewrite trim are serialized via a
+sidecar lock file `<sid>.jsonl.lock` (`shared.lock_file_handle()` — fcntl on
+Unix, msvcrt on Windows). Without it, a concurrent statusline append landing
+between the trim's read and its atomic replace would be silently lost. Lock
+failure degrades to the unlocked best-effort behaviour. The sidecar is tiny,
+never cleaned up, and is not a session file (no `.json`/`.jsonl` glob matches
+it).
 
 **Trim Policy** (`statusline.py`):
 
@@ -317,7 +325,7 @@ Each line is a JSON object with these fields:
 
 **Example Line**:
 ```json
-{"session_id":"default","model":{"display_name":"Opus 4.7","name":"claude-opus-4-1-20250805"},"context_window":{"context_window_size":200000,"used_percentage":45.5},"cost":{"total_cost_usd":0.15},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1716379200},"seven_day":{"used_percentage":5,"resets_at":1716639600}},"_schema_version":1,"t":1716292800.123}
+{"session_id":"default","model":{"display_name":"Opus 4.7","id":"claude-opus-4-1-20250805"},"context_window":{"context_window_size":200000,"used_percentage":45.5},"cost":{"total_cost_usd":0.15},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1716379200},"seven_day":{"used_percentage":5,"resets_at":1716639600}},"_schema_version":1,"t":1716292800.123}
 ```
 
 ### File Size Management
@@ -340,7 +348,7 @@ Each line is a JSON object with these fields:
 
 ### Purpose
 
-Persistent log of Anthropic API stability samples (fetched every 30 sec). Used by monitor to display "API Status" section + trend graphs.
+Persistent log of Anthropic API stability samples (fetched every 30 sec). **Not a reader IPC channel**: the monitor renders the pulse modal from the in-process `pulse.get_pulse_snapshot()` (thread-safe in-memory read), never from this file. `pulse.jsonl` exists for persistence across restarts (startup seeding/cleanup) and for external tooling.
 
 ### Full Path
 
@@ -661,7 +669,7 @@ Multiple `--list` invocations can run concurrently with monitor or each other.
 Monitor reads via `dict.get("_schema_version")` → defaults to `None` if absent:
 - Pre-v1.10 snapshots (no `_schema_version` field) are tolerated
 - Unknown fields in snapshots are silently ignored (defensive dict.get)
-- Unknown future `_schema_version` values are not yet gated (future-proofing only)
+- Unknown future `_schema_version` values **are gated**: `monitor.load_state()` returns `None` for snapshots tagged with an int `_schema_version` greater than this build's `SCHEMA_VERSION` (UI shows "no data" until the monitor restarts post-update)
 
 ### Forward Compatibility (Future)
 
@@ -723,7 +731,7 @@ No deprecated fields yet. When a field is retired:
 |---|---|---|---|---|---|
 | `<sid>.json` | Session snapshot | statusline | monitor | Atomic replace | Until session expires (~1h idle in monitor) |
 | `<sid>.jsonl` | Session history | statusline | statusline (rates), monitor (trends) | Atomic trim; non-atomic append | Trimmed to 1000 lines @ 1 MB |
-| `pulse.jsonl` | API stability log | pulse.py (worker) | monitor (display), external tools | Atomic trim; non-atomic append | Trimmed to 500 lines @ 1 MB; startup cleanup drops >24h entries |
+| `pulse.jsonl` | API stability log (persistence only — monitor displays from in-memory `get_pulse_snapshot()`) | pulse.py (worker) | pulse.py (startup seed), external tools | Atomic trim; non-atomic append | Trimmed to 500 lines @ 1 MB; startup cleanup drops >24h entries |
 | `monitor-crash.log` | Crash traceback | monitor (excepthook) | User (post-mortem) | None (diagnostic only) | Rotated to `.log.1` on every crash (v1.12.2+); size guard still applies for non-crash callers |
 | `monitor.lock` | Singleton lock | monitor | monitor (check at startup) | Atomic fcntl/msvcrt | Process lifetime; auto-released on exit |
 

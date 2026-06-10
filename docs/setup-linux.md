@@ -65,7 +65,7 @@ alias mon='python3 ~/.cc-aio-mon/monitor.py'
 
 ## Requirements check (optional)
 
-[check-requirements.sh](check-requirements.sh) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
+[check-requirements.sh](../check-requirements.sh) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
 
 Run from the repo directory:
 

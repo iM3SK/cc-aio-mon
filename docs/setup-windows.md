@@ -67,7 +67,7 @@ function mon { py "$env:USERPROFILE\.cc-aio-mon\monitor.py" @args }
 
 ## Requirements check (optional)
 
-[check-requirements.ps1](check-requirements.ps1) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
+[check-requirements.ps1](../check-requirements.ps1) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
 
 Run from the repo directory:
 
