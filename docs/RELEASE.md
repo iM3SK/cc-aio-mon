@@ -68,12 +68,12 @@ Work through these in order before creating any tag.
 
 - [ ] **CHANGELOG entry drafted** (see Section 3 for exact format).
   Write the entry for the new version at the top of `CHANGELOG.md`, above the
-  current `## v1.12.4` block. Do not push yet.
+  current top-most `## vX.Y.Z` block. Do not push yet.
 
 - [ ] **VERSION constant bumped in `shared.py` only.**
   The constant lives at `shared.py`:
   ```python
-  VERSION = "1.12.4"
+  VERSION = "X.Y.Z"
   ```
   Change this string to the new version. Do not touch `monitor.py`,
   `pulse.py`, or `update.py` for the version — all three import from
@@ -86,6 +86,23 @@ Work through these in order before creating any tag.
 - [ ] **Re-run tests after the VERSION and CHANGELOG edits.**
   Confirm the count is still correct and no test imports a hard-coded version
   string that needs updating.
+
+- [ ] **Documentation in sync with the code.** Several docs hard-code values
+  that drift between releases — verify each against the code before tagging,
+  and when a code PR changes any of them, fix the doc in the **same PR** (this
+  is what left v1.15.0's docs stale until a follow-up audit caught it):
+  - **Version markers** → bump to the new `vX.Y.Z`: `docs/ARCHITECTURE.md`
+    header, `docs/FILE-IPC-CONTRACT.md` header **and** footer. (`shared.VERSION`
+    is the source of truth; these are mirrors that must be updated by hand.)
+  - **Test-count baseline** → match `py tests.py`: `CONTRIBUTING.md` and the
+    "Current baseline" line in this file (Section 2).
+  - **`monitor.py` LOC** → `wc -l monitor.py`: `docs/ARCHITECTURE.md` and
+    `CONTRIBUTING.md`.
+  - **Model table** → when `monitor._MODELS` gains or loses a *priced* family,
+    update the "Current priced families" line in `README.md` (and any model-ID
+    examples in `docs/FILE-IPC-CONTRACT.md`).
+  - **Avoid hard-coded line numbers** in docs (`monitor.py:NNN`) — they rot on
+    every edit; reference the function/symbol name instead.
 
 ---
 

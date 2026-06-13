@@ -62,7 +62,7 @@ If you add a new env var, add it here in the same commit.
 
 - **Type:** float ($/min)
 - **Default:** `10.0`
-- **Read by:** `monitor.py` (`_env_float` → `BRN_MAX`, `monitor.py:731`)
+- **Read by:** `monitor.py` (`_env_float` → `BRN_MAX`)
 - **Effect:** ceiling of the `BRN` progress bar and the `BRN OVER TIME`
   axis. Raise if the bar pins (e.g. 24/7 Opus API workloads).
 
@@ -70,14 +70,14 @@ If you add a new env var, add it here in the same commit.
 
 - **Type:** float (%/min)
 - **Default:** `10.0`
-- **Read by:** `monitor.py` (`_env_float` → `CTR_MAX`, `monitor.py:732`)
+- **Read by:** `monitor.py` (`_env_float` → `CTR_MAX`)
 - **Effect:** ceiling of the `CTR` (context consumption rate) bar.
 
 ### `CC_MON_CST_MAX`
 
 - **Type:** float ($)
 - **Default:** `1000.0`
-- **Read by:** `monitor.py` (`_env_float` → `CST_MAX`, `monitor.py:733`)
+- **Read by:** `monitor.py` (`_env_float` → `CST_MAX`)
 - **Effect:** ceiling of the `CST` (session cost) bar. Raise for
   long-running API sessions.
 
@@ -171,9 +171,9 @@ have a documented diagnostic anchor.
 - **Type:** flag (`"1"` enables UTF-8 mode)
 - **Default:** unset (Python uses the locale codec for stdin/stdout)
 - **Recommended:** `1` on non-UTF-8 Windows locales (SK, CZ, PL, …) when
-  invoking `statusline.py` or `monitor.py` directly. The shipped
-  `ccaiomon.bat` sets this; users on bare `python statusline.py` should
-  consider the wrapper instead.
+  invoking `statusline.py` or `monitor.py` directly. Set it in the shell
+  or launcher that runs the script (e.g. prefix the Claude Code statusline
+  command, or `set PYTHONUTF8=1` in your own wrapper).
 - **Why:** Claude Code emits its statusline JSON as UTF-8 bytes. Without
   `PYTHONUTF8=1` (or the byte-level `sys.stdin.buffer.read()` path added
   in NEW-002), Python on CP1250 / CP1252 Windows locales would
@@ -188,7 +188,8 @@ have a documented diagnostic anchor.
 - **Default:** unset
 - **Recommended:** `utf-8` on non-UTF-8 Windows locales — covers the
   cases `PYTHONUTF8=1` does not (notably some embedded Python launchers
-  and older 3.8 setups). The shipped `ccaiomon.bat` sets this too.
+  and older 3.8 setups). Set it alongside `PYTHONUTF8` in the same shell
+  or launcher.
 - **Effect:** forces `sys.stdout.encoding` to a known value;
   `shared.ensure_utf8_stdout()` is the runtime safety net if neither env
   var is set.
