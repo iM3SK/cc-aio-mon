@@ -1596,12 +1596,18 @@ _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_wri
 _MODELS = {
     "claude-fable-5": {"name": "Fable 5", "code": ("FA", "5"),
                        "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
+    # Project Glasswing only — same tier as Fable 5. Rare in transcripts.
+    "claude-mythos-5": {"name": "Mythos 5", "code": ("MY", "5"),
+                        "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     "claude-opus-4-8": {"name": "Opus 4.8", "code": ("OP", "4.8"),
-                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+                        "pricing_fast": {"input": 10.0, "output": 50.0,  "cache_read": 1.00, "cache_write": 12.50}},
     "claude-opus-4-7": {"name": "Opus 4.7", "code": ("OP", "4.7"),
-                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+                        "pricing_fast": {"input": 30.0, "output": 150.0, "cache_read": 3.00, "cache_write": 37.50}},
     "claude-opus-4-6": {"name": "Opus 4.6", "code": ("OP", "4.6"),
-                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+                        "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+                        "pricing_fast": {"input": 30.0, "output": 150.0, "cache_read": 3.00, "cache_write": 37.50}},
     "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"),
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
     "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"),
@@ -1610,10 +1616,11 @@ _MODELS = {
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
     "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"),
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
-    "claude-haiku-4-5-20251001": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
-                                   "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
-    # Retired model — kept for correct pricing of historical transcripts.
-    "claude-haiku-3-5": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
+    "claude-haiku-4-5": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
+                         "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
+    # Retired model — kept for correct pricing of historical transcripts. Real ID
+    # is claude-3-5-haiku-20241022; _model_base strips the -YYYYMMDD to this key.
+    "claude-3-5-haiku": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
                          "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
     # Short-ID fallbacks (some transcript entries use abbreviated IDs). No pricing.
     "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": None},
@@ -1622,12 +1629,24 @@ _MODELS = {
 }
 
 
-def _get_pricing(model_id):
-    """Get pricing for model, stripping suffixes like [1m]."""
-    base = model_id.split("[")[0] if model_id else ""
-    entry = _MODELS.get(base)
-    if entry and entry.get("pricing"):
-        return entry["pricing"]
+def _model_base(model_id):
+    """Normalize a model ID for _MODELS lookup: strip the [..] context-tier
+    suffix and a trailing -YYYYMMDD date snapshot. Statusline sends bare IDs
+    (claude-opus-4-8), transcripts send dated ones (claude-haiku-4-5-20251001) —
+    both must resolve to the same key."""
+    base = (model_id or "").split("[")[0]
+    return re.sub(r"-\d{8}$", "", base)
+
+
+def _get_pricing(model_id, speed=None):
+    """Get pricing for model. speed="fast" selects fast-mode rates when the
+    model defines them; otherwise standard. Falls back to _DEFAULT_PRICING."""
+    entry = _MODELS.get(_model_base(model_id))
+    if entry:
+        if speed == "fast" and entry.get("pricing_fast"):
+            return entry["pricing_fast"]
+        if entry.get("pricing"):
+            return entry["pricing"]
     return _DEFAULT_PRICING
 
 
@@ -1842,7 +1861,7 @@ def _aggregate_session_cost(data):
                 mid = msg.get("model") or ""
                 if not isinstance(mid, str):
                     mid = ""
-                pricing = _get_pricing(mid)
+                pricing = _get_pricing(mid, u.get("speed"))
                 # Per-record token deltas — name with cr_inc/cw_inc (not r/w)
                 # to avoid visual collision with module-level `R` ANSI reset.
                 in_inc = _num(u.get("input_tokens", 0))
@@ -1927,6 +1946,8 @@ def render_cost_breakdown(data, hist, cols, rows):
     cw = data.get("context_window") or {}
     usage = cw.get("current_usage") or {}
     model_id = (data.get("model") or {}).get("id", "")
+    # Statusline current_usage carries no `speed` field, so per-request CST cannot
+    # detect fast mode — standard rates only. Session breakdown (transcript) does.
     pricing = _get_pricing(model_id)
 
     # Token counts
@@ -1995,11 +2016,13 @@ def render_cost_breakdown(data, hist, cols, rows):
                 buf.append(f"{C_DIM}SUM ~{sum_cost} (~= CST {cst_cost}){R}")
 
     buf.append(sep(SW))
-    st_title = "SESSION TOTALS"
+    st_title = "CONTEXT WINDOW"
     st_pad = max(0, SW - len(st_title))
     buf.append(f"{BG_BAR}{C_WHT}{B}{st_title}{R}{BG_BAR}{' ' * st_pad}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}TIN:{R} {C_WHT}{f_tok(total_in)}{R} {C_DIM}TOT:{R} {C_WHT}{f_tok(total_out)}{R}")
+    # total_input_tokens/total_output_tokens are the CURRENT context window
+    # (Claude Code v2.1.132+), not cumulative session totals — label accordingly.
+    buf.append(f"{C_DIM}CIN:{R} {C_WHT}{f_tok(total_in)}{R} {C_DIM}COUT:{R} {C_WHT}{f_tok(total_out)}{R}")
     if dur > 0:
         cpm_val = usd / (dur / 60000)
         buf.append(f"{C_DIM}CPM:{R} {C_ORN}{cpm_val:.4f} $/min{R}")
@@ -2592,7 +2615,7 @@ def _model_code_from_label(label):
 
 
 def _model_label(model_id):
-    base = model_id.split("[")[0] if model_id else ""
+    base = _model_base(model_id)
     entry = _MODELS.get(base)
     if entry:
         return entry["name"]
@@ -2605,7 +2628,7 @@ def _model_label(model_id):
 
 def _model_code(model_id):
     """Return (short_code, version) tuple for stats display."""
-    base = model_id.split("[")[0] if model_id else ""
+    base = _model_base(model_id)
     entry = _MODELS.get(base)
     if entry:
         return entry["code"]

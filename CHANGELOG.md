@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.15.0 — 2026-06-14
+
+**Features — pricing coverage:**
+- **Fast-mode pricing.** Cost estimates now distinguish fast-mode requests: a
+  `pricing_fast` table adds Opus 4.8 ($10/$50), Opus 4.7 and Opus 4.6
+  ($30/$150 each). `_get_pricing(model_id, speed)` returns the fast rates when
+  `speed="fast"`; the transcript aggregator reads `usage.speed`
+  (`monitor.py:_aggregate_session_cost`). The per-request CST modal stays on
+  standard rates — the statusline `current_usage` payload carries no speed
+  field (documented inline).
+- **Claude Mythos 5 pricing entry** ($10/$50, code `MY 5`) added to the model
+  table (`monitor.py:_MODELS`).
+
+**Bug fixes — model-ID matching:**
+- **Bare and dated model IDs now map to one pricing key.** A new
+  `_model_base()` helper normalizes a model ID — strips the `[...]` suffix and a
+  trailing `-YYYYMMDD` date — so the statusline (bare) and transcript (dated)
+  forms resolve to the same `_MODELS` entry. Used by `_get_pricing`,
+  `_model_label` and `_model_code`; replaces three duplicated `split("[")[0]`
+  sites.
+- **Dead Haiku keys corrected.** Haiku 4.5 is re-keyed to the bare
+  `claude-haiku-4-5`, and the never-matching `claude-haiku-3-5` key becomes
+  `claude-3-5-haiku` (the real ID is `claude-3-5-haiku-20241022`) — historical
+  Haiku 3.5 transcripts now price correctly.
+
+**Behavior — cost modal labels:**
+- **Cost modal reflects the real context-window fields.** The header
+  `SESSION TOTALS` becomes `CONTEXT WINDOW` and the `TIN:`/`TOT:` labels become
+  `CIN:`/`COUT:`. As of Claude Code v2.1.132,
+  `context_window.total_input_tokens`/`total_output_tokens` report the *current
+  window*, not a cumulative session total.
+
+**Tests:** 710 passing (+22).
+
 ## v1.14.0 — 2026-06-10
 
 Cross-model review remediation: an independent multi-dimensional review of
