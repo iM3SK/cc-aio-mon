@@ -293,7 +293,7 @@ export CLAUDE_STATUS_CRIT=90
 ## Known Limitations
 
 - **Delayed refresh after context compaction** — when Claude Code compacts the context window, the dashboard continues showing the pre-compaction CTX value until Claude Code emits the next statusline event (typically the next assistant message). This is a Claude Code protocol limitation — `statusline.py` is only invoked on assistant messages, permission mode changes, or vim mode toggles. There is no external API to trigger a refresh on demand.
-- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown stores explicit per-model per-1M-token rates; cache-read rates are roughly 0.1× and cache-write roughly 1.25× the model's input rate. Current priced families: Opus (4.1 / 4.5 / 4.6 / 4.7), Sonnet (4.5 / 4.6), Haiku (3.5 / 4.5).
+- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown stores explicit per-model per-1M-token rates; cache-read rates are roughly 0.1× and cache-write roughly 1.25× the model's input rate. Current priced families: Opus (4.1 / 4.5 / 4.6 / 4.7 / 4.8), Sonnet (4.5 / 4.6), Haiku (3.5 / 4.5).
 - **Local timezone everywhere** — all timestamps (header clock, daily aggregation, rollback tags like `pre-update-YYYYMMDD-HHMMSS`, pulse JSONL entries) use the machine's local timezone, not UTC. If you ship temp-dir logs to a maintainer in a different zone, clock labels will not line up — report the date plus your TZ offset when filing an issue.
 
 ## Troubleshooting
