@@ -93,6 +93,7 @@ from monitor import (
     render_menu,
     render_cost_breakdown,
     _model_code,
+    _model_base,
     _cost_thirds,
     _get_pricing,
     _DEFAULT_PRICING,
@@ -859,6 +860,12 @@ class TestModelLabel(unittest.TestCase):
 
     def test_bracket_suffix_stripped(self):
         self.assertEqual(_model_label("claude-opus-4-7[1m]"), "Opus 4.7")
+
+    def test_retired_haiku_35_dated(self):
+        self.assertEqual(_model_label("claude-3-5-haiku-20241022"), "Haiku 3.5")
+
+    def test_mythos_5(self):
+        self.assertEqual(_model_label("claude-mythos-5"), "Mythos 5")
 
 
 class TestEnvFloat(unittest.TestCase):
@@ -2472,6 +2479,12 @@ class TestModelCode(unittest.TestCase):
     def test_dynamic_regex_haiku(self):
         self.assertEqual(_model_code("claude-haiku-5-1"), ("HA", "5.1"))
 
+    def test_retired_haiku_35_dated(self):
+        self.assertEqual(_model_code("claude-3-5-haiku-20241022"), ("HA", "3.5"))
+
+    def test_mythos_5(self):
+        self.assertEqual(_model_code("claude-mythos-5"), ("MY", "5"))
+
 
 # ---------------------------------------------------------------------------
 # TestCostThirds — _cost_thirds()
@@ -2573,6 +2586,82 @@ class TestGetPricing(unittest.TestCase):
     def test_empty_string_returns_default(self):
         p = _get_pricing("")
         self.assertEqual(p, _DEFAULT_PRICING)
+
+    # --- Haiku 4.5: bare alias (statusline) and dated (transcript) must match ---
+    def test_haiku_45_bare_alias(self):
+        p = _get_pricing("claude-haiku-4-5")
+        self.assertEqual((p["input"], p["output"]), (1.0, 5.0))
+
+    def test_haiku_45_dated_form(self):
+        p = _get_pricing("claude-haiku-4-5-20251001")
+        self.assertEqual((p["input"], p["output"]), (1.0, 5.0))
+
+    def test_haiku_45_with_1m_suffix(self):
+        p = _get_pricing("claude-haiku-4-5[1m]")
+        self.assertEqual((p["input"], p["output"]), (1.0, 5.0))
+
+    # --- Retired Haiku 3.5: real dated transcript ID must price correctly ---
+    def test_haiku_35_retired_dated_id(self):
+        p = _get_pricing("claude-3-5-haiku-20241022")
+        self.assertEqual((p["input"], p["output"]), (0.8, 4.0))
+
+    # --- Dated transcript forms of bare-keyed models hit the right tier ---
+    def test_opus_45_dated_form(self):
+        self.assertEqual(_get_pricing("claude-opus-4-5-20251101")["input"], 5.0)
+
+    def test_sonnet_45_dated_form(self):
+        self.assertEqual(_get_pricing("claude-sonnet-4-5-20250929")["input"], 3.0)
+
+    def test_mythos_5(self):
+        p = _get_pricing("claude-mythos-5")
+        self.assertEqual((p["input"], p["output"]), (10.0, 50.0))
+
+    # --- Fast mode (speed="fast") selects premium rates where defined ---
+    def test_fast_opus_48(self):
+        p = _get_pricing("claude-opus-4-8", "fast")
+        self.assertEqual((p["input"], p["output"]), (10.0, 50.0))
+
+    def test_fast_opus_47(self):
+        p = _get_pricing("claude-opus-4-7", "fast")
+        self.assertEqual((p["input"], p["output"]), (30.0, 150.0))
+
+    def test_fast_opus_46(self):
+        p = _get_pricing("claude-opus-4-6", "fast")
+        self.assertEqual((p["input"], p["output"]), (30.0, 150.0))
+
+    def test_standard_speed_uses_standard_rates(self):
+        p = _get_pricing("claude-opus-4-8", "standard")
+        self.assertEqual((p["input"], p["output"]), (5.0, 25.0))
+
+    def test_fast_on_model_without_fast_falls_back_to_standard(self):
+        # Sonnet 4.6 has no fast tier → standard rates even with speed="fast"
+        p = _get_pricing("claude-sonnet-4-6", "fast")
+        self.assertEqual((p["input"], p["output"]), (3.0, 15.0))
+
+    def test_fast_on_unknown_model_returns_default(self):
+        self.assertEqual(_get_pricing("claude-future-99", "fast"), _DEFAULT_PRICING)
+
+
+# ---------------------------------------------------------------------------
+# TestModelBase — _model_base() ID normalization
+# ---------------------------------------------------------------------------
+class TestModelBase(unittest.TestCase):
+
+    def test_strips_date_suffix(self):
+        self.assertEqual(_model_base("claude-haiku-4-5-20251001"), "claude-haiku-4-5")
+
+    def test_strips_bracket_suffix(self):
+        self.assertEqual(_model_base("claude-opus-4-8[1m]"), "claude-opus-4-8")
+
+    def test_strips_both(self):
+        self.assertEqual(_model_base("claude-opus-4-8-20251101[1m]"), "claude-opus-4-8")
+
+    def test_bare_id_unchanged(self):
+        self.assertEqual(_model_base("claude-opus-4-8"), "claude-opus-4-8")
+
+    def test_none_and_empty(self):
+        self.assertEqual(_model_base(None), "")
+        self.assertEqual(_model_base(""), "")
 
 
 # ---------------------------------------------------------------------------
@@ -3229,7 +3318,7 @@ class TestAuditRegressionV1105(unittest.TestCase):
         """DEBT-021: _MODELS dict consolidates name + code + pricing."""
         import monitor
         for known_id in ("claude-opus-4-7", "claude-sonnet-4-6",
-                         "claude-haiku-4-5-20251001", "claude-opus-4-1"):
+                         "claude-haiku-4-5", "claude-opus-4-1"):
             self.assertIn(known_id, monitor._MODELS, f"missing {known_id}")
             entry = monitor._MODELS[known_id]
             self.assertIn("name", entry)
