@@ -1,8 +1,8 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.12.4
+# FILE-IPC CONTRACT: cc-aio-mon v1.15.0
 
 **Status**: Active  
-**Version**: 1.12.4 (`SCHEMA_VERSION` = 1)  
-**Last Updated**: 2026-05-30  
+**Version**: 1.15.0 (`SCHEMA_VERSION` = 1)  
+**Last Updated**: 2026-06-14  
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
@@ -153,7 +153,7 @@ pathlib.Path(fd.name).replace(target)  # atomic on all platforms
 
 ```python
 def load_state(sid):
-    if not _SID_RE.match(str(sid)):
+    if sid in RESERVED_SIDS or not _SID_RE.match(str(sid)):
         return None
     if not is_safe_dir(DATA_DIR):
         return None
@@ -325,7 +325,7 @@ Each line is a JSON object with these fields:
 
 **Example Line**:
 ```json
-{"session_id":"default","model":{"display_name":"Opus 4.7","id":"claude-opus-4-1-20250805"},"context_window":{"context_window_size":200000,"used_percentage":45.5},"cost":{"total_cost_usd":0.15},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1716379200},"seven_day":{"used_percentage":5,"resets_at":1716639600}},"_schema_version":1,"t":1716292800.123}
+{"session_id":"default","model":{"display_name":"Opus 4.8","id":"claude-opus-4-8"},"context_window":{"context_window_size":200000,"used_percentage":45.5},"cost":{"total_cost_usd":0.15},"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1716379200},"seven_day":{"used_percentage":5,"resets_at":1716639600}},"_schema_version":1,"t":1716292800.123}
 ```
 
 ### File Size Management
@@ -794,6 +794,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.12.0  
-**Last Verified**: 2026-05-22  
+**Document Version**: 1.15.0  
+**Last Verified**: 2026-06-14  
 **Status**: Production

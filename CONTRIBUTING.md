@@ -25,7 +25,7 @@
    `unittest discover tests/`, so the `py tests.py` invocation continues to work
    unchanged.
 
-   **Baseline: 710 tests passing (3 skipped on platforms missing optional artifacts).**
+   **Baseline: 710 tests passing (skip count is platform-dependent — 0 on a standard Linux/macOS box with git; a few skip on Windows or where git/symlinks/SIGPIPE are unavailable).**
    Contributions must not reduce the passing count without explanation. If you add
    tests, put them in the file that matches the module under test — helpers go in
    `test_shared.py`, TUI logic in `test_monitor.py`, and so on.
@@ -45,7 +45,7 @@
 ## What to keep in sync
 
 - **`shared.py` is the single source of truth** — all cross-file constants, helpers, ANSI palette, and regexes live there. Never duplicate a literal or a helper in `statusline.py` / `monitor.py` / `pulse.py` / `update.py`. The shared surface includes:
-  - **Constants:** `VERSION`, `PY_FILES`, `_SID_RE`, `_ANSI_RE`, `MIN_EPOCH`, `MAX_FILE_SIZE`, `HISTORY_READ_MAX`, `HISTORY_AGGREGATE_MAX`, `TRANSCRIPT_MAX_BYTES`, `DATA_DIR`, `DATA_DIR_NAME`, `VERSION_RE`, `RESERVED_SIDS`, `WARN_PCT`, `CRIT_PCT`.
+  - **Constants:** `VERSION`, `PY_FILES`, `_SID_RE`, `_ANSI_RE`, `MIN_EPOCH`, `MAX_FILE_SIZE`, `HISTORY_READ_MAX`, `HISTORY_AGGREGATE_MAX`, `HISTORY_RATE_SAMPLES`, `TRANSCRIPT_MAX_BYTES`, `DATA_DIR`, `DATA_DIR_NAME`, `VERSION_RE`, `RESERVED_SIDS`, `WARN_PCT`, `CRIT_PCT`.
   - **ANSI palette:** `E`, `R`, `B`, `C_RED`, `C_GRN`, `C_YEL`, `C_ORN`, `C_CYN`, `C_WHT`, `C_DIM`.
   - **Helpers:** `_num`, `_sanitize`, `safe_read`, `f_tok`, `f_cost`, `f_dur`, `f_cd`, `char_width`, `is_safe_dir`, `ensure_data_dir`, `ensure_utf8_stdout`, `load_history`, `strip_context_suffix`, `compact_context_suffix`, `badge_context_suffix`, `extract_changelog_entry`, `run_git`, `verify_origin_remote`, `calc_rates`, `atomic_write_text`, `acquire_singleton_lock`, `lock_file_handle`, `unlock_file_handle`, `check_syntax_after_pull`, `parse_ahead_behind`, `rotate_crash_log`.
   - If you add a helper or constant that is (or could be) used by more than one module, put it in `shared.py` from day one.
@@ -74,7 +74,7 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 ## See also
 
 - [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~3 600 LOC)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~3 700 LOC)
 - [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md) — canonical field schema for the statusline→monitor JSON contract and JSONL history entries
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting

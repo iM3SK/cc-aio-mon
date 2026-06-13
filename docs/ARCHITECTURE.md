@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.12.4 · Target reader: new contributor who just cloned the repo.
+> v1.15.0 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -66,7 +66,7 @@ by `build_line()` when the terminal is too narrow. On Windows, terminal width
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~3 600 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~3 700 LOC. Owns the event
 loop, all `render_*` functions, the session picker, and the daemon worker
 threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
@@ -178,7 +178,7 @@ thread.
   release-check thread runs at a time (acquired non-blocking in
   `_maybe_trigger_rls_check`, released in `_rls_check_worker`).
 - `_rls_data_lock` (`threading.Lock`) — coherence for the three-field
-  `_rls_cache` dict (`version`, `status`, `checked_at`) accessed by both the
+  `_rls_cache` dict (`t`, `status`, `remote_ver`) accessed by both the
   daemon writer and the main render thread.
 - `_update_lock` (`threading.Lock`) — protects `_update_result` (the shared
   state between `_apply_update_worker` and `render_update_modal`).
@@ -327,7 +327,7 @@ for `git rev-list --left-right --count` output in both files.
 | Goal | Start here |
 |---|---|
 | Change how burn rate or context rate is computed | `shared.calc_rates()` — reads last `HISTORY_RATE_SAMPLES` JSONL history entries |
-| Change hardcoded model pricing | `monitor._aggregate_session_cost()` and the per-model rate dicts above it |
+| Change hardcoded model pricing | `monitor._MODELS` dict (single source of truth, keyed by model ID) read via `_get_pricing()`; `_model_base()` normalizes the ID (strips `[...]` + `-YYYYMMDD`), `_DEFAULT_PRICING` is the Sonnet-tier fallback, `speed="fast"` selects the `pricing_fast` rates |
 | Add a field to the IPC snapshot | `statusline.write_shared_state()` → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` (and extend `pulse.PulseSnapshot` if it is a pulse field) |
 | Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()`, end it with `_window_buf(buf, rows)` so it scrolls (pinned header + scroll-position hint), and wire a key in the event loop |
 | Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` |
