@@ -1,0 +1,69 @@
+name: Version Gate
+
+# Enforces the combined-PR release model (docs/RELEASE.md Section 5): a PR that
+# touches any runtime module (shared.PY_FILES) must bump shared.VERSION AND carry
+# a matching CHANGELOG entry, so a release-relevant change can never merge without
+# a version bump. Opt out of the gate for non-release runtime edits (pure refactor,
+# comment-only, internal cleanup) by applying the 'no-release' label to the PR.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  version-gate:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-release') }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0  # need base ref to diff against and read base shared.py
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Require version bump + CHANGELOG when runtime modules change
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          BASE="origin/$BASE_REF"
+
+          # Runtime modules: single source of truth in shared.PY_FILES.
+          PY_FILES="$(python -c 'import shared; print(" ".join(shared.PY_FILES))')"
+
+          CHANGED="$(git diff --name-only "$BASE"...HEAD)"
+          echo "Changed files:"; echo "$CHANGED"
+
+          runtime_changed=0
+          for f in $PY_FILES; do
+            if echo "$CHANGED" | grep -qx "$f"; then
+              runtime_changed=1
+              echo "Runtime module changed: $f"
+            fi
+          done
+
+          if [ "$runtime_changed" -eq 0 ]; then
+            echo "No runtime module (PY_FILES) changed — version bump not required."
+            exit 0
+          fi
+
+          # Version parsing reuses shared.VERSION_RE — same regex update.py reads with.
+          head_ver="$(python -c 'import shared; print(shared.VERSION)')"
+          base_ver="$(git show "$BASE:shared.py" | python -c 'import sys, shared; m = shared.VERSION_RE.search(sys.stdin.read()); print(m.group(1) if m else "")')"
+          echo "shared.VERSION: base=$base_ver head=$head_ver"
+
+          if [ "$head_ver" = "$base_ver" ]; then
+            echo "::error::Runtime modules changed but shared.VERSION is still $head_ver. Bump shared.VERSION + add a CHANGELOG entry, or apply the 'no-release' label for a non-release edit."
+            exit 1
+          fi
+
+          ver_re="${head_ver//./\\.}"
+          if ! grep -Eq "^## v${ver_re}([^0-9]|$)" CHANGELOG.md; then
+            echo "::error::shared.VERSION is $head_ver but CHANGELOG.md has no '## v$head_ver' entry."
+            exit 1
+          fi
+
+          echo "Version gate passed: $base_ver -> $head_ver with a matching CHANGELOG entry."

@@ -225,8 +225,21 @@ Order matters. The self-update mechanism is commit-driven, not tag-driven
 PR — direct `git push origin main` is rejected even for the maintainer. The tag
 is still applied to the merge commit *after* it is on `main`:
 
+**Release model — combined PR.** The version bump rides in the *same* PR as the
+change it releases (the bump + CHANGELOG entry are part of the feature/fix PR,
+not a separate `release/vX.Y.Z` PR). The `Version Gate` check
+(`.github/workflows/version-gate.yml`) enforces this: any PR that touches a
+runtime module in `shared.PY_FILES` must bump `shared.VERSION` and add a matching
+`## vX.Y.Z` CHANGELOG entry, or the check fails. For a non-release runtime edit
+(pure refactor, comment-only, internal cleanup) apply the **`no-release`** label
+to skip the gate. A standalone version-only release (no accompanying code change)
+is still fine — it just trivially satisfies the gate. The example below shows the
+standalone shape; for a combined PR, stage your code changes alongside
+`CHANGELOG.md` + `shared.py` in step 1.
+
 ```bash
-# 1. Create a release branch and commit (CHANGELOG + shared.py version bump only)
+# 1. Branch and commit. Combined PR: add your code changes too. Standalone
+#    release: CHANGELOG + shared.py version bump only (as shown).
 git switch -c release/vX.Y.Z
 git add CHANGELOG.md shared.py
 git commit -m "chore(release): bump to vX.Y.Z"
@@ -235,15 +248,20 @@ git commit -m "chore(release): bump to vX.Y.Z"
 git push origin release/vX.Y.Z
 gh pr create --fill --base main
 
-# 3. Once CI is green (incl. release-smoke), squash-merge — this lands the
-#    version bump on main HEAD, which is what self-update reads
+# 3. Once the PR checks are green, squash-merge — this lands the version bump
+#    on main HEAD, which is what self-update reads. NOTE: release-smoke is NOT a
+#    PR check; it triggers on push to main, so it can only run AFTER this merge.
 gh pr merge --squash --delete-branch
 
-# 4. Sync local main to the merge commit, THEN tag it (after it is on main)
+# 4. Wait for release-smoke to pass on main BEFORE tagging — it runs the real
+#    update.py --apply path from the previous tag (the pre-tag self-update gate).
+gh run watch "$(gh run list --workflow=release-smoke.yml --branch=main --limit=1 --json databaseId --jq '.[0].databaseId')"
+
+# 5. Sync local main to the merge commit, THEN tag it (after it is on main)
 git switch main && git pull --ff-only origin main
 git tag vX.Y.Z
 
-# 5. Push the tag separately
+# 6. Push the tag separately
 git push origin vX.Y.Z
 ```
 
@@ -298,9 +316,11 @@ There is no `next`/`beta` channel or canary cohort — a single maintainer does
 not have the operational capacity to soak releases, and adding channels would
 complicate the update path for a marginal cohort. The accepted mitigations are:
 
-- **Pre-merge gate:** `release-smoke.yml` runs the *real* `update.py --apply`
-  path from the previous tag on every push to `main`, so a broken self-update
-  is caught in CI before users pull it.
+- **Pre-tag gate (post-merge):** `release-smoke.yml` runs the *real*
+  `update.py --apply` path from the previous tag on every push to `main`. It
+  triggers *after* the merge (not on the PR), so the merge precedes the smoke
+  run; wait for it to pass before tagging (Section 5, step 4). A broken
+  self-update is caught here before the release is tagged and announced.
 - **Per-user rollback:** `update.py --apply` writes a `pre-update-*` tag before
   pulling (see Section 7), so any user can revert in one command.
 - **Fast-forward-only safety:** `git pull --ff-only` refuses to apply a
