@@ -87,6 +87,8 @@ from monitor import (
     render_picker,
     cached_cross_session_costs,
     _cost_cache,
+    cached_freshest_rate_limits,
+    _rl_fresh_cache,
     flush,
     SYNC_ON,
     SYNC_OFF,
@@ -670,6 +672,75 @@ class TestCachedCrossSessionCosts(unittest.TestCase):
         monitor._cost_scan_worker()
         self.assertEqual((_cost_cache["today"], _cost_cache["week"]), (0.0, 0.0))
         self.assertGreater(_cost_cache["t"], 0)
+
+
+# ---------------------------------------------------------------------------
+# cached_freshest_rate_limits
+# ---------------------------------------------------------------------------
+class TestCachedFreshestRateLimits(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, pathlib, monitor
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = monitor.DATA_DIR
+        self._orig_cache = _rl_fresh_cache.copy()
+        monitor.DATA_DIR = pathlib.Path(self.tmpdir)
+        _rl_fresh_cache.update({"t": -1.0, "rl": None})  # force a fresh scan
+
+    def tearDown(self):
+        import shutil, monitor
+        monitor.DATA_DIR = self._orig
+        _rl_fresh_cache.update(self._orig_cache)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write(self, sid, rl, age=0.0):
+        import pathlib, json, os, time
+        p = pathlib.Path(self.tmpdir) / f"{sid}.json"
+        payload = {"model": {"display_name": "X"}, "_schema_version": 1}
+        if rl is not None:
+            payload["rate_limits"] = rl
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        if age:
+            t = time.time() - age
+            os.utime(p, (t, t))
+        return p
+
+    def test_empty_dir_returns_fallback(self):
+        fb = {"five_hour": {"used_percentage": 7}}
+        self.assertIs(cached_freshest_rate_limits(fb), fb)
+
+    def test_picks_freshest_across_sessions(self):
+        # Older snapshot 66%, newer snapshot 53% — newest mtime must win even
+        # though we ask while "viewing" the older one.
+        sid_old = "11111111-1111-1111-1111-111111111111"
+        sid_new = "22222222-2222-2222-2222-222222222222"
+        self._write(sid_old, {"five_hour": {"used_percentage": 66}}, age=3600)
+        self._write(sid_new, {"five_hour": {"used_percentage": 53}}, age=0)
+        fb = {"five_hour": {"used_percentage": 66}}  # the stale viewed session
+        out = cached_freshest_rate_limits(fb)
+        self.assertEqual(out["five_hour"]["used_percentage"], 53)
+
+    def test_fallback_when_no_snapshot_has_limits(self):
+        # A fresher snapshot without rate_limits must not shadow the fallback.
+        self._write("33333333-3333-3333-3333-333333333333", None, age=0)
+        fb = {"five_hour": {"used_percentage": 12}}
+        self.assertIs(cached_freshest_rate_limits(fb), fb)
+
+    def test_ttl_returns_cached(self):
+        import time
+        cached = {"five_hour": {"used_percentage": 99}}
+        _rl_fresh_cache.update({"t": time.monotonic(), "rl": cached})
+        # Even with a snapshot on disk, a warm TTL returns the cached value.
+        self._write("44444444-4444-4444-4444-444444444444",
+                    {"five_hour": {"used_percentage": 5}}, age=0)
+        self.assertIs(cached_freshest_rate_limits({"x": 1}, ttl=60), cached)
+
+    def test_render_frame_override_beats_session_field(self):
+        data = _full_data()
+        data["rate_limits"] = {"five_hour": {"used_percentage": 11, "resets_at": 9999999999}}
+        ov = {"five_hour": {"used_percentage": 88, "resets_at": 9999999999}}
+        line = next(l for l in render_frame(data, [], 80, 40, rate_limits=ov) if "5HL" in l)
+        self.assertIn("88", _ANSI_RE.sub("", line))
 
 
 # ---------------------------------------------------------------------------
