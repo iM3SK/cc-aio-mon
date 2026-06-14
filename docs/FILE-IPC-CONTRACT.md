@@ -1,7 +1,7 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.15.0
+# FILE-IPC CONTRACT: cc-aio-mon v1.15.1
 
 **Status**: Active  
-**Version**: 1.15.0 (`SCHEMA_VERSION` = 1)  
+**Version**: 1.15.1 (`SCHEMA_VERSION` = 1)  
 **Last Updated**: 2026-06-14  
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
@@ -809,6 +809,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.15.0  
+**Document Version**: 1.15.1  
 **Last Verified**: 2026-06-14  
 **Status**: Production
