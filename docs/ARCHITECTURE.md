@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.15.0 · Target reader: new contributor who just cloned the repo.
+> v1.15.1 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -334,3 +334,4 @@ for `git rev-list --left-right --count` output in both files.
 | Change the Anthropic Pulse scoring weights | `pulse.py` constants `_W_INDICATOR`, `_W_INCIDENTS`, `_W_LATENCY` and `_INDICATOR_SCORE` / `_IMPACT_DEDUCT` dicts |
 | Add a new Python file to the project | Append the filename to `shared.PY_FILES` — this propagates to the post-update syntax check and the compile-check in the test suite |
 | Understand the session file format | `statusline.py:write_shared_state()` writes it; `monitor.py:load_state()` reads it; field names mirror the Claude Code statusline JSON protocol keys |
+| Change how 5HL/7DL rate limits are sourced | `monitor.cached_freshest_rate_limits()` — account-wide read from the freshest snapshot across all sessions (per-account limits, idle snapshots freeze); injected via `render_frame(..., rate_limits=...)`. See FILE-IPC-CONTRACT "Rate Limits — account-wide read semantics" |

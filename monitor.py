@@ -1112,6 +1112,58 @@ def load_state(sid):
     return d
 
 
+# Account-wide rate limits — 5H/7D are PER-ACCOUNT (shared across all sessions),
+# but each session's statusline writes them only into its own snapshot, and an
+# idle session's snapshot freezes (statusline runs only when Claude Code emits a
+# status-line event for that session). Reading rate_limits from the currently
+# viewed session therefore shows stale/pre-reset values whenever a *different*
+# session was more recently active. Source the freshest snapshot (max mtime)
+# across all sessions instead — the only account-correct value. CAVEAT: snapshots
+# carry no account identifier, so with multiple accounts running concurrently this
+# may surface another account's limits; single-account (the common case) is exact.
+_rl_fresh_cache = {"t": -1.0, "rl": None}  # main-thread only; mirrors cached_list_sessions
+
+
+def cached_freshest_rate_limits(fallback, ttl=2.0):
+    """Return rate_limits from the most recently written session snapshot.
+
+    Non-blocking main-thread scan with a TTL (the render loop runs at ~20Hz; a
+    per-frame DATA_DIR scan would be wasteful). Falls back to the caller's own
+    rate_limits when no snapshot carries usable limits (empty dir / tests)."""
+    now = time.monotonic()
+    if now - _rl_fresh_cache["t"] < ttl:
+        rl = _rl_fresh_cache["rl"]
+        return rl if rl is not None else fallback
+    best_mt = -1.0
+    best_rl = None
+    if DATA_DIR.exists() and is_safe_dir(DATA_DIR):
+        for f in DATA_DIR.glob("*.json"):
+            sid = f.stem
+            if sid in RESERVED_SIDS or not _SID_RE.match(sid):
+                continue
+            try:
+                mt = f.stat().st_mtime
+                if mt <= best_mt:
+                    continue  # cannot beat the current best — skip the read
+                raw = safe_read(f, MAX_FILE_SIZE)
+                if raw is None:
+                    continue
+                d = json.loads(raw.decode("utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(d, dict):
+                continue
+            sv = d.get("_schema_version")
+            if isinstance(sv, int) and sv > SCHEMA_VERSION:
+                continue  # newer-build snapshot — same gate as load_state
+            rl = d.get("rate_limits")
+            if rl:
+                best_mt = mt
+                best_rl = rl
+    _rl_fresh_cache.update({"t": now, "rl": best_rl})
+    return best_rl if best_rl is not None else fallback
+
+
 # Thin wrapper — shared.load_history is the single source of truth (v1.10.5+).
 # Passes monitor.DATA_DIR explicitly so tests that monkey-patch it still hit the fixture.
 def load_history(sid, n=HISTORY_RATE_SAMPLES):
@@ -1274,7 +1326,7 @@ def _apply_scroll(off, k, rows):
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
-def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False):
+def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False, rate_limits=None):
     if show_menu:
         return render_menu(cols, rows)
     if show_cost:
@@ -1298,7 +1350,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     ctx_total = _num(cw.get("context_window_size"), 0)
     usage = cw.get("current_usage") or {}
 
-    rl = data.get("rate_limits")
+    # rate_limits override: the event loop passes the account-wide freshest value
+    # (see cached_freshest_rate_limits). None → fall back to this session's own
+    # snapshot field, preserving behaviour for direct/test callers.
+    rl = rate_limits if rate_limits is not None else data.get("rate_limits")
     cost_d = data.get("cost") or {}
     usd = _num(cost_d.get("total_cost_usd"))
     dur = _num(cost_d.get("total_duration_ms"))
@@ -3670,6 +3725,7 @@ def main():
                         last_data, last_hist, cols, rows,
                         show_legend, show_menu, show_cost, stale=is_stale,
                         show_agents=show_agents, agents_active_only=agents_active_only,
+                        rate_limits=cached_freshest_rate_limits(last_data.get("rate_limits")),
                     ),
                     cols,
                 )

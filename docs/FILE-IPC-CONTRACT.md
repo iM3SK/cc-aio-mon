@@ -1,7 +1,7 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.15.0
+# FILE-IPC CONTRACT: cc-aio-mon v1.15.1
 
 **Status**: Active  
-**Version**: 1.15.0 (`SCHEMA_VERSION` = 1)  
+**Version**: 1.15.1 (`SCHEMA_VERSION` = 1)  
 **Last Updated**: 2026-06-14  
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
@@ -205,6 +205,21 @@ def load_state(sid):
 | `t` | **not present in snapshot** | — | History only; added when appending to JSONL |
 
 **Forward Compatibility**: Monitor uses `dict.get()` (never KeyError) so unknown fields in future snapshots are silently ignored.
+
+### Rate Limits — account-wide read semantics
+
+`rate_limits` (5H/7D) are **per-account** — shared across every session — yet each
+session's statusline writes them only into its own snapshot, and an idle session's
+snapshot freezes. Reading them from a single session would surface stale/pre-reset
+values whenever another session was more recently active. The monitor therefore
+sources `rate_limits` from the **freshest snapshot across all sessions** (max
+`mtime`), via `monitor.cached_freshest_rate_limits()` (main-thread, 2 s TTL, same
+schema gate as `load_state`). `render_frame(..., rate_limits=<override>)` applies it;
+with no override the function falls back to the passed session's own field.
+
+**Caveat**: snapshots carry **no account identifier**, so with multiple accounts
+running concurrently this may surface another account's limits. Single-account
+(the common case) is exact.
 
 ### Schema Version
 
@@ -794,6 +809,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.15.0  
+**Document Version**: 1.15.1  
 **Last Verified**: 2026-06-14  
 **Status**: Production

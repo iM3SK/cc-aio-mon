@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.15.1 — 2026-06-14
+
+**Bug fixes:**
+- **Rate limits read account-wide.** The 5HL/7DL panel now sources `rate_limits`
+  from the freshest snapshot across all sessions instead of only the viewed
+  session. 5H/7D limits are per-account but each session writes them solely into
+  its own snapshot, and an idle session's snapshot freezes — so switching between
+  concurrent sessions (or watching one that went idle) surfaced stale, pre-reset
+  values that appeared to jump around. `monitor.cached_freshest_rate_limits()`
+  picks the max-`mtime` snapshot (main-thread, 2 s TTL, same schema gate as
+  `load_state`); the event loop injects it via `render_frame(..., rate_limits=)`.
+  Known limitation: snapshots carry no account identifier, so with multiple
+  accounts running at once another account's limits may show; single-account is
+  exact.
+
+**Tests:** 715 passing (+5).
+
 ## v1.15.0 — 2026-06-14
 
 **Features — pricing coverage:**
