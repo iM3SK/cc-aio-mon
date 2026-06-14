@@ -206,6 +206,21 @@ def load_state(sid):
 
 **Forward Compatibility**: Monitor uses `dict.get()` (never KeyError) so unknown fields in future snapshots are silently ignored.
 
+### Rate Limits — account-wide read semantics
+
+`rate_limits` (5H/7D) are **per-account** — shared across every session — yet each
+session's statusline writes them only into its own snapshot, and an idle session's
+snapshot freezes. Reading them from a single session would surface stale/pre-reset
+values whenever another session was more recently active. The monitor therefore
+sources `rate_limits` from the **freshest snapshot across all sessions** (max
+`mtime`), via `monitor.cached_freshest_rate_limits()` (main-thread, 2 s TTL, same
+schema gate as `load_state`). `render_frame(..., rate_limits=<override>)` applies it;
+with no override the function falls back to the passed session's own field.
+
+**Caveat**: snapshots carry **no account identifier**, so with multiple accounts
+running concurrently this may surface another account's limits. Single-account
+(the common case) is exact.
+
 ### Schema Version
 
 **Current Value**: 1 (`shared.SCHEMA_VERSION`)
