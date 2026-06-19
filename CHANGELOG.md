@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.15.2 — 2026-06-19
+
+**Bug fixes and hardening:**
+- Treat pathological JSON recursion failures like malformed input across the
+  statusline and monitor readers. Snapshot, history, transcript-title, rate
+  limit, stats-cache and subagent scans now skip or degrade safely instead of
+  letting `RecursionError` escape from `json.loads()`.
+- Restore the Windows console output code page after `monitor.py --list`.
+  The one-shot list mode still enables UTF-8 for session names and AI titles,
+  but no longer leaves the parent console in the changed code page.
+- Sanitize fallback tool abbreviations before rendering agent-modal labels, so
+  unknown tool names cannot carry terminal control bytes into compact labels.
+
+**Tests:** 723 passing (+8).
+
 ## v1.15.1 — 2026-06-14
 
 **Bug fixes:**

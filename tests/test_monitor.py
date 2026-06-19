@@ -726,6 +726,13 @@ class TestCachedFreshestRateLimits(unittest.TestCase):
         fb = {"five_hour": {"used_percentage": 12}}
         self.assertIs(cached_freshest_rate_limits(fb), fb)
 
+    def test_recursionerror_snapshot_returns_fallback(self):
+        self._write("33333333-3333-3333-3333-333333333333",
+                    {"five_hour": {"used_percentage": 99}}, age=0)
+        fb = {"five_hour": {"used_percentage": 12}}
+        with patch("monitor.json.loads", side_effect=RecursionError("json depth")):
+            self.assertIs(cached_freshest_rate_limits(fb), fb)
+
     def test_ttl_returns_cached(self):
         import time
         cached = {"five_hour": {"used_percentage": 99}}
@@ -2161,6 +2168,13 @@ class TestListSessions(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["id"], sid)
 
+    def test_recursionerror_snapshot_skipped(self):
+        sid = "deepSession"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_text(json.dumps({"model": {"display_name": "Opus"}, "session_name": "", "cwd": ""}), encoding="utf-8")
+        with patch("monitor.json.loads", side_effect=RecursionError("json depth")):
+            self.assertEqual(list_sessions(), [])
+
     def test_rls_json_skipped(self):
         p = pathlib.Path(self._tmp) / "rls.json"
         p.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
@@ -2253,6 +2267,13 @@ class TestLoadState(unittest.TestCase):
         result = load_state(sid)
         self.assertIsInstance(result, dict)
         self.assertEqual(result["session_id"], sid)
+
+    def test_recursionerror_returns_none(self):
+        sid = "deepSess"
+        p = pathlib.Path(self._tmp) / f"{sid}.json"
+        p.write_text(json.dumps({"session_id": sid}), encoding="utf-8")
+        with patch("monitor.json.loads", side_effect=RecursionError("json depth")):
+            self.assertIsNone(load_state(sid))
 
     def test_invalid_sid_returns_none(self):
         result = load_state("../evil")
@@ -3567,6 +3588,27 @@ class TestScanAiTitle(unittest.TestCase):
             result = self._monitor._scan_ai_title(str(jl))
         self.assertEqual(result, "Survived")
 
+    def test_recursionerror_line_skipped(self):
+        jl = self._proj / "session5b.jsonl"
+        jl.write_text(
+            json.dumps({"type": "user", "content": "deep"}) + "\n"
+            + json.dumps({"type": "ai-title", "aiTitle": "Survived depth"}) + "\n",
+            encoding="utf-8",
+        )
+        orig_loads = json.loads
+        calls = {"n": 0}
+
+        def flaky_loads(raw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RecursionError("json depth")
+            return orig_loads(raw)
+
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root), \
+             patch("monitor.json.loads", side_effect=flaky_loads):
+            result = self._monitor._scan_ai_title(str(jl))
+        self.assertEqual(result, "Survived depth")
+
     def test_oversize_file_returns_none(self):
         jl = self._proj / "session6.jsonl"
         # Title at the head still must be ignored when the transcript exceeds the cap.
@@ -4120,6 +4162,18 @@ class TestMainSingleton(unittest.TestCase):
             _m.main()
         mock_lock.assert_not_called()
 
+    def test_main_list_mode_restores_terminal(self):
+        """--list sets UTF-8 output mode, then restores it before returning."""
+        with patch("sys.argv", ["monitor.py", "--list"]), \
+             patch("monitor.ensure_utf8_stdout"), \
+             patch("monitor._set_console_utf8") as mock_set, \
+             patch("monitor._restore_term") as mock_restore, \
+             patch("monitor.list_sessions", return_value=[]):
+            import monitor as _m
+            _m.main()
+        mock_set.assert_called_once()
+        mock_restore.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # scan_subagents / render_agents — Agents fan-out modal
@@ -4581,6 +4635,10 @@ class TestAuditFixesV1130(unittest.TestCase):
         # Every label stays short enough to keep the agent line compact.
         for v in monitor._TOOL_ABBR.values():
             self.assertLessEqual(len(v), 4)
+
+    def test_tool_abbr_strips_control_chars(self):
+        self.assertEqual(monitor._tool_abbr("Bad\x1bTool"), "BAD")
+        self.assertNotIn("\x1b", monitor._tool_abbr("mcp__x__\x1b[31mtool"))
 
     # ---- #6: _picker_order is the single source of truth ----
     def test_picker_order_active_first_and_capped(self):

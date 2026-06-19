@@ -421,6 +421,32 @@ class TestTrimHistory(unittest.TestCase):
             json.loads(ln)  # every surviving line is valid JSON
         p.unlink()
 
+    def test_trim_drops_recursionerror_lines(self):
+        import json, tempfile, pathlib
+        from statusline import _trim_history, HISTORY_TRIM_TO
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl",
+                                          delete=False, encoding="utf-8")
+        lines = [f'{{"i": {i}}}' for i in range(HISTORY_TRIM_TO + 10)]
+        lines[-5] = '{"deep": true}'
+        tmp.write("\n".join(lines) + "\n")
+        tmp.close()
+        p = pathlib.Path(tmp.name)
+        orig_loads = json.loads
+
+        def flaky_loads(raw):
+            if raw == '{"deep": true}':
+                raise RecursionError("json depth")
+            return orig_loads(raw)
+
+        try:
+            with patch("statusline.json.loads", side_effect=flaky_loads):
+                _trim_history(p)
+            result = p.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(result), HISTORY_TRIM_TO - 1)
+            self.assertNotIn('{"deep": true}', result)
+        finally:
+            p.unlink()
+
 
 # ---------------------------------------------------------------------------
 # _load_history_for_rates
@@ -650,6 +676,19 @@ class TestStatuslineMainE2E(unittest.TestCase):
              patch.object(_sl.sys, "stdout", fake_stdout), \
              patch.object(_sl, "ensure_utf8_stdout", lambda: None):
             _sl.main()  # must not raise
+
+    def test_main_recursionerror_returns_silently(self):
+        import io, json as _json
+        import statusline as _sl
+        fake_stdin = self._fake_stdin(_json.dumps({"session_id": "deepjson"}).encode("utf-8"))
+        fake_stdout = io.StringIO()
+        with patch.object(_sl.sys, "stdin", fake_stdin), \
+             patch.object(_sl.sys, "stdout", fake_stdout), \
+             patch.object(_sl, "ensure_utf8_stdout", lambda: None), \
+             patch.object(_sl.json, "loads", side_effect=RecursionError("json depth")):
+            _sl.main()  # must not raise
+        self.assertEqual(fake_stdout.getvalue(), "")
+        self.assertFalse(any(self._base.glob("*.json")) if self._base.exists() else False)
 
     def test_main_utf8_session_name_preserved_through_pipeline(self):
         """NEW-002 regression: Slovak diacritics in session_name must
