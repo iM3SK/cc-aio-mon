@@ -260,7 +260,7 @@ def main():
             return
         raw = raw_bytes.decode("utf-8", errors="replace")
         data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, RecursionError):
         return
 
     sid = data.get("session_id") or "default"
@@ -367,7 +367,7 @@ def _trim_history(path: pathlib.Path):
         for ln in kept:
             try:
                 json.loads(ln)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
                 continue
             valid.append(ln)
         trimmed = "\n".join(valid) + "\n" if valid else ""

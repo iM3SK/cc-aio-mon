@@ -173,7 +173,7 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
             for line in f:
                 try:
                     obj = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, RecursionError):
                     continue
 
                 ts_str = obj.get("timestamp", "")
@@ -938,7 +938,7 @@ def calc_cross_session_costs():
         for ln in raw.splitlines():
             try:
                 entries.append(json.loads(ln))
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 pass
         if not entries:
             continue
@@ -1079,7 +1079,7 @@ def list_sessions():
                 "ai_title": _scan_ai_title(d.get("transcript_path")) or "",
                 "cwd": _sanitize(d.get("cwd", "")),
             })
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
             pass
     sessions.sort(key=lambda s: s["mtime"], reverse=True)
     return sessions
@@ -1098,7 +1098,7 @@ def load_state(sid):
         return None
     try:
         d = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     # IPC schema gate (M-cross-2): statusline tags every snapshot with
     # _schema_version. A snapshot written by a NEWER build than this one —
@@ -1149,7 +1149,7 @@ def cached_freshest_rate_limits(fallback, ttl=2.0):
                 if raw is None:
                     continue
                 d = json.loads(raw.decode("utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
                 continue
             if not isinstance(d, dict):
                 continue
@@ -1824,7 +1824,7 @@ def _scan_ai_title(transcript_path):
                 continue
             try:
                 obj = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
                 continue
             if isinstance(obj, dict) and obj.get("type") == "ai-title":
                 t = obj.get("aiTitle")
@@ -1899,7 +1899,7 @@ def _aggregate_session_cost(data):
                     continue
                 try:
                     rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, RecursionError):
                     continue
                 if rec.get("type") != "assistant":
                     continue
@@ -2722,7 +2722,7 @@ def _read_stats_cache():
         return None, 0
     try:
         obj = json.loads(raw.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, RecursionError):
         return None, 0
     if not isinstance(obj, dict):
         return None, 0
@@ -3058,7 +3058,7 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
             for line in raw.decode("utf-8", errors="replace").splitlines():
                 try:
                     o = json.loads(line)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, RecursionError):
                     continue
                 if not isinstance(o, dict):
                     continue  # valid JSON but not an object (e.g. bare array)
@@ -3154,7 +3154,7 @@ def _tool_abbr(name):
     if name in _TOOL_ABBR:
         return _TOOL_ABBR[name]
     base = name.split("__")[-1] if name.startswith("mcp__") else name
-    return base[:4].upper() or "--"
+    return _sanitize(base[:4]).upper() or "--"
 
 
 def render_agents(data, cols, rows, active_only=False):
@@ -3357,18 +3357,21 @@ def main():
     ensure_utf8_stdout()
     # NEW-003: --list emits diacritics from session_name / ai_title and
     # needs Windows console CP 65001 even though it skips the full TUI
-    # _setup_term. Restore is handled by atexit cleanup only when set
-    # for the interactive path; for the one-shot --list we deliberately
-    # leave the console in UTF-8 mode since the process exits right
-    # after the listing — no chance for follow-up commands to be
-    # affected within this process.
+    # _setup_term. The one-shot path restores the console in its own
+    # finally block because it does not register the interactive atexit
+    # cleanup path.
     _set_console_utf8()
 
     if args.list:
-        for s in list_sessions():
-            tag = "(stale)" if s["stale"] else "(live)"
-            nm = s["session_name"] or s.get("ai_title") or "--"
-            print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag}")
+        try:
+            for s in list_sessions():
+                tag = "(stale)" if s["stale"] else "(live)"
+                nm = s["session_name"] or s.get("ai_title") or "--"
+                print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag}")
+        finally:
+            # Undo the console-wide CP65001 change so the parent shell is left
+            # as found (Windows); no-op if no CP was saved / on non-Windows.
+            _restore_term()
         return
 
     # Singleton lock — interactive monitor only. Two concurrent dashboards
