@@ -39,8 +39,9 @@ If you add a new env var, add it here in the same commit.
 - **Default:** unset → Pulse worker enabled
 - **Read by:** `monitor.py` (`main`)
 - **Effect:** suppresses the `pulse.py` background thread that probes
-  `status.claude.com` + the Anthropic API ping endpoint. The `STB`
-  (Stability) modal becomes unavailable.
+  `status.claude.com` + the Anthropic API ping endpoint. The Anthropic Pulse
+  modal (key `p`; displays the `STB` stability metric and related indicators)
+  becomes unavailable.
 - **When to set:** offline use, restricted egress, CI environments,
   privacy-sensitive setups that should not emit any outbound HTTP.
 

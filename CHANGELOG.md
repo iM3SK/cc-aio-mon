@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.15.3 — 2026-06-24
+
+**Security:**
+- `CC_AIO_MON_REMOTE` override now validated as an https/ssh git URL before
+  being accepted; invalid schemes (e.g. bare paths) are rejected with a
+  descriptive error instead of silently overriding the origin check.
+
+**Fixed:**
+- `BRN_MAX`/`CTR_MAX`/`CST_MAX` clamped to a positive minimum (`0.001`) to
+  avoid a render-loop `ZeroDivisionError` when `CC_MON_*_MAX=0` is set.
+- `_cost_cache` now guarded by a dedicated `_cost_cache_lock` (parity with
+  `_rls_cache` / `_rls_data_lock`); daemon-thread writes and render-thread
+  reads are now fully synchronized.
+- Opus 4.8 fast-mode pricing corrected to `$10/$50` per MTok (was a `$30/$150`
+  placeholder that mirrored Opus 4.7); Opus 4.7/4.6 remain `$30/$150` per the
+  Anthropic pricing page. Fixes a ~3x overestimate of Opus 4.8 fast-mode cost.
+- Rate-limit blink / last-good display: stale blink state no longer persists after a reset; last-good values preserved correctly across poll cycles.
+- Cost cache sentinel: sentinel value no longer leaks into displayed cost totals; cache invalidation on session change is correct.
+- `parse_ts` integer guard: integer timestamps (as opposed to float) no longer cause a type error in history rate computation.
+- Update modal runs off the main thread: version-check HTTP call no longer blocks the TUI event loop.
+- Pricing short-ID lookup + Opus 4.8 entry: `_get_pricing()` now matches short model IDs correctly; Opus 4.8 pricing row added.
+
+**Changed:**
+- Removed unused `run_git(capture=…)` parameter from `update.py`; minor
+  docstring/legend/IPC-doc sync (legend `TIN`/`TOT` → `CIN`/`COUT` to match
+  rendered cost-breakdown labels; `load_state` doc snippet includes
+  `RecursionError`; `_get_pricing` attributed to `monitor` not `statusline`;
+  cached-rate-limits TTL corrected to 0.5 s).
+- Most-active-day label renamed `TOP` → `PEAK` for clarity.
+- Separators between individual models replaced with blank lines; `----` rules kept only between major sections.
+
+**Removed:**
+- Cached LIFETIME/DAILY panel from the token stats modal. The block read `~/.claude/stats-cache.json` (`lastComputedDate`), which Claude Code recomputes roughly once per day, producing stale figures that contradicted the live session counts and token totals already shown in the overview (SES/DAY/STK/LSS/PEAK) and the MODELS ALL total. Those live scans of `~/.claude/projects/` transcripts already cover all the same ground. Removed: `_append_lifetime_block`, `_read_stats_cache`, `_render_act_row`, `_STATS_CACHE_PATH`, `_STATS_CACHE_MAX_BYTES`.
+
+**Security (continued):**
+- Agent/subagent ID sanitized before use in file path construction and modal rendering.
+- Pulse log append path validated with `lstat` in `cleanup_log_startup` before open to guard against TOCTOU symlink swap (guard applies to startup cleanup only, not to `_append_log`).
+
+**Tests:** 731 passing (+8).
+
 ## v1.15.2 — 2026-06-19
 
 **Bug fixes and hardening:**
@@ -24,7 +64,7 @@
   its own snapshot, and an idle session's snapshot freezes — so switching between
   concurrent sessions (or watching one that went idle) surfaced stale, pre-reset
   values that appeared to jump around. `monitor.cached_freshest_rate_limits()`
-  picks the max-`mtime` snapshot (main-thread, 2 s TTL, same schema gate as
+  picks the max-`mtime` snapshot (main-thread, 0.5 s TTL, same schema gate as
   `load_state`); the event loop injects it via `render_frame(..., rate_limits=)`.
   Known limitation: snapshots carry no account identifier, so with multiple
   accounts running at once another account's limits may show; single-account is

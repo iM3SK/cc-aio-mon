@@ -44,6 +44,7 @@ from statusline import (
     seg_brn,
     build_line,
     cpc_base,
+    _last_known_rate_limits,
 )
 
 # ---------------------------------------------------------------------------
@@ -128,6 +129,25 @@ class TestSegCtx(unittest.TestCase):
         plain = _ANSI_RE.sub("", text)
         self.assertIn("42%", plain)
         self.assertNotIn("/", plain)  # no token count without total
+
+    def test_pct_clamped_above_100(self):
+        # F-25: upstream may send used_percentage > 100 (e.g. 210k/200k);
+        # seg_ctx must clamp to 100 so the displayed percentage is never > 100%.
+        d = _full_data()
+        d["context_window"]["used_percentage"] = 105
+        text, vl = seg_ctx(d)
+        plain = _ANSI_RE.sub("", text)
+        self.assertIn("100%", plain)
+        self.assertNotIn("105%", plain)
+
+    def test_pct_clamped_below_0(self):
+        # F-25: negative values (e.g. malformed upstream data) clamp to 0%.
+        d = _full_data()
+        d["context_window"]["used_percentage"] = -5
+        text, vl = seg_ctx(d)
+        plain = _ANSI_RE.sub("", text)
+        self.assertIn("0%", plain)
+        self.assertNotIn("-5%", plain)
 
 
 class TestSeg5hl(unittest.TestCase):
@@ -304,6 +324,109 @@ class TestBuildLine(unittest.TestCase):
         self.assertIsNotNone(line)
         self.assertIsInstance(line, str)
         self.assertLessEqual(_vlen(line), 80)
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit fallback (CC sends rate_limits only intermittently)
+# ---------------------------------------------------------------------------
+class TestLastKnownRateLimits(unittest.TestCase):
+    """Fallback used when the current CC event omits rate_limits."""
+
+    def test_history_hit_returns_most_recent(self):
+        hist = [
+            {"rate_limits": {"five_hour": {"used_percentage": 1}}},
+            {"rate_limits": {"five_hour": {"used_percentage": 9}}},  # newer
+        ]
+        self.assertEqual(
+            _last_known_rate_limits(hist),
+            {"five_hour": {"used_percentage": 9}},
+        )
+
+    def test_history_skips_entries_without_rate_limits(self):
+        hist = [
+            {"rate_limits": {"seven_day": {"used_percentage": 5}}},
+            {"cost": {"total_cost_usd": 1}},  # newer, no rate_limits
+        ]
+        self.assertEqual(
+            _last_known_rate_limits(hist),
+            {"seven_day": {"used_percentage": 5}},
+        )
+
+    def test_snapshot_fallback_when_history_empty(self):
+        import json, tempfile, pathlib, statusline
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            (d / "snaptest.json").write_text(
+                json.dumps({
+                    "rate_limits": {"seven_day": {"used_percentage": 5}},
+                    "_schema_version": shared.SCHEMA_VERSION,
+                }),
+                encoding="utf-8",
+            )
+            with patch.object(statusline, "DATA_DIR", d):
+                self.assertEqual(
+                    _last_known_rate_limits([]),
+                    {"seven_day": {"used_percentage": 5}},
+                )
+
+    def test_reserved_sid_snapshot_ignored(self):
+        import json, tempfile, pathlib, statusline
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            (d / "stats.json").write_text(
+                json.dumps({"rate_limits": {"five_hour": {"used_percentage": 7}}}),
+                encoding="utf-8",
+            )
+            with patch.object(statusline, "DATA_DIR", d):
+                self.assertIsNone(_last_known_rate_limits([]))
+
+    def test_none_when_nothing_available(self):
+        import tempfile, pathlib, statusline
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
+                self.assertIsNone(_last_known_rate_limits([]))
+
+    def test_history_skips_newer_schema_version(self):
+        # F-17: history entries tagged with _schema_version > SCHEMA_VERSION
+        # must be skipped; fall through to an older (acceptable) entry.
+        hist = [
+            {"rate_limits": {"five_hour": {"used_percentage": 3}},
+             "_schema_version": shared.SCHEMA_VERSION},          # acceptable
+            {"rate_limits": {"five_hour": {"used_percentage": 9}},
+             "_schema_version": shared.SCHEMA_VERSION + 1},      # too new — skip
+        ]
+        result = _last_known_rate_limits(hist)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["five_hour"]["used_percentage"], 3)
+
+    def test_history_accepts_current_schema_version(self):
+        # F-17: entries tagged with exactly SCHEMA_VERSION are accepted.
+        hist = [
+            {"rate_limits": {"five_hour": {"used_percentage": 7}},
+             "_schema_version": shared.SCHEMA_VERSION},
+        ]
+        result = _last_known_rate_limits(hist)
+        self.assertEqual(result, {"five_hour": {"used_percentage": 7}})
+
+    def test_history_accepts_missing_schema_version(self):
+        # F-17: entries without _schema_version (pre-versioning) are accepted.
+        hist = [
+            {"rate_limits": {"five_hour": {"used_percentage": 4}}},
+        ]
+        result = _last_known_rate_limits(hist)
+        self.assertEqual(result, {"five_hour": {"used_percentage": 4}})
+
+    def test_history_all_newer_schema_falls_through_to_none(self):
+        # F-17: if all history entries are from a newer build, fall through to
+        # the snapshot branch; with empty DATA_DIR we expect None.
+        import tempfile, pathlib, statusline
+        hist = [
+            {"rate_limits": {"five_hour": {"used_percentage": 9}},
+             "_schema_version": shared.SCHEMA_VERSION + 1},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
+                self.assertIsNone(_last_known_rate_limits(hist))
 
 
 # ---------------------------------------------------------------------------

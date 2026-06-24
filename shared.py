@@ -53,7 +53,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.15.2"
+VERSION = "1.15.3"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -167,7 +167,31 @@ def load_history(sid: str, n: int = HISTORY_RATE_SAMPLES, data_dir: Optional[pat
         return []
     if not is_safe_dir(dd):
         return []
-    raw = safe_read(dd / f"{sid_s}.jsonl", HISTORY_READ_MAX)
+    # Advisory lock: serialize read vs. statusline append/trim that holds the
+    # same sidecar .lock file.  lock_file_handle() only offers exclusive locking
+    # (LOCK_EX / LK_LOCK) — no shared-lock variant exists.  Using exclusive here
+    # is safe: statusline holds the lock only during short append/trim windows,
+    # so contention is brief.  No deadlock risk: neither side nests a second
+    # common lock while holding this one.  Failure to open or lock is silently
+    # ignored (best-effort — we proceed without the lock rather than dropping
+    # valid data).
+    _lf = None
+    _locked = False
+    try:
+        _lf = open(dd / f"{sid_s}.jsonl.lock", "a", encoding="utf-8")
+        _locked = lock_file_handle(_lf)
+    except OSError:
+        pass
+    try:
+        raw = safe_read(dd / f"{sid_s}.jsonl", HISTORY_READ_MAX)
+    finally:
+        if _lf is not None:
+            if _locked:
+                unlock_file_handle(_lf)
+            try:
+                _lf.close()
+            except OSError:
+                pass
     if raw is None:
         return []
     try:
@@ -400,6 +424,8 @@ def verify_origin_remote(repo_root) -> Optional[str]:
     url = r.stdout.strip()
     override = os.environ.get("CC_AIO_MON_REMOTE", "").strip()
     if override:
+        if not re.match(r"^(?:https://|ssh://git@|git@)", override):
+            return f"CC_AIO_MON_REMOTE must be an https or ssh git URL, got: {override}"
         return None if url == override else f"origin is {url}, expected {override}"
     if _CANONICAL_REMOTE_RE.match(url):
         return None

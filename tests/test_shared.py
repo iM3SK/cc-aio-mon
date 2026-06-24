@@ -707,6 +707,36 @@ class TestLoadHistory(unittest.TestCase):
             )
             self.assertEqual(shared.load_history(sid, data_dir=dd), [])
 
+    def test_load_history_with_lock_returns_records(self):
+        """F-05 RACE-002: load_history must return parsed entries even when the
+        advisory .jsonl.lock sidecar is present and acquired successfully."""
+        with tempfile.TemporaryDirectory() as td:
+            dd = pathlib.Path(td)
+            sid = "locksession"
+            entry = {"t": 1_700_000_060, "cost": {"total_cost_usd": 0.5},
+                     "context_window": {"used_percentage": 10.0}}
+            import json as _json
+            (dd / f"{sid}.jsonl").write_text(_json.dumps(entry) + "\n", encoding="utf-8")
+            result = shared.load_history(sid, n=10, data_dir=dd)
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].get("t"), 1_700_000_060)
+
+    def test_load_history_lock_failure_still_returns_records(self):
+        """F-05 RACE-002: if lock acquisition fails (OSError), load_history
+        must degrade gracefully — still read and return the JSONL entries."""
+        with tempfile.TemporaryDirectory() as td:
+            dd = pathlib.Path(td)
+            sid = "lockfailsession"
+            import json as _json
+            entry = {"t": 1_700_000_120, "cost": {"total_cost_usd": 1.0},
+                     "context_window": {"used_percentage": 20.0}}
+            (dd / f"{sid}.jsonl").write_text(_json.dumps(entry) + "\n", encoding="utf-8")
+            # Simulate lock_file_handle always failing.
+            with patch.object(shared, "lock_file_handle", return_value=False):
+                result = shared.load_history(sid, n=10, data_dir=dd)
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].get("t"), 1_700_000_120)
+
 
 class TestEnvPct(unittest.TestCase):
     """Audit P1-8: _env_pct is the SSoT for WARN_PCT / CRIT_PCT parsing.

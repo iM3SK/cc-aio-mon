@@ -25,7 +25,7 @@
    `unittest discover tests/`, so the `py tests.py` invocation continues to work
    unchanged.
 
-   **Baseline: 715 tests passing (skip count is platform-dependent — 0 on a standard Linux/macOS box with git; a few skip on Windows or where git/symlinks/SIGPIPE are unavailable).**
+   **Baseline: 731 tests passing (skip count is platform-dependent — 0 on a standard Linux/macOS box with git; a few skip on Windows or where git/symlinks/SIGPIPE are unavailable).**
    Contributions must not reduce the passing count without explanation. If you add
    tests, put them in the file that matches the module under test — helpers go in
    `test_shared.py`, TUI logic in `test_monitor.py`, and so on.
@@ -74,7 +74,7 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 ## See also
 
 - [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~3 700 LOC)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~3 740 LOC)
 - [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md) — canonical field schema for the statusline→monitor JSON contract and JSONL history entries
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting

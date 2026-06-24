@@ -68,11 +68,11 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/7DL segments also show a reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
 - **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
-- **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (TOP) count all token types: input + output + cache_read + cache_write. Appended **LIFETIME** block reads `~/.claude/stats-cache.json` (Claude Code's pre-aggregated lifetime stats) and adds: total messages, tool-call count, first session date, longest session, a 24-hour heatmap (UTC), and the last 5 daily activity rows. Auto-collapses on small terminals.
+- **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (PEAK) count all token types: input + output + cache_read + cache_write.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
 <p align="center">
   <a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal with per-model breakdown using 3-char codes, includes cache tokens in bar"></a><br>
-  <sub><b>Token stats</b> (<code>t</code>) — per-model token breakdown, sessions, streaks and a lifetime-activity block.</sub>
+  <sub><b>Token stats</b> (<code>t</code>) — per-model token breakdown, sessions, streaks and peak-day.</sub>
 </p>
 
 <p align="center">
@@ -145,12 +145,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **DAY** | Active days | — | usage stats modal |
 | **STK** | Streak (current/best) | — | usage stats modal |
 | **LSS** | Longest session | — | usage stats modal |
-| **TOP** | Most active day | — | usage stats modal |
-| **MSG** | Total messages (lifetime, from CC stats cache) | — | usage stats modal |
-| **TLC** | Tool-call count (lifetime) | — | usage stats modal |
-| **1ST** | First session date | YYYY-MM-DD | usage stats modal |
-| **HRS** / **ACT** | Hour-of-day heatmap (UTC) | 24 cells | usage stats modal |
-| **DAILY** | Per-day SES / MSG / TLC, last 5 days | — | usage stats modal |
+| **PEAK** | Most active day (peak tokens) | — | usage stats modal |
 | **WSR** | Web search requests (server-side tool use) | — | cost breakdown modal |
 | **WFR** | Web fetch requests (server-side tool use) | — | cost breakdown modal |
 | **TIE** | Cache-creation tokens, 1-hour ephemeral TTL | — | cost breakdown modal |

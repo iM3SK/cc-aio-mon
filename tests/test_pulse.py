@@ -686,6 +686,26 @@ class TestPulseLog(unittest.TestCase):
         pulse.cleanup_log_startup()
         self.assertFalse(pulse.LOG_PATH.exists())
 
+    def test_cleanup_rejects_symlink(self):
+        # F-29 / SEC-006: LOG_PATH pointing to a symlink must be silently skipped.
+        # Create a real target file in the temp dir, then place a symlink at LOG_PATH.
+        target = pulse.LOG_PATH.parent / "_symlink_target.log"
+        target.write_text('{"ts": 9999999999, "score": 90}\n', encoding="utf-8")
+        try:
+            pulse.LOG_PATH.symlink_to(target)
+            pulse.cleanup_log_startup()
+            # LOG_PATH is still a symlink — cleanup must not have rewritten it
+            self.assertTrue(pulse.LOG_PATH.is_symlink(),
+                            "cleanup_log_startup must not replace a symlink")
+            # target content must be untouched
+            content = target.read_text(encoding="utf-8")
+            self.assertIn('"score": 90', content)
+        finally:
+            if pulse.LOG_PATH.is_symlink():
+                pulse.LOG_PATH.unlink()
+            if target.exists():
+                target.unlink()
+
     def test_cleanup_malformed_lines_skipped(self):
         now = time.time()
         with open(pulse.LOG_PATH, "a", encoding="utf-8") as f:

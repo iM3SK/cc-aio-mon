@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.15.1 · Target reader: new contributor who just cloned the repo.
+> v1.15.3 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -66,19 +66,21 @@ by `build_line()` when the terminal is too narrow. On Windows, terminal width
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~3 700 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~3 740 LOC. Owns the event
 loop, all `render_*` functions, the session picker, and the daemon worker
 threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
-otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 3800 LOC.
+otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4000 LOC.
 
 **pulse.py** — Daemon thread module. Fetches `status.claude.com/api/v2/summary.json`
 and probes `api.anthropic.com/v1/messages` (any HTTP response counts as liveness).
 Computes a weighted 0–100 stability score (`compute_score`), smoothed via
 rolling median, and exposes the result via `get_pulse_snapshot()` (thread-safe
 read). Started idempotently from `monitor.main()` via `start_pulse_worker()`.
-Proxy env vars are scrubbed at import time via `install_opener` so Pulse
-fetches cannot be silently routed through an injected proxy.
+Proxy env vars are scrubbed at import time: `pulse.py` builds a no-proxy opener
+via `urllib.request.build_opener(urllib.request.ProxyHandler({}))` and stores it
+in module-local `_OPENER`; all fetch calls use that opener so Pulse fetches
+cannot be silently routed through an injected proxy.
 
 **update.py** — Entry point 3 (CLI self-updater). Read-only by default; add
 `--apply` to run `git pull --ff-only`. Guards: clean working tree, on `main`
@@ -176,7 +178,7 @@ thread.
 
 - `_rls_lock` (`threading.Lock`) — worker-spawn coordination; ensures only one
   release-check thread runs at a time (acquired non-blocking in
-  `_maybe_trigger_rls_check`, released in `_rls_check_worker`).
+  `_rls_maybe_check`, released in `_rls_check_worker`).
 - `_rls_data_lock` (`threading.Lock`) — coherence for the three-field
   `_rls_cache` dict (`t`, `status`, `remote_ver`) accessed by both the
   daemon writer and the main render thread.
@@ -220,12 +222,12 @@ in `requirements.txt` (there is none).
 | GitHub (`origin/main`) | `_rls_check_worker`, `update.py` | HTTPS via `git fetch` | Optional — disable with `CC_AIO_MON_NO_UPDATE_CHECK=1` |
 | `~/.claude/projects/` | `monitor.py:scan_transcript_stats()` | local file | Optional — token stats modal reads transcripts |
 | `~/.claude/projects/<proj>/<session>/subagents/` | `monitor.py:scan_subagents()` | local file | Optional — agents fan-out modal; derived from the session `transcript_path`, containment-checked |
-| `~/.claude/stats-cache.json` | `monitor.py` (lifetime stats panel) | local file | Optional — omitted silently when absent |
 
 `shared.run_git()` uses a minimal env whitelist (`_GIT_ENV_WHITELIST`) to strip
 injected `GIT_SSH_COMMAND`, `LD_PRELOAD`, and proxy vars before any subprocess
-invocation. `pulse.py` installs a no-proxy opener via `urllib.request.install_opener`
-at import time for the same reason.
+invocation. `pulse.py` stores a no-proxy opener in module-local `_OPENER`
+(built via `urllib.request.build_opener(urllib.request.ProxyHandler({}))`);
+all outbound fetch calls go through `_OPENER` for the same reason.
 
 ---
 
@@ -264,9 +266,9 @@ because Claude Code's subprocess context pipes all standard fds. On Unix, opens
 on Windows, calls `SetConsoleMode` with the `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
 flag. On Unix, no action needed.
 
-**Keyboard input** (`monitor._getch`): on Windows, uses `msvcrt.kbhit` +
-`msvcrt.getwch`. On Unix, puts the terminal in raw mode via `termios` +
-`tty.setraw` and reads one character.
+**Keyboard input** (`monitor.poll_key`): on Windows, uses `msvcrt.kbhit` +
+`msvcrt.getch`. On Unix, puts the terminal in cbreak mode via `termios` +
+`tty.setcbreak` and reads one character.
 
 **Singleton lock** (`shared.acquire_singleton_lock`): on Windows, uses
 `msvcrt.locking(fd, LK_NBLCK, 1)`. On Unix, uses `fcntl.flock(fd, LOCK_EX | LOCK_NB)`.
