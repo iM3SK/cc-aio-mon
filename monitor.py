@@ -28,7 +28,7 @@ TUI navigable while preserving the five-runtime-file stdlib layout:
     11. Anthropic Pulse modal      — render_pulse_modal
     12. Menu modal                 — render_menu
     13. Update modal               — render_update_modal + apply worker
-    14. Token stats modal          — render_stats + lifetime/daily blocks
+    14. Token stats modal          — render_stats
     15. Agents modal               — render_agents + scan_subagents fan-out
     16. Session picker             — render_picker (+ _picker_order SSoT)
     17. Screen flush               — flush (synchronized-output frame writer)
@@ -80,6 +80,8 @@ _usage_cache = {}
 
 def _parse_ts(ts_str):
     """Parse ISO timestamp to epoch, 3.8 compatible. Returns 0 on failure."""
+    if not isinstance(ts_str, str):  # F-24 / CORRECTNESS-001: integer or other type -> 0
+        return 0
     if not ts_str:
         return 0
     try:
@@ -94,7 +96,7 @@ def _parse_ts(ts_str):
     try:
         # Fallback for shapes fromisoformat can't parse with an offset
         # attached (e.g. non-colon offsets on 3.8): strip the suffix and
-        # parse naive — approximate, but better than dropping the record.
+        # interpret as UTC (F-26 / CORRECTNESS-006).
         clean = ts_str.replace("Z", "")
         # Remove +/-offset after the time portion (T required)
         t_pos = clean.find("T")
@@ -106,7 +108,14 @@ def _parse_ts(ts_str):
                 if idx >= 8:
                     clean = clean[:t_pos + 1 + idx]
                     break
-        return datetime.fromisoformat(clean).timestamp()
+        # clean has no offset at this point; pin to UTC so the fallback
+        # path is consistent with the primary path instead of local-time.
+        # If clean somehow already carries an offset, the ValueError below
+        # lets the bare parse attempt recover.
+        try:
+            return datetime.fromisoformat(clean + "+00:00").timestamp()
+        except (ValueError, TypeError):
+            return datetime.fromisoformat(clean).timestamp()
     except (ValueError, TypeError):
         return 0
 
@@ -234,6 +243,9 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
                         continue
                     active_days.add(day)
                     daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
+                # Known-but-ignored fields (F-18/F-19/F-20 / SD-003/007/008):
+                # u.get("diagnostics"), u.get("inference_geo"), u.get("service_tier"),
+                # obj.get("context_management") — not needed for stats aggregation.
     except (OSError, UnicodeDecodeError):
         return
 
@@ -750,9 +762,9 @@ def _reset_color(resets_epoch, window_secs):
 # ---------------------------------------------------------------------------
 # Fixed-range bar for rate/cost metrics
 # ---------------------------------------------------------------------------
-BRN_MAX = _env_float("CC_MON_BRN_MAX", 10.0)   # $/min ceiling
-CTR_MAX = _env_float("CC_MON_CTR_MAX", 10.0)   # %/min ceiling
-CST_MAX = _env_float("CC_MON_CST_MAX", 1000.0) # $ ceiling
+BRN_MAX = max(0.001, _env_float("CC_MON_BRN_MAX", 10.0))   # $/min ceiling
+CTR_MAX = max(0.001, _env_float("CC_MON_CTR_MAX", 10.0))   # %/min ceiling
+CST_MAX = max(0.001, _env_float("CC_MON_CST_MAX", 1000.0)) # $ ceiling
 
 
 # ---------------------------------------------------------------------------
@@ -777,9 +789,10 @@ def collect_warnings(data, cpm, xpm):
 # ---------------------------------------------------------------------------
 # Cross-session cost aggregation
 # ---------------------------------------------------------------------------
-# Main-thread only — read/written exclusively from render loop. No lock needed.
-# (Unlike _rls_cache which IS locked because a daemon thread updates it.)
+# Guarded by _cost_cache_lock: read by the render thread, written by cost-scan
+# daemon thread (_cost_scan_worker). Mirrors the _rls_data_lock pattern.
 _cost_cache = {"t": 0.0, "today": 0.0, "week": 0.0}
+_cost_cache_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -787,6 +800,7 @@ _cost_cache = {"t": 0.0, "today": 0.0, "week": 0.0}
 # ---------------------------------------------------------------------------
 _REPO_ROOT = pathlib.Path(__file__).parent.resolve()
 _RLS_TTL = SECONDS_1H  # check once per hour
+_RLS_ERR_TTL = 300      # retry sooner (5 min) after error/timeout
 _RLS_BLINK_INTERVAL = 0.5
 _rls_cache = {"t": -_RLS_TTL, "status": None, "remote_ver": None}
 _rls_lock = threading.Lock()       # worker-spawn coordination (one check at a time)
@@ -857,7 +871,9 @@ def _rls_maybe_check():
     """
     if os.environ.get("CC_AIO_MON_NO_UPDATE_CHECK") == "1":
         return
-    if time.monotonic() - _rls_snapshot()["t"] < _RLS_TTL:
+    snap = _rls_snapshot()
+    ttl = _RLS_ERR_TTL if snap["status"] in ("error", "timeout") else _RLS_TTL
+    if time.monotonic() - snap["t"] < ttl:
         return
     if not _rls_lock.acquire(blocking=False):
         return
@@ -953,9 +969,16 @@ _cost_scan_lock = threading.Lock()
 
 
 def _cost_scan_worker():
-    """Off-thread cross-session cost aggregation. Writes _cost_cache."""
-    today, week = calc_cross_session_costs()
-    _cost_cache.update({"t": time.monotonic(), "today": today, "week": week})
+    """Off-thread cross-session cost aggregation. Writes _cost_cache.
+    On any OS/IO error the cache is updated with sentinel -1.0 values so the
+    UI can distinguish 'error' from 'not yet computed' (F-04 / CACHE-04)."""
+    try:
+        today, week = calc_cross_session_costs()
+        with _cost_cache_lock:
+            _cost_cache.update({"t": time.monotonic(), "today": today, "week": week})
+    except (OSError, Exception):  # noqa: BLE001 — best-effort background worker
+        with _cost_cache_lock:
+            _cost_cache.update({"t": time.monotonic(), "today": -1.0, "week": -1.0})
 
 
 def _cost_refresh_async(ttl=30.0):
@@ -968,7 +991,9 @@ def _cost_refresh_async(ttl=30.0):
     / _subagents_refresh_async; render reads the last _cost_cache and never
     blocks."""
     global _cost_scan_thread
-    if time.monotonic() - _cost_cache["t"] < ttl:
+    with _cost_cache_lock:
+        t_cached = _cost_cache["t"]
+    if time.monotonic() - t_cached < ttl:
         return  # fresh enough — no scan needed
     with _cost_scan_lock:
         if _cost_scan_thread is not None and _cost_scan_thread.is_alive():
@@ -983,7 +1008,8 @@ def cached_cross_session_costs(ttl=30.0):
     return the last cached (today, week). The aggregation runs in the cost-scan
     daemon so the render thread never re-parses transcripts inline."""
     _cost_refresh_async(ttl)
-    return _cost_cache["today"], _cost_cache["week"]
+    with _cost_cache_lock:
+        return _cost_cache["today"], _cost_cache["week"]
 
 
 # Session picker cache — main-thread only, mirrors _cost_cache contract.
@@ -1122,18 +1148,26 @@ def load_state(sid):
 # carry no account identifier, so with multiple accounts running concurrently this
 # may surface another account's limits; single-account (the common case) is exact.
 _rl_fresh_cache = {"t": -1.0, "rl": None}  # main-thread only; mirrors cached_list_sessions
+# Last scan that found a non-None rate_limits value.  Prevents the dashboard
+# from blinking back to None when CC temporarily emits a snapshot without
+# rate_limits (e.g. idle session, partial write).  Limits are account-wide so
+# any session's last-known value is the right one to show.  (F-03 / RL-002)
+_rl_last_good = {"rl": None}
 
 
-def cached_freshest_rate_limits(fallback, ttl=2.0):
+def cached_freshest_rate_limits(fallback, ttl=0.5):
     """Return rate_limits from the most recently written session snapshot.
 
     Non-blocking main-thread scan with a TTL (the render loop runs at ~20Hz; a
     per-frame DATA_DIR scan would be wasteful). Falls back to the caller's own
-    rate_limits when no snapshot carries usable limits (empty dir / tests)."""
+    rate_limits when no snapshot carries usable limits (empty dir / tests).
+    TTL lowered to 0.5 s (F-21 / CACHE-03): stat-scan is cheap and 0.5 s
+    reduces cross-session staleness without meaningful overhead."""
     now = time.monotonic()
     if now - _rl_fresh_cache["t"] < ttl:
         rl = _rl_fresh_cache["rl"]
-        return rl if rl is not None else fallback
+        # Return cached value; fall through to last-good or fallback if None.
+        return rl if rl is not None else (_rl_last_good["rl"] or fallback)
     best_mt = -1.0
     best_rl = None
     if DATA_DIR.exists() and is_safe_dir(DATA_DIR):
@@ -1160,8 +1194,13 @@ def cached_freshest_rate_limits(fallback, ttl=2.0):
             if rl:
                 best_mt = mt
                 best_rl = rl
-    _rl_fresh_cache.update({"t": now, "rl": best_rl})
-    return best_rl if best_rl is not None else fallback
+    # Persist any newly-found value so future scans that return None (e.g. a
+    # snapshot written without rate_limits) can still serve a non-stale value.
+    if best_rl is not None:
+        _rl_last_good["rl"] = best_rl
+    result = best_rl if best_rl is not None else (_rl_last_good["rl"] or fallback)
+    _rl_fresh_cache.update({"t": now, "rl": result})
+    return result
 
 
 # Thin wrapper — shared.load_history is the single source of truth (v1.10.5+).
@@ -1346,7 +1385,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     sname = _sanitize(data.get("session_name", ""))
 
     cw = data.get("context_window") or {}
-    ctx_pct = round(_num(cw.get("used_percentage")), 1)
+    ctx_pct = round(max(0.0, min(100.0, _num(cw.get("used_percentage")))), 1)  # F-25 / CORRECTNESS-005: clamp [0,100]
     ctx_total = _num(cw.get("context_window_size"), 0)
     usage = cw.get("current_usage") or {}
 
@@ -1598,13 +1637,8 @@ def render_legend(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_WHT}SES{R} {C_DIM}Sessions{R} {C_WHT}DAY{R} {C_DIM}Active Days{R}")
     buf.append(f"{C_WHT}STK{R} {C_DIM}Streak{R} {C_WHT}LSS{R} {C_DIM}Longest Session{R}")
-    buf.append(f"{C_WHT}TOP{R} {C_DIM}Most Active Day{R}")
+    buf.append(f"{C_WHT}PEAK{R} {C_DIM}Most Active Day (peak tokens){R}")
     buf.append(f"{C_DIM} INP  Input - OUT  Output - CLS  Calls{R}")
-    buf.append(f"{C_DIM} LIFETIME — pre-aggregated stats from CC cache{R}")
-    buf.append(f"{C_WHT}MSG{R} {C_DIM}Total Messages{R} {C_WHT}TLC{R} {C_DIM}Tool Calls{R}")
-    buf.append(f"{C_WHT}1ST{R} {C_DIM}First Session Date{R}")
-    buf.append(f"{C_DIM} HRS / ACT  hour-of-day heatmap (UTC){R}")
-    buf.append(f"{C_DIM} DAILY  per-day SES / MSG / TLC, last 5 days{R}")
     # ── Cost Breakdown ──
     buf.append(sep(SW))
     cp = max(0, SW - 14)
@@ -1616,7 +1650,7 @@ def render_legend(cols, rows):
     buf.append(f"{C_GRN}SAV{R} {C_DIM}Cache Savings{R}")
     buf.append(f"{C_DIM} SESSION BREAKDOWN — whole session, aggregated from transcript{R}")
     buf.append(f"{C_DIM} SUM  Sum of estimates (delta warn if >15% off CST){R}")
-    buf.append(f"{C_WHT}TIN{R} {C_DIM}Total Input{R} {C_WHT}TOT{R} {C_DIM}Total Output{R}")
+    buf.append(f"{C_WHT}CIN{R} {C_DIM}Total Input{R} {C_WHT}COUT{R} {C_DIM}Total Output{R}")
     buf.append(f"{C_ORN}CPM{R} {C_DIM}Cost/Min{R}")
     buf.append(f"{C_WHT}WSR{R} {C_DIM}Web Search Reqs{R} {C_WHT}WFR{R} {C_DIM}Web Fetch Reqs{R}")
     buf.append(f"{C_WHT}TIE{R} {C_DIM}Cache 1h-TTL{R} {C_WHT}T5M{R} {C_DIM}Cache 5m-TTL{R}")
@@ -1654,7 +1688,9 @@ _MODELS = {
                         "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     "claude-opus-4-8": {"name": "Opus 4.8", "code": ("OP", "4.8"),
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
-                        "pricing_fast": {"input": 10.0, "output": 50.0,  "cache_read": 1.00, "cache_write": 12.50}},
+                        # fast-mode premium (Anthropic pricing page, 2026-06): Opus 4.8 is $10/$50,
+                        # distinct from Opus 4.7/4.6 ($30/$150); cache = 0.1x read / 1.25x 5m write.
+                        "pricing_fast": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     "claude-opus-4-7": {"name": "Opus 4.7", "code": ("OP", "4.7"),
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
                         "pricing_fast": {"input": 30.0, "output": 150.0, "cache_read": 3.00, "cache_write": 37.50}},
@@ -1675,10 +1711,12 @@ _MODELS = {
     # is claude-3-5-haiku-20241022; _model_base strips the -YYYYMMDD to this key.
     "claude-3-5-haiku": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
                          "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
-    # Short-ID fallbacks (some transcript entries use abbreviated IDs). No pricing.
-    "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": None},
-    "sonnet": {"name": "Sonnet", "code": ("SO", ""), "pricing": None},
-    "opus":   {"name": "Opus",   "code": ("OP", ""), "pricing": None},
+    # Short-ID fallbacks (some transcript entries use abbreviated IDs).
+    # Priced at current standard tier to avoid falling back to _DEFAULT_PRICING
+    # (Sonnet-tier), which would over-charge Haiku by ~3x.
+    "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": {"input": 1.0, "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
+    "sonnet": {"name": "Sonnet", "code": ("SO", ""), "pricing": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
+    "opus":   {"name": "Opus",   "code": ("OP", ""), "pricing": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
 }
 
 
@@ -1843,16 +1881,29 @@ def _aggregate_session_cost(data):
     Returns dict {input, output, cache_read, cache_write, cost_total,
                   cost_input, cost_output, cost_cache_read, cost_cache_write}
     or None if transcript unreachable.
+
+    F-06 / CACHE-06: all failure paths for a valid sid write a short-lived
+    sentinel (now, None) to _SESSION_COST_CACHE so the next render-frame call
+    within TTL returns cached None immediately instead of re-scanning.  The
+    cache-hit branch already returns cached[1] (which may be None) correctly.
     """
     sid = (data.get("session_id") or "").strip()
     if not sid or not _SID_RE.match(sid):
+        # Invalid sid — cannot key the cache; plain return.
         return None
 
     now = time.time()
     cached = _SESSION_COST_CACHE.get(sid)
     if cached and (now - cached[0]) < _SESSION_COST_TTL:
         _SESSION_COST_CACHE.move_to_end(sid)  # LRU touch
-        return cached[1]
+        return cached[1]  # may be None if a sentinel was stored
+
+    def _cache_sentinel():
+        """Store (now, None) sentinel so repeated failure calls are cheap."""
+        _SESSION_COST_CACHE[sid] = (now, None)
+        _SESSION_COST_CACHE.move_to_end(sid)
+        while len(_SESSION_COST_CACHE) > _SESSION_COST_CACHE_MAX:
+            _SESSION_COST_CACHE.popitem(last=False)
 
     tp = data.get("transcript_path")
     path = _safe_transcript_path(tp)
@@ -1869,13 +1920,16 @@ def _aggregate_session_cost(data):
         except OSError:
             path = None
     if path is None:
+        _cache_sentinel()
         return None
 
     try:
         st = path.stat()
     except OSError:
+        _cache_sentinel()
         return None
     if st.st_size > TRANSCRIPT_MAX_BYTES:
+        _cache_sentinel()
         return None
 
     inp = out = cr = cw = 0.0
@@ -1890,8 +1944,10 @@ def _aggregate_session_cost(data):
             try:
                 fst = os.fstat(f.fileno())
             except OSError:
+                _cache_sentinel()
                 return None
             if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+                _cache_sentinel()
                 return None
             for line in f:
                 line = line.strip()
@@ -1934,7 +1990,11 @@ def _aggregate_session_cost(data):
                 if isinstance(cc, dict):
                     c1h += int(_num(cc.get("ephemeral_1h_input_tokens", 0)))
                     c5m += int(_num(cc.get("ephemeral_5m_input_tokens", 0)))
+                # Known-but-ignored fields (F-18/F-19/F-20 / SD-003/007/008):
+                # u.get("diagnostics"), u.get("inference_geo"), u.get("service_tier"),
+                # rec.get("context_management") — not needed for cost/token aggregation.
     except OSError:
+        _cache_sentinel()
         return None
 
     result = {
@@ -2027,7 +2087,9 @@ def render_cost_breakdown(data, hist, cols, rows):
     cache_savings = cr_full_price - cr_cost
 
     buf.append(sep(SW))
-    tc_title = "LAST REQUEST (est.)"
+    _entry = _MODELS.get(_model_base(model_id))
+    _has_fast = bool(_entry and _entry.get("pricing_fast"))
+    tc_title = "LAST REQUEST (est., std rates)" if _has_fast else "LAST REQUEST (est.)"
     tc_pad = max(0, SW - len(tc_title))
     buf.append(f"{BG_BAR}{C_WHT}{B}{tc_title}{R}{BG_BAR}{' ' * tc_pad}{R}")
     buf.append(sep(SW))
@@ -2338,6 +2400,11 @@ def render_menu(cols, rows):
 # ---------------------------------------------------------------------------
 _update_result = None  # None=not run, str=output message
 _update_lock = threading.Lock()
+# F-01 / CACHE-10: non-blocking lock for the _update_checks background worker.
+# Acquired here (non-blocking), released by the worker's finally block so no
+# two git-subprocesses run concurrently.  Mirrors _rls_maybe_check pattern.
+_checks_lock = threading.Lock()
+_checks_thread = None  # handle kept to allow is_alive() guard
 # Handle to the in-flight self-update worker (set by _apply_update_action).
 # Read by the main loop's `q` handler to refuse quitting mid git-pull, which
 # would kill the daemon before its post-pull syntax check runs (M-cross-1).
@@ -2457,17 +2524,47 @@ def _cached_get_remote_changelog_preview(version, max_lines=15):
     return cl
 
 
+def _update_checks_worker():
+    """Background worker: run the 3 git safety checks and write result.
+    Mirrors _rls_check_worker: _checks_lock is acquired by the caller and
+    released here in a finally block so the caller never blocks.
+    F-01 / CACHE-10."""
+    try:
+        warns = _update_checks()
+        now = time.monotonic()
+        with _update_lock:
+            _update_modal_cache["checks_ts"] = now
+            _update_modal_cache["checks"] = warns
+    except Exception:  # noqa: BLE001 — best-effort; must not crash render loop
+        pass
+    finally:
+        _checks_lock.release()
+
+
 def _cached_update_checks():
-    """30s TTL cache around _update_checks (3 git subprocess calls)."""
+    """Non-blocking TTL cache around _update_checks (3 git subprocess calls).
+
+    On cache miss: kick a daemon background refresh (non-blocking lock acquire)
+    and immediately return the last cached value — the render frame never
+    blocks on git.  Mirrors the _rls_maybe_check / _rls_check_worker pattern.
+    F-01 / CACHE-10."""
+    global _checks_thread
     now = time.monotonic()
     with _update_lock:
         if now - _update_modal_cache["checks_ts"] < _UPDATE_MODAL_TTL:
             return _update_modal_cache["checks"]
-    warns = _update_checks()
-    with _update_lock:
-        _update_modal_cache["checks_ts"] = now
-        _update_modal_cache["checks"] = warns
-    return warns
+        stale = _update_modal_cache["checks"]
+    # Cache is stale — try to kick a background refresh (non-blocking).
+    if _checks_lock.acquire(blocking=False):
+        try:
+            t = threading.Thread(target=_update_checks_worker, daemon=True,
+                                 name="update-checks")
+            _checks_thread = t
+            t.start()
+        except Exception:  # noqa: BLE001
+            _checks_lock.release()
+    # Return last known value immediately; the worker will update the cache.
+    return stale
 
 
 def _invalidate_update_modal_cache():
@@ -2703,132 +2800,6 @@ def _total_tokens(m):
     return m.get("input", 0) + m.get("output", 0) + m.get("cache_read", 0) + m.get("cache_write", 0)
 
 
-_STATS_CACHE_PATH = pathlib.Path.home() / ".claude" / "stats-cache.json"
-_STATS_CACHE_MAX_BYTES = 4 * 1024 * 1024  # 4 MiB cap — CC stats cache is tiny in practice
-
-
-def _read_stats_cache():
-    """Read ~/.claude/stats-cache.json. Returns (data_dict, mtime) or (None, 0).
-
-    Validates schema version >= 1 and that top-level is a dict. Size-capped via
-    safe_read. No exceptions propagate — missing/invalid cache is silently None.
-    """
-    try:
-        st = _STATS_CACHE_PATH.stat()
-    except OSError:
-        return None, 0
-    raw = safe_read(_STATS_CACHE_PATH, _STATS_CACHE_MAX_BYTES)
-    if raw is None:
-        return None, 0
-    try:
-        obj = json.loads(raw.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, ValueError, UnicodeDecodeError, RecursionError):
-        return None, 0
-    if not isinstance(obj, dict):
-        return None, 0
-    ver = obj.get("version")
-    if not isinstance(ver, int) or ver < 1:
-        return None, 0
-    return obj, st.st_mtime
-
-
-_HEATMAP_GLYPHS = " ▁▂▃▄▅▆▇█"  # 9 levels including blank for zero
-
-
-def _append_lifetime_block(buf, rows, width):
-    """Append the LIFETIME ACTIVITY block to buf when the stats cache exists.
-
-    The whole block (incl. DAILY) is always emitted; the modal is scrollable
-    (_window_buf), so nothing is dropped to "fit" the terminal height — that
-    rows-gating used to make LIFETIME/DAILY unreachable on short terminals.
-    Cache miss skips silently. ``rows`` is kept for signature compatibility.
-    """
-    cache, _ = _read_stats_cache()
-    if not cache:
-        return
-
-    cd = cache.get("lastComputedDate") or "?"
-    la_title = f"LIFETIME  cached {cd}"
-    la_pad = max(0, width - len(la_title))
-
-    block = []
-    block.append(sep(width))
-    block.append(f"{BG_BAR}{C_WHT}{B}{la_title}{R}{BG_BAR}{' ' * la_pad}{R}")
-    block.append(sep(width))
-
-    tot_ses = int(_num(cache.get("totalSessions", 0)))
-    tot_msg = int(_num(cache.get("totalMessages", 0)))
-    tot_tlc = sum(int(_num(d.get("toolCallCount", 0)))
-                  for d in (cache.get("dailyActivity") or [])
-                  if isinstance(d, dict))
-    block.append(
-        f"{C_WHT}SES{R} {C_WHT}{tot_ses:,}{R} "
-        f"{C_WHT}MSG{R} {C_WHT}{tot_msg:,}{R} "
-        f"{C_WHT}TLC{R} {C_WHT}{tot_tlc:,}{R}"
-    )
-
-    first = cache.get("firstSessionDate") or ""
-    first_short = first[:10] if isinstance(first, str) else ""
-    longest = cache.get("longestSession") or {}
-    ls_dur = int(_num(longest.get("duration", 0))) if isinstance(longest, dict) else 0
-    block.append(
-        f"{C_WHT}1ST{R} {C_WHT}{first_short or '--'}{R} "
-        f"{C_WHT}LSS{R} {C_WHT}{f_dur(ls_dur)}{R}"
-    )
-
-    heat = _render_hour_heatmap(cache.get("hourCounts") or {})
-    # Labels align with heatmap glyph positions 0,6,12,18 (after 4-char prefix).
-    block.append(f"{C_DIM}HRS{R} {C_DIM}0     6     12    18{R}")
-    block.append(f"{C_DIM}ACT{R} {C_CYN}{heat}{R}")
-
-    daily = cache.get("dailyActivity") or []
-    items = [d for d in daily if isinstance(d, dict)] if isinstance(daily, list) else []
-    if items:
-        items.sort(key=lambda d: d.get("date") or "", reverse=True)
-        block.append(sep(width))
-        block.append(f"{C_DIM}DAILY{R}")
-        for d in items[:5]:
-            date_s = (d.get("date") or "")[5:]  # MM-DD
-            ses = int(_num(d.get("sessionCount", 0)))
-            msg = int(_num(d.get("messageCount", 0)))
-            tlc = int(_num(d.get("toolCallCount", 0)))
-            block.append(
-                f"{date_s} {C_DIM}SES{R} {C_WHT}{ses:,}{R} "
-                f"{C_DIM}MSG{R} {C_WHT}{msg:,}{R} "
-                f"{C_DIM}TLC{R} {C_WHT}{tlc:,}{R}"
-            )
-
-    buf.extend(block)
-
-
-def _render_hour_heatmap(hour_counts):
-    """Map dict[str_hour -> count] to a 24-char heatmap string.
-
-    Empty/all-zero input renders as 24 spaces. Each hour quantized to one of 9
-    levels by max-normalized fraction. Hours outside 0..23 are ignored.
-    """
-    counts = [0] * 24
-    if isinstance(hour_counts, dict):
-        for k, v in hour_counts.items():
-            try:
-                h = int(k)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= h < 24:
-                try:
-                    counts[h] = max(0, int(v))
-                except (TypeError, ValueError):
-                    counts[h] = 0
-    peak = max(counts)
-    if peak <= 0:
-        return " " * 24
-    last = len(_HEATMAP_GLYPHS) - 1
-    out = []
-    for c in counts:
-        idx = 0 if c <= 0 else max(1, min(last, round(c / peak * last)))
-        out.append(_HEATMAP_GLYPHS[idx])
-    return "".join(out)
-
 
 _stats_scan_thread = None
 _stats_scan_lock = threading.Lock()
@@ -2874,7 +2845,6 @@ def render_stats(cols, rows, period="all"):
     if not models:
         buf.append(f"{C_DIM}No transcript data found in ~/.claude/projects/{R}")
         buf.append(f"{C_DIM}(stats appear after at least one CC session){R}")
-        _append_lifetime_block(buf, rows, SW)
         buf.append(sep(SW))
         buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
         buf.append(f"{C_DIM}press any key to close{R}")
@@ -2904,7 +2874,7 @@ def render_stats(cols, rows, period="all"):
         f"{C_WHT}STK{R} {C_WHT}{current_streak}d{R}"
         f"{C_DIM}/{longest_streak}d{R}{trunc_tag}"
     )
-    buf.append(f"{C_WHT}LSS{R} {C_WHT}{f_dur(longest_ms)}{R} {C_WHT}TOP{R} {C_WHT}{most_active}{R}")
+    buf.append(f"{C_WHT}LSS{R} {C_WHT}{f_dur(longest_ms)}{R} {C_WHT}PEAK{R} {C_WHT}{most_active}{R}")
 
     # -- Models section --
     total_all = sum(_total_tokens(m) for m in models.values())
@@ -2917,6 +2887,8 @@ def render_stats(cols, rows, period="all"):
     buf.append(f"{BG_BAR}{C_WHT}{B}MODELS{R}{BG_BAR}{' ' * mp}{R}")
     buf.append(sep(SW))
     for i, (mid, st) in enumerate(sorted_models):
+        if i > 0:
+            buf.append("")
         color = _MODEL_COLORS[i % len(_MODEL_COLORS)]
         code, ver = _model_code(mid)
         total_m = _total_tokens(st)
@@ -2933,7 +2905,8 @@ def render_stats(cols, rows, period="all"):
                 f"    {C_DIM}CRD:{R} {color}{f_tok(st.get('cache_read', 0))}{R}"
                 f" {C_DIM}CWR:{R} {color}{f_tok(st.get('cache_write', 0))}{R}"
             )
-        buf.append(sep(SW))
+
+    buf.append(sep(SW))
 
     # Totals
     total_in = sum(m["input"] for m in models.values())
@@ -2952,8 +2925,6 @@ def render_stats(cols, rows, period="all"):
             f"    {C_DIM}CRD:{R} {C_WHT}{f_tok(total_cr)}{R}"
             f" {C_DIM}CWR:{R} {C_WHT}{f_tok(total_cw)}{R}"
         )
-
-    _append_lifetime_block(buf, rows, SW)
 
     buf.append(sep(SW))
     buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
@@ -3050,6 +3021,7 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
         mt = lst.st_mtime
         tok = 0
         last_tool = None
+        attr_label = None  # first attributionAgent value found in this file (F-08)
         # Bounded, TOCTOU-safe read (never exceeds the cap even if the file
         # grows between lstat and read). None == unreadable or over cap.
         raw = safe_read(f, _SUBAGENT_FILE_MAX)
@@ -3062,6 +3034,11 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
                     continue
                 if not isinstance(o, dict):
                     continue  # valid JSON but not an object (e.g. bare array)
+                # Extract attributionAgent label from first matching record (F-08)
+                if attr_label is None:
+                    al = o.get("attributionAgent")
+                    if isinstance(al, str) and al.strip():
+                        attr_label = _sanitize(al.strip())
                 m = o.get("message")
                 if not isinstance(m, dict):
                     continue
@@ -3080,8 +3057,9 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
         aid = f.stem
         if aid.startswith("agent-"):
             aid = aid[6:]
-        agents.append({"id": aid[:12], "tokens": int(tok), "tool": last_tool,
-                       "active": is_active, "mtime": mt, "too_large": too_large})
+        agents.append({"id": _sanitize(aid[:12]), "tokens": int(tok), "tool": last_tool,
+                       "active": is_active, "mtime": mt, "too_large": too_large,
+                       "label": attr_label})
 
     agents.sort(key=lambda a: a["mtime"], reverse=True)
     # total counts agents we actually materialised (stat/symlink-rejected files
@@ -3091,9 +3069,20 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
 
     _subagents_cache[key] = {"t": mono, "data": data}
     if len(_subagents_cache) > _SUBAGENTS_CACHE_MAX:
-        oldest = min(_subagents_cache, key=lambda kk: _subagents_cache[kk]["t"])
-        if oldest != key:
-            _subagents_cache.pop(oldest, None)
+        oldest = min((_k for _k in _subagents_cache if _k != key),
+                     key=lambda kk: _subagents_cache[kk]["t"], default=None)
+        if oldest is not None:
+            evicted = _subagents_cache.pop(oldest, None)
+            # Tombstone (F-07 / CACHE-09): keep last-known data for render_agents
+            # so re-opening the modal doesn't flash "Scanning…".  Only re-add when
+            # it fits within the cap; if we're still over the limit after pop the
+            # tombstone is silently dropped to enforce the hard size bound.
+            if (evicted is not None and evicted.get("data") is not None
+                    and not evicted.get("_tombstone")
+                    and len(_subagents_cache) < _SUBAGENTS_CACHE_MAX):
+                _subagents_cache[oldest] = {
+                    "t": evicted["t"], "data": evicted["data"], "_tombstone": True
+                }
     return data
 
 
@@ -3214,11 +3203,13 @@ def render_agents(data, cols, rows, active_only=False):
         # Fixed-width columns so the token / tool columns line up regardless of
         # how wide each agent's formatted token count is (pad the plain text
         # before wrapping it in ANSI, or the escape bytes would skew alignment).
-        aid = a["id"][:12].ljust(12)
+        # F-08: show sanitized attributionAgent label when present; fall back to id.
+        # Both id (sanitized in scan_subagents) and label are already _sanitize()'d.
+        disp = (a.get("label") or a["id"])[:14].ljust(14)
         # A too-large transcript is skipped for token-summing — show "  >cap"
         # instead of a misleading 0 so the count isn't silently undercounted.
         tok_str = f"{'>cap' if a.get('too_large') else f_tok(a['tokens']):>7}"
-        line = (f"{dot} {C_DIM}{aid}{R}  "
+        line = (f"{dot} {C_DIM}{disp}{R}  "
                 f"{C_WHT}{tok_str}{R} {C_DIM}tok{R}   {C_CYN}{tool}{R}")
         buf.append(truncate(line, SW))
 

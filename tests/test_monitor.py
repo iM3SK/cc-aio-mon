@@ -684,13 +684,16 @@ class TestCachedFreshestRateLimits(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self._orig = monitor.DATA_DIR
         self._orig_cache = _rl_fresh_cache.copy()
+        self._orig_last_good = monitor._rl_last_good["rl"]
         monitor.DATA_DIR = pathlib.Path(self.tmpdir)
         _rl_fresh_cache.update({"t": -1.0, "rl": None})  # force a fresh scan
+        monitor._rl_last_good["rl"] = None  # F-03: reset last-good between tests
 
     def tearDown(self):
         import shutil, monitor
         monitor.DATA_DIR = self._orig
         _rl_fresh_cache.update(self._orig_cache)
+        monitor._rl_last_good["rl"] = self._orig_last_good
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _write(self, sid, rl, age=0.0):
@@ -721,10 +724,31 @@ class TestCachedFreshestRateLimits(unittest.TestCase):
         self.assertEqual(out["five_hour"]["used_percentage"], 53)
 
     def test_fallback_when_no_snapshot_has_limits(self):
-        # A fresher snapshot without rate_limits must not shadow the fallback.
+        # A fresher snapshot without rate_limits must not shadow the fallback
+        # when last-good is also None (fresh state — _rl_last_good reset in setUp).
         self._write("33333333-3333-3333-3333-333333333333", None, age=0)
         fb = {"five_hour": {"used_percentage": 12}}
         self.assertIs(cached_freshest_rate_limits(fb), fb)
+
+    def test_last_good_survives_snapshot_without_limits(self):
+        # F-03 / RL-002: after a scan that found rate_limits, a subsequent scan
+        # that finds NO rate_limits (e.g. idle session snapshot) must return the
+        # last-known good value rather than blinking back to the fallback.
+        import monitor
+        good_rl = {"five_hour": {"used_percentage": 42}}
+        # First call: snapshot carries rate_limits -> populates last-good.
+        sid_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        self._write(sid_a, good_rl, age=0)
+        result1 = cached_freshest_rate_limits({"five_hour": {"used_percentage": 0}}, ttl=0)
+        self.assertEqual(result1["five_hour"]["used_percentage"], 42)
+        self.assertEqual(monitor._rl_last_good["rl"]["five_hour"]["used_percentage"], 42)
+        # Second call: same snapshot now lacks rate_limits; last-good must be served.
+        self._write(sid_a, None, age=0)
+        _rl_fresh_cache.update({"t": -1.0, "rl": None})  # force re-scan
+        fb2 = {"five_hour": {"used_percentage": 0}}
+        result2 = cached_freshest_rate_limits(fb2, ttl=0)
+        self.assertEqual(result2["five_hour"]["used_percentage"], 42,
+                         "expected last-good, got fallback or wrong value")
 
     def test_recursionerror_snapshot_returns_fallback(self):
         self._write("33333333-3333-3333-3333-333333333333",
@@ -741,6 +765,22 @@ class TestCachedFreshestRateLimits(unittest.TestCase):
         self._write("44444444-4444-4444-4444-444444444444",
                     {"five_hour": {"used_percentage": 5}}, age=0)
         self.assertIs(cached_freshest_rate_limits({"x": 1}, ttl=60), cached)
+
+    def test_ttl_cached_none_returns_last_good_then_fallback(self):
+        # F-03: cache-hit with rl=None should serve last-good if available,
+        # otherwise fallback.  Simulates the case where the cache was written
+        # with result=None (no limits found) but last-good has a value.
+        import time, monitor
+        fb = {"five_hour": {"used_percentage": 0}}
+        last_good = {"five_hour": {"used_percentage": 77}}
+        monitor._rl_last_good["rl"] = last_good
+        _rl_fresh_cache.update({"t": time.monotonic(), "rl": None})
+        result = cached_freshest_rate_limits(fb, ttl=60)
+        self.assertIs(result, last_good)
+        # With no last-good, must fall through to fallback.
+        monitor._rl_last_good["rl"] = None
+        _rl_fresh_cache.update({"t": time.monotonic(), "rl": None})
+        self.assertIs(cached_freshest_rate_limits(fb, ttl=60), fb)
 
     def test_render_frame_override_beats_session_field(self):
         data = _full_data()
@@ -779,6 +819,15 @@ class TestParseTs(unittest.TestCase):
 
     def test_malformed(self):
         self.assertEqual(_parse_ts("not-a-date"), 0)
+
+    def test_integer_timestamp_returns_zero(self):
+        # F-24 / CORRECTNESS-001: integer unix timestamps must return 0,
+        # not raise AttributeError (.replace() does not exist on int).
+        self.assertEqual(_parse_ts(1_700_000_000), 0)
+
+    def test_float_timestamp_returns_zero(self):
+        # Same guard: float input must not propagate AttributeError.
+        self.assertEqual(_parse_ts(1_700_000_000.5), 0)
 
     def test_consistent_across_formats(self):
         """Z is UTC, explicit offsets are honoured; no-tz parses naive local."""
@@ -1330,7 +1379,8 @@ class TestRenderStats(unittest.TestCase):
         self.assertIn("Last 30 Days", _ANSI_RE.sub("", "\n".join(buf_30d)))
 
     def test_footer_has_keys(self):
-        buf = render_stats(80, 24, "all")
+        # rows=200: large enough that _window_buf never clips the footer.
+        buf = render_stats(80, 200, "all")
         plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("1", plain)
         self.assertIn("2", plain)
@@ -1396,7 +1446,7 @@ class TestRenderLegend(unittest.TestCase):
     def test_contains_usage_stats_section(self):
         buf = render_legend(80, 60)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        for label in ["SES", "DAY", "STK", "LSS", "TOP"]:
+        for label in ["SES", "DAY", "STK", "LSS", "PEAK"]:
             self.assertIn(label, plain)
 
     def test_contains_keys(self):
@@ -1586,9 +1636,31 @@ class TestAggregateSessionCost(unittest.TestCase):
             "session_id": "abcd9999",
             "transcript_path": "/nonexistent/path/x.jsonl",
         }
+        _SESSION_COST_CACHE.clear()
         with patch("pathlib.Path.home", return_value=pathlib.Path("/nonexistent")):
             result = _aggregate_session_cost(data)
         self.assertIsNone(result)
+
+    def test_aggregate_session_cost_failure_writes_sentinel(self):
+        # F-06 / CACHE-06: a failure for a valid sid must write a (ts, None)
+        # sentinel into _SESSION_COST_CACHE so repeated render calls within TTL
+        # skip the re-scan and return None cheaply.
+        sid = "ffff0000-ffff-0000-ffff-000000000000"
+        data = {"session_id": sid, "transcript_path": "/nonexistent/x.jsonl"}
+        _SESSION_COST_CACHE.clear()
+        import monitor as _monitor
+        with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", "/nonexistent"):
+            result = _aggregate_session_cost(data)
+        self.assertIsNone(result)
+        # Sentinel must have been written.
+        self.assertIn(sid, _SESSION_COST_CACHE)
+        ts, val = _SESSION_COST_CACHE[sid]
+        self.assertIsNone(val)
+        self.assertGreater(ts, 0)
+        # Second call within TTL must return cached None immediately (no re-scan).
+        with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", "/nonexistent"):
+            result2 = _aggregate_session_cost(data)
+        self.assertIsNone(result2)
 
     def test_aggregate_session_cost_cache_ttl(self):
         import tempfile, shutil, pathlib as _pathlib
@@ -2708,8 +2780,24 @@ class TestGetPricing(unittest.TestCase):
         p = _get_pricing("claude-mythos-5")
         self.assertEqual((p["input"], p["output"]), (10.0, 50.0))
 
+    # --- Short-ID fallbacks must not fall back to _DEFAULT_PRICING (F-11) ---
+    def test_short_id_haiku_has_real_pricing(self):
+        p = _get_pricing("haiku")
+        self.assertEqual((p["input"], p["output"]), (1.0, 5.0))
+        self.assertNotEqual(p, _DEFAULT_PRICING)
+
+    def test_short_id_sonnet_has_real_pricing(self):
+        p = _get_pricing("sonnet")
+        self.assertEqual((p["input"], p["output"]), (3.0, 15.0))
+
+    def test_short_id_opus_has_real_pricing(self):
+        p = _get_pricing("opus")
+        self.assertEqual((p["input"], p["output"]), (5.0, 25.0))
+
     # --- Fast mode (speed="fast") selects premium rates where defined ---
     def test_fast_opus_48(self):
+        # F-12 resolved (Anthropic pricing page, 2026-06): Opus 4.8 fast = $10/$50,
+        # distinct from Opus 4.7/4.6 fast ($30/$150).
         p = _get_pricing("claude-opus-4-8", "fast")
         self.assertEqual((p["input"], p["output"]), (10.0, 50.0))
 
@@ -3316,9 +3404,13 @@ class TestAuditRegressionV1105(unittest.TestCase):
         with open(monitor.__file__, encoding="utf-8") as fh:
             src = fh.read()
         loc = src.count("\n") + (0 if src.endswith("\n") else 1)
+        # Threshold raised from 3800 → 4000: v1.15.x audit remediation added
+        # ~140 net lines of functional code (sentinel caching, last-good RL,
+        # async update-checks worker, F-08/F-09/F-13/F-28 guards). The 3800
+        # baseline reflected pre-audit state; 4000 re-establishes the guard.
         self.assertLess(
-            loc, 3800,
-            f"monitor.py is {loc} LOC, past the 3800-line maintainability trigger. "
+            loc, 4000,
+            f"monitor.py is {loc} LOC, past the 4000-line maintainability trigger. "
             f"Reduce the file or raise this trigger with a technical rationale."
         )
 
@@ -3907,205 +3999,6 @@ class TestRenderCostBreakdownServerTool(unittest.TestCase):
         self.assertIn("T5M:", plain)
 
 
-class TestReadStatsCache(unittest.TestCase):
-    """Coverage for _read_stats_cache — CC ~/.claude/stats-cache.json reader."""
-
-    def setUp(self):
-        import monitor as _monitor
-        self._monitor = _monitor
-        self._tmpdir = tempfile.mkdtemp()
-        self._fake_path = pathlib.Path(self._tmpdir) / "stats-cache.json"
-        self._orig_path = _monitor._STATS_CACHE_PATH
-        _monitor._STATS_CACHE_PATH = self._fake_path
-
-    def tearDown(self):
-        import shutil as _sh
-        self._monitor._STATS_CACHE_PATH = self._orig_path
-        _sh.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_missing_file(self):
-        data, mt = self._monitor._read_stats_cache()
-        self.assertIsNone(data)
-        self.assertEqual(mt, 0)
-
-    def test_invalid_json(self):
-        self._fake_path.write_text("not json", encoding="utf-8")
-        data, mt = self._monitor._read_stats_cache()
-        self.assertIsNone(data)
-        self.assertEqual(mt, 0)
-
-    def test_missing_version(self):
-        self._fake_path.write_text(json.dumps({"foo": "bar"}), encoding="utf-8")
-        data, mt = self._monitor._read_stats_cache()
-        self.assertIsNone(data)
-
-    def test_invalid_version_type(self):
-        self._fake_path.write_text(json.dumps({"version": "3"}), encoding="utf-8")
-        data, mt = self._monitor._read_stats_cache()
-        self.assertIsNone(data)
-
-    def test_non_dict_root(self):
-        self._fake_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-        data, mt = self._monitor._read_stats_cache()
-        self.assertIsNone(data)
-
-    def test_oversize_rejected(self):
-        self._fake_path.write_bytes(b"x" * (self._monitor._STATS_CACHE_MAX_BYTES + 1))
-        data, mt = self._monitor._read_stats_cache()
-        self.assertIsNone(data)
-
-    def test_valid_cache(self):
-        payload = {
-            "version": 3,
-            "lastComputedDate": "2026-04-24",
-            "totalSessions": 31,
-            "totalMessages": 8744,
-            "hourCounts": {"0": 7, "12": 1},
-            "dailyActivity": [{"date": "2026-04-24", "messageCount": 865, "sessionCount": 1, "toolCallCount": 239}],
-        }
-        self._fake_path.write_text(json.dumps(payload), encoding="utf-8")
-        data, mt = self._monitor._read_stats_cache()
-        self.assertIsNotNone(data)
-        self.assertEqual(data["totalSessions"], 31)
-        self.assertGreater(mt, 0)
-
-
-class TestRenderHourHeatmap(unittest.TestCase):
-
-    def setUp(self):
-        import monitor as _monitor
-        self._monitor = _monitor
-
-    def test_empty_dict(self):
-        result = self._monitor._render_hour_heatmap({})
-        self.assertEqual(result, " " * 24)
-
-    def test_all_zero(self):
-        result = self._monitor._render_hour_heatmap({"0": 0, "12": 0})
-        self.assertEqual(result, " " * 24)
-
-    def test_single_hour(self):
-        result = self._monitor._render_hour_heatmap({"5": 100})
-        self.assertEqual(len(result), 24)
-        self.assertEqual(result[5], "█")  # peak hour gets full block
-        # Other hours blank
-        self.assertEqual(result[0], " ")
-
-    def test_peak_is_highest_glyph(self):
-        result = self._monitor._render_hour_heatmap({"3": 1, "10": 50, "20": 100})
-        self.assertEqual(result[20], "█")
-        # mid value uses lower glyph
-        self.assertNotEqual(result[10], "█")
-        self.assertNotEqual(result[10], " ")
-
-    def test_invalid_keys_ignored(self):
-        result = self._monitor._render_hour_heatmap({"abc": 5, "24": 10, "-1": 7, "5": 1})
-        self.assertEqual(len(result), 24)
-        self.assertEqual(result[5], "█")
-
-    def test_negative_values_treated_as_zero(self):
-        result = self._monitor._render_hour_heatmap({"5": -10, "6": 10})
-        self.assertEqual(result[5], " ")
-        self.assertEqual(result[6], "█")
-
-    def test_non_dict_input(self):
-        result = self._monitor._render_hour_heatmap(None)
-        self.assertEqual(result, " " * 24)
-
-
-class TestRenderStatsLifetime(unittest.TestCase):
-    """Coverage for LIFETIME ACTIVITY block in render_stats."""
-
-    def setUp(self):
-        import monitor as _monitor
-        self._monitor = _monitor
-        self._tmpdir = tempfile.mkdtemp()
-        self._fake_path = pathlib.Path(self._tmpdir) / "stats-cache.json"
-        self._orig_path = _monitor._STATS_CACHE_PATH
-        _monitor._STATS_CACHE_PATH = self._fake_path
-        # Force scan_transcript_stats to return empty so layout is deterministic
-        # and the LIFETIME block has predictable space budget.
-        self._scan_patcher = patch.object(
-            _monitor, "scan_transcript_stats",
-            return_value=({}, {"sessions": 0, "active_days": set(),
-                                "longest_dur_ms": 0, "first_date": None,
-                                "daily_tokens": {}, "truncated": False}),
-        )
-        self._scan_patcher.start()
-
-    def tearDown(self):
-        import shutil as _sh
-        self._scan_patcher.stop()
-        self._monitor._STATS_CACHE_PATH = self._orig_path
-        # Clear module-level caches so we don't pollute subsequent tests
-        self._monitor._usage_cache.clear()
-        _sh.rmtree(self._tmpdir, ignore_errors=True)
-
-    def _write_cache(self, **overrides):
-        payload = {
-            "version": 3,
-            "lastComputedDate": "2026-04-24",
-            "totalSessions": 42,
-            "totalMessages": 9999,
-            "firstSessionDate": "2026-04-20T17:54:18.073Z",
-            "longestSession": {"sessionId": "abc", "duration": 80793630, "messageCount": 100},
-            "hourCounts": {"5": 10, "14": 25, "20": 50},
-            "dailyActivity": [
-                {"date": "2026-04-24", "messageCount": 865, "sessionCount": 1, "toolCallCount": 239},
-                {"date": "2026-04-23", "messageCount": 928, "sessionCount": 2, "toolCallCount": 365},
-                {"date": "2026-04-22", "messageCount": 2018, "sessionCount": 4, "toolCallCount": 814},
-            ],
-        }
-        payload.update(overrides)
-        self._fake_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    def test_lifetime_block_renders_when_cache_present(self):
-        self._write_cache()
-        buf = self._monitor.render_stats(80, 40, period="all")
-        plain = "\n".join(_strip_ansi(buf))
-        self.assertIn("LIFETIME", plain)
-        self.assertIn("cached 2026-04-24", plain)
-        self.assertIn("42", plain)        # totalSessions
-        self.assertIn("9,999", plain)     # totalMessages
-        self.assertIn("HRS", plain)
-        self.assertIn("DAILY", plain)
-        self.assertIn("04-24", plain)     # date short
-
-    def test_lifetime_and_daily_always_emitted(self):
-        # Regression: _append_lifetime_block no longer drops LIFETIME/DAILY to
-        # "fit" the terminal — the whole block is always emitted (scrolling
-        # handles height). On a tall enough terminal _window_buf returns it all.
-        self._write_cache()
-        m = self._monitor
-        try:
-            m._modal_scroll = 0
-            buf = m.render_stats(80, 200, period="all")
-            plain = "\n".join(_strip_ansi(buf))
-            self.assertIn("LIFETIME", plain)
-            self.assertIn("DAILY", plain)
-        finally:
-            m._modal_scroll = 0
-
-    def test_stats_scrollable_on_small_terminal(self):
-        # On a short terminal the modal is windowed (not clipped-and-padded):
-        # at most `rows` lines, with a scroll position indicator.
-        self._write_cache()
-        m = self._monitor
-        try:
-            m._modal_scroll = 0
-            buf = m.render_stats(80, 12, period="all")
-            self.assertLessEqual(len(buf), 12)
-            plain = "\n".join(_strip_ansi(buf))
-            self.assertRegex(plain, r"\d+-\d+/\d+")  # "── 1-11/NN ──" indicator
-        finally:
-            m._modal_scroll = 0
-
-    def test_lifetime_block_skipped_when_cache_missing(self):
-        # No file written
-        buf = self._monitor.render_stats(80, 40, period="all")
-        plain = "\n".join(_strip_ansi(buf))
-        self.assertNotIn("LIFETIME", plain)
-
 
 # ---------------------------------------------------------------------------
 # TestMainSingleton — main() exits with code 1 when lock already held
@@ -4389,6 +4282,60 @@ class TestScanSubagents(unittest.TestCase):
         self.assertIn("[active]", act_flat)        # filter indicated in title
         # idle file still on disk (non-destructive)
         self.assertTrue((self.subdir / "agent-idle.jsonl").exists())
+
+    def test_attribution_agent_label_used_in_scan(self):
+        # F-08: attributionAgent field in a record should be read as the agent label.
+        import monitor, json
+        line = json.dumps({
+            "type": "assistant",
+            "attributionAgent": "haiku-scout",
+            "message": {"usage": {"input_tokens": 7}},
+        })
+        (self.subdir / "agent-xyz.jsonl").write_text(line + "\n", encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        agent = next(a for a in info["agents"] if a["id"] == "xyz")
+        self.assertEqual(agent["label"], "haiku-scout")
+
+    def test_attribution_agent_label_shown_in_render(self):
+        # F-08: render_agents must display the label instead of the short id.
+        import monitor, json
+        line = json.dumps({
+            "type": "assistant",
+            "attributionAgent": "sonnet-worker",
+            "message": {"usage": {"input_tokens": 3}},
+        })
+        (self.subdir / "agent-abc.jsonl").write_text(line + "\n", encoding="utf-8")
+        monitor.scan_subagents(str(self.tp), ttl=0)
+        buf = monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)
+        flat = "\n".join(_strip_ansi(buf))
+        self.assertIn("sonnet-worker", flat)
+
+    def test_agent_id_sanitized(self):
+        # F-28: agent id with ANSI-escape chars must be sanitized before display.
+        import monitor, json
+        bad_id_name = "agent-\x1b[31mevil\x1b[0m.jsonl"
+        try:
+            (self.subdir / bad_id_name).write_text(
+                json.dumps({"message": {"usage": {"input_tokens": 1}}}) + "\n",
+                encoding="utf-8")
+        except (OSError, ValueError):
+            self.skipTest("filesystem rejects ANSI chars in filename")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        for a in info["agents"]:
+            self.assertNotIn("\x1b", a["id"])
+
+    def test_attribution_label_sanitized(self):
+        # F-28: attributionAgent value with ANSI escapes must be sanitized.
+        import monitor, json
+        line = json.dumps({
+            "type": "assistant",
+            "attributionAgent": "\x1b[31mbad-label\x1b[0m",
+            "message": {"usage": {"input_tokens": 2}},
+        })
+        (self.subdir / "agent-q.jsonl").write_text(line + "\n", encoding="utf-8")
+        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        agent = next(a for a in info["agents"] if a["id"] == "q")
+        self.assertNotIn("\x1b", agent.get("label") or "")
 
     def test_render_is_async_non_blocking(self):
         # Perf: with an empty cache the render shows "Scanning…" and kicks a

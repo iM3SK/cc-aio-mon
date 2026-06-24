@@ -76,7 +76,7 @@ REPO_ROOT = Path(__file__).parent.resolve()
 MIN_PYTHON = (3, 8)
 
 
-def run_git(args, capture=True, timeout=30):
+def run_git(args, timeout=30):
     """Run git command in repo root. Returns CompletedProcess."""
     return _shared_run_git(args, cwd=REPO_ROOT, timeout=timeout)
 

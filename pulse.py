@@ -30,6 +30,7 @@ Snapshot schema (keys may be None during warm-up or on errors):
 import json
 import re
 import socket
+import stat
 import statistics
 import threading
 import time
@@ -440,10 +441,11 @@ def cleanup_log_startup():
     Idempotent. Safe on missing file / malformed lines / permission errors.
     """
     try:
-        if not LOG_PATH.exists():
-            return
+        st = LOG_PATH.lstat()
     except OSError:
         return
+    if stat.S_ISLNK(st.st_mode):
+        return  # refuse to follow or overwrite a symlink
     cutoff = time.time() - LOG_AGE_CUTOFF
     # Bounded read — hard ceiling 2× LOG_MAX_BYTES protects against malicious growth
     raw = safe_read(LOG_PATH, LOG_MAX_BYTES * 2)

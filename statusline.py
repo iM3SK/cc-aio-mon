@@ -20,13 +20,14 @@ import struct
 import sys
 import time
 
-from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, atomic_write_text,
+from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
                     f_tok, f_cost, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
                     lock_file_handle, unlock_file_handle,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
                     DATA_DIR, RESERVED_SIDS, SCHEMA_VERSION,
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
+                    char_width,
                     R, B, C_RED, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 
@@ -141,18 +142,18 @@ def seg_model(data):
     name = _sanitize((data.get("model") or {}).get("display_name", ""))
     name = strip_context_suffix(name).replace(" (200k)", "")
     text = f"{B}{C_WHT}{name}{R}"
-    return text, len(_ANSI_RE.sub("", text))
+    return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def seg_ctx(data):
     cw = data.get("context_window") or {}
-    pct = round(_num(cw.get("used_percentage")))
+    pct = round(max(0.0, min(100.0, _num(cw.get("used_percentage")))))
     total = _num(cw.get("context_window_size"), 0)
     used = int(total * pct / 100) if total else 0
     c = cpc_base(pct, C_CYN)
     tok = f" {C_CYN}{f_tok(used)}/{f_tok(int(total))}{R}" if total else ""
     text = f"{C_CYN}{B}CTX{R} {c}{pct}%{R}{tok}"
-    return text, len(_ANSI_RE.sub("", text))
+    return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def seg_5hl(data):
@@ -170,7 +171,7 @@ def seg_5hl(data):
     c = cpc_base(pct, C_YEL)
     reset_str = f" {c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
     text = f"{c}{B}5HL{R} {c}{pct}%{R}{reset_str}"
-    return text, len(_ANSI_RE.sub("", text))
+    return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def seg_7dl(data):
@@ -188,7 +189,7 @@ def seg_7dl(data):
     c = cpc_base(pct, C_YEL)
     reset_str = f" {c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
     text = f"{c}{B}7DL{R} {c}{pct}%{R}{reset_str}"
-    return text, len(_ANSI_RE.sub("", text))
+    return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def seg_cost(data):
@@ -196,14 +197,57 @@ def seg_cost(data):
     if usd <= 0:
         return None
     text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost(usd)}{R}"
-    return text, len(_ANSI_RE.sub("", text))
+    return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def seg_brn(brn):
     if brn is None or brn <= 0.0001:
         return None
     text = f"{C_ORN}BRN{R} {C_ORN}{B}{brn:.4f} $/min{R}"
-    return text, len(_ANSI_RE.sub("", text))
+    return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
+
+
+def _last_known_rate_limits(hist):
+    """Most recent rate_limits for this account when the current CC event omitted
+    them. Claude Code emits rate_limits only intermittently, so reading solely
+    from the live event makes the 5HL/7DL segments blink out. Mirrors the
+    dashboard fallback (monitor.cached_freshest_rate_limits). Sources, in order:
+    (1) this session's own history (already in memory — no extra IO);
+    (2) the freshest *.json snapshot across all sessions (account-wide, since
+    5H/7D limits are per-account). Returns None when nothing usable is found."""
+    for entry in reversed(hist or []):
+        if isinstance(entry, dict) and entry.get("rate_limits"):
+            sv = entry.get("_schema_version")
+            if isinstance(sv, int) and sv > SCHEMA_VERSION:
+                continue  # written by a newer build — skip, same gate as snapshot branch
+            return entry["rate_limits"]
+    best_mt, best_rl = -1.0, None
+    try:
+        if is_safe_dir(DATA_DIR):
+            for f in DATA_DIR.glob("*.json"):
+                if f.stem in RESERVED_SIDS or not _SID_RE.match(f.stem):
+                    continue
+                try:
+                    mt = f.stat().st_mtime
+                    if mt <= best_mt:
+                        continue  # cannot beat current best — skip the read
+                    raw = safe_read(f, MAX_FILE_SIZE)
+                    if raw is None:
+                        continue
+                    d = json.loads(raw.decode("utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                sv = d.get("_schema_version")
+                if isinstance(sv, int) and sv > SCHEMA_VERSION:
+                    continue  # newer-build snapshot — same gate as monitor.load_state
+                rl = d.get("rate_limits")
+                if rl:
+                    best_mt, best_rl = mt, rl
+    except OSError:
+        pass
+    return best_rl
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +313,20 @@ def main():
 
     # Read history BEFORE writing — needed for BRN rate computation
     hist = _load_history_for_rates(sid)
-    brn, _ctr = _calc_rates(hist)
+    brn, _ = _calc_rates(hist)
+
+    # CC emits rate_limits only intermittently; when this event lacks them, show
+    # the last known value (the dashboard does the same) so the 5HL/7DL segments
+    # don't blink out between updates. Display-only — the snapshot/history written
+    # below keep just what CC actually sent (no synthetic rate_limits leak into IPC).
+    display = data
+    if not data.get("rate_limits"):
+        rl = _last_known_rate_limits(hist)
+        if rl:
+            display = {**data, "rate_limits": rl}
 
     cols = _get_terminal_width(fallback=120)
-    line = build_line(data, cols, brn=brn)
+    line = build_line(display, cols, brn=brn)
     if line:
         # Claude Code reads this line from the statusline subprocess's stdout.
         # If it closed the pipe early (e.g. the event was superseded), print()
@@ -337,6 +391,9 @@ def write_shared_state(data: dict):
     # statusline append landing between the trim's read and its atomic
     # replace would be silently lost. Lock failure degrades to the old
     # unlocked best-effort behaviour.
+    # NOTE: the sidecar lock serializes only statusline<->statusline writers
+    # (append vs trim). It does NOT cover the monitor read-path; that is
+    # handled separately by shared.load_history (atomic line-oriented reads).
     hist = base / f"{sid}.jsonl"
     try:
         with open(hist.with_name(hist.name + ".lock"), "a", encoding="utf-8") as lf:

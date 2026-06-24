@@ -15,15 +15,17 @@ import sys
 # module is loaded before any test module installs its own sys.path shim.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from shared import _ANSI_RE
+from shared import _ANSI_RE, char_width
 
 
 # ---- ANSI helpers ---------------------------------------------------------
 # Both helpers delegate to shared._ANSI_RE (single canonical pattern, T-P2-2).
+# _vlen uses char_width to account for CJK double-width chars, matching the
+# visible-length calculation in statusline.py segment builders (F-10).
 
 def _vlen(text):
-    """Strip ANSI escapes and return visible length."""
-    return len(_ANSI_RE.sub("", text))
+    """Strip ANSI escapes and return visible display width (CJK-aware)."""
+    return sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def _strip_ansi(lines):

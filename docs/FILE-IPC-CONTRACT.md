@@ -1,7 +1,7 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.15.1
+# FILE-IPC CONTRACT: cc-aio-mon v1.15.3
 
 **Status**: Active  
-**Version**: 1.15.1 (`SCHEMA_VERSION` = 1)  
+**Version**: 1.15.2 (`SCHEMA_VERSION` = 1)  
 **Last Updated**: 2026-06-14  
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
@@ -162,7 +162,7 @@ def load_state(sid):
         return None
     try:
         d = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     # Refuse a snapshot tagged newer than this build understands (schema gate).
     if (isinstance(d, dict) and isinstance(d.get("_schema_version"), int)
@@ -193,6 +193,9 @@ def load_state(sid):
 | `context_window` | dict | CC | `{context_window_size: int, used_percentage: 0–100, ...}` |
 | `context_window.context_window_size` | int | CC | Total context tokens available (e.g., 200000) |
 | `context_window.used_percentage` | float | CC | 0–100; monitor displays as "CTX NN%" |
+| `context_window.current_usage` | dict | CC | Sub-object with aggregate token counts for the current context window |
+| `context_window.current_usage.total_input_tokens` | int | CC | Total input tokens in the current window; read by `render_frame`/`render_cost_breakdown` as `CIN:` |
+| `context_window.current_usage.total_output_tokens` | int | CC | Total output tokens in the current window; read by `render_frame`/`render_cost_breakdown` as `COUT:` |
 | `cost` | dict | CC | `{total_cost_usd: float, ...}` |
 | `cost.total_cost_usd` | float | CC | USD spent in this session (cumulative) |
 | `rate_limits` | dict | CC | Rate limit buckets: `{five_hour: {...}, seven_day: {...}}` |
@@ -206,6 +209,21 @@ def load_state(sid):
 
 **Forward Compatibility**: Monitor uses `dict.get()` (never KeyError) so unknown fields in future snapshots are silently ignored.
 
+### Known-but-ignored / consumed fields
+
+Fields present in the Claude Code status JSON that the monitor receives but does not display as top-level data. Listed here so future contributors do not re-investigate them.
+
+| Field | Disposition | Notes |
+|---|---|---|
+| `diagnostics` | **ignored** | Diagnostic metadata; not read by monitor or statusline |
+| `inference_geo` | **ignored** | Inference geography tag; not used |
+| `service_tier` | **ignored** | Service tier string; not used |
+| `context_management` | **ignored** | Context management metadata block; not used |
+| `speed` | **consumed** — `_get_pricing()` | Top-level string tag (e.g. `"fast"`); used in `monitor._get_pricing()` to select the fast-mode pricing row |
+| `iterations` | **ignored** | Top-level iteration counters (totals only); individual tool-use counts come from `usage` sub-fields |
+| `usage.cache_creation` | **consumed** — cost calc | Object with token counts; used in cache-cost computation in statusline pricing logic |
+| `usage.server_tool_use` | **consumed** — cost calc | Object with server-side tool-use token counts; included in cost computation |
+
 ### Rate Limits — account-wide read semantics
 
 `rate_limits` (5H/7D) are **per-account** — shared across every session — yet each
@@ -213,7 +231,7 @@ session's statusline writes them only into its own snapshot, and an idle session
 snapshot freezes. Reading them from a single session would surface stale/pre-reset
 values whenever another session was more recently active. The monitor therefore
 sources `rate_limits` from the **freshest snapshot across all sessions** (max
-`mtime`), via `monitor.cached_freshest_rate_limits()` (main-thread, 2 s TTL, same
+`mtime`), via `monitor.cached_freshest_rate_limits()` (main-thread, 0.5 s TTL, same
 schema gate as `load_state`). `render_frame(..., rate_limits=<override>)` applies it;
 with no override the function falls back to the passed session's own field.
 
@@ -809,6 +827,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.15.1  
-**Last Verified**: 2026-06-14  
+**Document Version**: 1.15.3  
+**Last Verified**: 2026-06-24  
 **Status**: Production
