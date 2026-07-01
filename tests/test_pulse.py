@@ -692,7 +692,10 @@ class TestPulseLog(unittest.TestCase):
         target = pulse.LOG_PATH.parent / "_symlink_target.log"
         target.write_text('{"ts": 9999999999, "score": 90}\n', encoding="utf-8")
         try:
-            pulse.LOG_PATH.symlink_to(target)
+            try:
+                pulse.LOG_PATH.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported")
             pulse.cleanup_log_startup()
             # LOG_PATH is still a symlink — cleanup must not have rewritten it
             self.assertTrue(pulse.LOG_PATH.is_symlink(),
