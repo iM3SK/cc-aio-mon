@@ -12,6 +12,7 @@ import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import json
 import os
 import pathlib
 import re
@@ -1035,6 +1036,234 @@ class TestCheckSyntaxAfterPull(unittest.TestCase):
     def test_missing_file_skipped_not_flagged(self):
         # Absent files are not a syntax failure — they must not land in `bad`.
         self.assertEqual(shared.check_syntax_after_pull(self.root, ["nope.py"]), [])
+
+
+# ---------------------------------------------------------------------------
+# Fable weekly pool — cachedUsageUtilization reader (v1.16.0)
+# ---------------------------------------------------------------------------
+_FABLE_UUID = "11111111-2222-3333-4444-555555555555"
+_FABLE_FETCHED = 1_790_000_000.0
+
+
+def _fable_doc(percent=7, resets="2026-09-27T16:00:00.002602+00:00", *,
+               uuid=_FABLE_UUID, cache_uuid=_FABLE_UUID, fetched=_FABLE_FETCHED,
+               display_name="Fable", kind="weekly_scoped", extra_limits=()):
+    """Minimal .claude.json shape as persisted by Claude Code 2.1.28x."""
+    limits = [
+        {"kind": "session", "group": "session", "percent": 14,
+         "resets_at": "2026-09-25T22:20:00.002277+00:00", "scope": None},
+        {"kind": "weekly_all", "group": "weekly", "percent": 19,
+         "resets_at": "2026-09-27T16:00:00.002307+00:00", "scope": None},
+        {"kind": kind, "group": "weekly", "percent": percent, "resets_at": resets,
+         "scope": {"model": {"id": None, "display_name": display_name}, "surface": None}},
+    ] + list(extra_limits)
+    return {
+        "oauthAccount": {"accountUuid": uuid},
+        "cachedUsageUtilization": {
+            "fetchedAtMs": int(fetched * 1000),
+            "accountUuid": cache_uuid,
+            "utilization": {"five_hour": {"utilization": 14}, "limits": limits},
+        },
+    }
+
+
+class TestIsoToEpoch(unittest.TestCase):
+
+    def test_offset_with_microseconds(self):
+        self.assertAlmostEqual(
+            shared.iso_to_epoch("2026-09-27T16:00:00.002602+00:00"), 1790524800.002602, places=5)
+
+    def test_zulu_suffix(self):
+        self.assertEqual(shared.iso_to_epoch("2026-09-27T16:00:00Z"), 1790524800.0)
+
+    def test_nonstandard_fraction_digits(self):
+        # 3.8 fromisoformat accepts only 3 or 6 fraction digits — normalized
+        self.assertAlmostEqual(shared.iso_to_epoch("2026-09-27T16:00:00.5+00:00"), 1790524800.5, places=5)
+        self.assertAlmostEqual(
+            shared.iso_to_epoch("2026-09-27T16:00:00.123456789+00:00"), 1790524800.123456, places=5)
+
+    def test_naive_is_utc(self):
+        self.assertEqual(shared.iso_to_epoch("2026-09-27T16:00:00"), 1790524800.0)
+
+    def test_garbage_returns_zero(self):
+        for bad in (None, "", "tomorrow", 42, {"x": 1}):
+            self.assertEqual(shared.iso_to_epoch(bad), 0.0)
+
+
+class TestExtractFableWeekly(unittest.TestCase):
+
+    def test_bucket_present(self):
+        e = shared.extract_fable_weekly(_fable_doc())
+        self.assertEqual(e["used_percentage"], 7)
+        self.assertAlmostEqual(e["resets_at"], 1790524800.002602, places=5)
+        self.assertAlmostEqual(e["fetched_at"], _FABLE_FETCHED, places=2)
+
+    def test_bucket_absent(self):
+        doc = _fable_doc(kind="weekly_all")
+        self.assertIsNone(shared.extract_fable_weekly(doc))
+
+    def test_other_scoped_model_ignored(self):
+        doc = _fable_doc(display_name="Sonnet")
+        self.assertIsNone(shared.extract_fable_weekly(doc))
+
+    def test_selected_by_name_not_index(self):
+        doc = _fable_doc(percent=7)
+        lim = doc["cachedUsageUtilization"]["utilization"]["limits"]
+        lim.insert(0, {"kind": "weekly_scoped", "percent": 55,
+                       "scope": {"model": {"display_name": "Sonnet"}}})
+        self.assertEqual(shared.extract_fable_weekly(doc)["used_percentage"], 7)
+
+    def test_versioned_display_name_matches(self):
+        doc = _fable_doc(display_name="Fable 5.1")
+        self.assertEqual(shared.extract_fable_weekly(doc)["used_percentage"], 7)
+
+    def test_wrong_account_rejected(self):
+        doc = _fable_doc(cache_uuid="99999999-0000-0000-0000-000000000000")
+        self.assertIsNone(shared.extract_fable_weekly(doc))
+
+    def test_missing_oauth_account_accepted(self):
+        doc = _fable_doc()
+        del doc["oauthAccount"]
+        self.assertIsNotNone(shared.extract_fable_weekly(doc))
+
+    def test_no_cache(self):
+        self.assertIsNone(shared.extract_fable_weekly({"oauthAccount": {}}))
+
+    def test_non_dict_shapes(self):
+        for doc in (None, [], "x", {"cachedUsageUtilization": []},
+                    {"cachedUsageUtilization": {"utilization": "x"}},
+                    {"cachedUsageUtilization": {"utilization": {"limits": {"a": 1}}}},
+                    {"cachedUsageUtilization": {"utilization": {"limits": ["x", None, 3]}}}):
+            self.assertIsNone(shared.extract_fable_weekly(doc))
+
+    def test_non_numeric_percent_rejected(self):
+        self.assertIsNone(shared.extract_fable_weekly(_fable_doc(percent="lots")))
+        self.assertIsNone(shared.extract_fable_weekly(_fable_doc(percent=None)))
+
+    def test_percent_clamped(self):
+        self.assertEqual(shared.extract_fable_weekly(_fable_doc(percent=140))["used_percentage"], 100)
+        self.assertEqual(shared.extract_fable_weekly(_fable_doc(percent=-3))["used_percentage"], 0)
+
+    def test_bad_reset_yields_zero(self):
+        self.assertEqual(shared.extract_fable_weekly(_fable_doc(resets=None))["resets_at"], 0.0)
+
+
+class TestFableDisplayState(unittest.TestCase):
+
+    def _entry(self, age_s, resets_in=86400.0):
+        now = 2_000_000_000.0
+        return now, {"used_percentage": 7, "resets_at": now + resets_in, "age_s": age_s}
+
+    def test_none_hidden(self):
+        self.assertEqual(shared.fable_display_state(None), "hidden")
+
+    def test_fresh(self):
+        now, e = self._entry(30)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "fresh")
+
+    def test_stale_after_two_ttl(self):
+        now, e = self._entry(601)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "stale")
+
+    def test_read_only_uses_default_ttl_for_staleness(self):
+        now, e = self._entry(500)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=0), "fresh")
+        now, e = self._entry(700)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=0), "stale")
+
+    def test_hidden_after_a_day(self):
+        now, e = self._entry(86401)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "hidden")
+
+    def test_hidden_past_reset(self):
+        now, e = self._entry(30, resets_in=-1)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "hidden")
+
+    def test_unknown_reset_not_hidden(self):
+        now, e = self._entry(30)
+        e["resets_at"] = 0.0
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "fresh")
+
+
+class TestReadFableWeekly(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.path = self.dir / ".claude.json"
+        shared._fable_cache.clear()
+
+    def tearDown(self):
+        shared._fable_cache.clear()
+        self.tmp.cleanup()
+
+    def _write(self, doc):
+        self.path.write_text(json.dumps(doc), encoding="utf-8")
+
+    def test_reads_and_computes_age(self):
+        self._write(_fable_doc())
+        e = shared.read_fable_weekly(self.path, now=_FABLE_FETCHED + 42)
+        self.assertEqual(e["used_percentage"], 7)
+        self.assertAlmostEqual(e["age_s"], 42, places=1)
+
+    def test_missing_file(self):
+        self.assertIsNone(shared.read_fable_weekly(self.dir / "nope.json"))
+
+    def test_invalid_json(self):
+        self.path.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(shared.read_fable_weekly(self.path))
+
+    def test_oversized_file_rejected(self):
+        self._write(_fable_doc())
+        with patch.object(shared, "CLAUDE_JSON_MAX", 10):
+            self.assertIsNone(shared.read_fable_weekly(self.path))
+
+    def test_mtime_gated_cache_skips_reparse(self):
+        self._write(_fable_doc())
+        shared.read_fable_weekly(self.path, now=_FABLE_FETCHED)
+        with patch.object(shared.json, "loads", side_effect=AssertionError("re-parsed")):
+            e = shared.read_fable_weekly(self.path, now=_FABLE_FETCHED + 5)
+        self.assertEqual(e["used_percentage"], 7)
+
+    def test_rewrite_invalidates_cache(self):
+        self._write(_fable_doc(percent=7))
+        shared.read_fable_weekly(self.path, now=_FABLE_FETCHED)
+        self._write(_fable_doc(percent=9, fetched=_FABLE_FETCHED + 1))
+        st = self.path.stat()
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+        self.assertEqual(shared.read_fable_weekly(self.path, now=_FABLE_FETCHED + 2)["used_percentage"], 9)
+
+    def test_default_path_honours_claude_config_dir(self):
+        self._write(_fable_doc())
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.dir)}):
+            self.assertEqual(shared.claude_json_path(), self.path)
+            self.assertIsNotNone(shared.read_fable_weekly(now=_FABLE_FETCHED))
+
+    def test_default_path_without_env_is_home(self):
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(shared.claude_json_path(), pathlib.Path.home() / ".claude.json")
+
+
+class TestFableRefreshSecEnv(unittest.TestCase):
+
+    def test_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CC_AIO_MON_FABLE_REFRESH_SEC", None)
+            self.assertEqual(shared._env_refresh_sec(), 300)
+
+    def test_zero_is_read_only(self):
+        with patch.dict(os.environ, {"CC_AIO_MON_FABLE_REFRESH_SEC": "0"}):
+            self.assertEqual(shared._env_refresh_sec(), 0)
+
+    def test_invalid_and_negative_fall_back(self):
+        for v in ("abc", "-5", ""):
+            with patch.dict(os.environ, {"CC_AIO_MON_FABLE_REFRESH_SEC": v}):
+                self.assertEqual(shared._env_refresh_sec(), 300)
+
+    def test_floor_prevents_hammering(self):
+        with patch.dict(os.environ, {"CC_AIO_MON_FABLE_REFRESH_SEC": "5"}):
+            self.assertEqual(shared._env_refresh_sec(), 60)
 
 
 if __name__ == "__main__":

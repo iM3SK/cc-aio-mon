@@ -10,24 +10,32 @@ CC notifications share the status line row — no full-width padding.
 Config env vars:
     CLAUDE_STATUS_WARN  — yellow threshold % (default 50)
     CLAUDE_STATUS_CRIT  — red threshold % (default 80)
+    CC_AIO_MON_FABLE_REFRESH_SEC — Fable pool refresh TTL in s (default 300, 0 = read-only)
+
+Entry points:
+    statusline.py                  — status line (JSON on stdin)
+    statusline.py --refresh-fable  — detached Fable usage refresher (spawned by the above)
 """
 
 import json
 import os
 import pathlib
+import shutil
 import signal
 import struct
+import subprocess
 import sys
 import time
 
 from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
                     f_tok, f_cost, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
-                    lock_file_handle, unlock_file_handle,
+                    lock_file_handle, unlock_file_handle, acquire_singleton_lock,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
                     DATA_DIR, RESERVED_SIDS, SCHEMA_VERSION,
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
                     char_width,
+                    read_fable_weekly, fable_display_state, FABLE_REFRESH_SEC, FABLE_SETTINGS_STEM,
                     R, B, C_RED, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 
@@ -192,6 +200,25 @@ def seg_7dl(data):
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
+def seg_fable(entry, now=None, ttl=None):
+    """Fable weekly pool (FBL). `entry` comes from shared.read_fable_weekly().
+    Absent bucket / too old / past reset → no segment. A stale cache renders
+    dim with a `~` so an old number never passes for a live one."""
+    state = fable_display_state(entry, now=now, ttl=ttl)
+    if state == "hidden":
+        return None
+    t = time.time() if now is None else now
+    pct = round(_num(entry.get("used_percentage")))
+    resets = _num(entry.get("resets_at"), 0)
+    if state == "stale":
+        c, approx = C_DIM, "~"
+    else:
+        c, approx = cpc_base(pct, C_YEL), ""
+    reset_str = f" {c}→ {f_cd(resets)}{R}" if resets > t else ""
+    text = f"{c}{B}FBL{R} {c}{approx}{pct}%{R}{reset_str}"
+    return text, sum(char_width(ch) for ch in _ANSI_RE.sub("", text))
+
+
 def seg_cost(data):
     usd = _num((data.get("cost") or {}).get("total_cost_usd"))
     if usd <= 0:
@@ -253,36 +280,170 @@ def _last_known_rate_limits(hist):
 # ---------------------------------------------------------------------------
 # Layout assembly — single line (CC notifications share the row on the right)
 # ---------------------------------------------------------------------------
-def build_line(data, cols, brn=None):
-    """Build single status line. Drops trailing segments when too wide."""
+def build_line(data, cols, brn=None, fable=None):
+    """Build single status line. Drops the lowest-priority segment when too wide.
+
+    Position and drop priority are separate: FBL sits between 5HL and 7DL, but
+    is dropped before 7DL (the account-wide weekly limit matters more than one
+    model's pool). Every other segment keeps the historic drop-from-the-right order.
+    """
     sv = _SEP_VLEN
 
-    # All segments in priority order — dropped from the end when too wide
-    all_segs = [s for s in [
-        seg_model(data),
-        seg_ctx(data),
-        seg_5hl(data),
-        seg_7dl(data),
-        seg_cost(data),
-        seg_brn(brn),
+    # (drop rank — higher drops first, segment) in display order
+    all_segs = [(rank, s) for rank, s in [
+        (0, seg_model(data)),
+        (1, seg_ctx(data)),
+        (2, seg_5hl(data)),
+        (4, seg_fable(fable)),
+        (3, seg_7dl(data)),
+        (5, seg_cost(data)),
+        (6, seg_brn(brn)),
     ] if s is not None]
 
-    # Drop trailing segments until it fits
     while all_segs:
-        vlen = sum(s[1] for s in all_segs) + sv * (len(all_segs) - 1)
+        vlen = sum(s[1] for _, s in all_segs) + sv * (len(all_segs) - 1)
         if vlen <= cols:
             break
-        all_segs.pop()
+        all_segs.remove(max(all_segs, key=lambda rs: rs[0]))
 
     if not all_segs:
         return ""
-    return _SEP.join(s[0] for s in all_segs)
+    return _SEP.join(s[0] for _, s in all_segs)
+
+
+# ---------------------------------------------------------------------------
+# Fable usage refresher — Claude Code rewrites `.claude.json`'s usage cache
+# only when something asks for usage (/usage). When our copy is older than the
+# TTL, the statusline spawns ONE detached `statusline.py --refresh-fable`, which
+# sends the SDK `get_usage` control request to a headless `claude -p`: ~2-4 s,
+# zero model tokens, no transcript. Claude Code persists the fresh numbers
+# itself; we write nothing but a backoff stamp and a lock.
+# ---------------------------------------------------------------------------
+FABLE_REFRESH_TIMEOUT = 20
+_FABLE_STAMP = "fable-refresh.stamp"
+_FABLE_LOCK = "fable-refresh.lock"
+_FABLE_SETTINGS = FABLE_SETTINGS_STEM + ".json"  # reserved stem, see shared.RESERVED_SIDS
+_DETACH_FLAGS = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                 | getattr(subprocess, "DETACHED_PROCESS", 0)
+                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if _IS_WIN else 0
+
+
+def _maybe_refresh_fable(entry, ttl=None, now=None):
+    """Spawn the detached refresher when the cached Fable bucket is older than
+    the TTL. Returns True when a child was spawned. Cheap when nothing is due:
+    one comparison, plus one stat when the cache is old. The backoff stamp
+    keeps concurrent statuslines from spawning in a burst; the child's
+    singleton lock guarantees at most one `claude` process at a time.
+    Accepted residual: the stamp check is not atomic, so statuslines of
+    several sessions firing in the same few milliseconds can each start a
+    helper — every extra helper exits on the lock (~50 ms) without running
+    `claude`, and the next chance is one TTL later."""
+    ttl = FABLE_REFRESH_SEC if ttl is None else ttl
+    if ttl <= 0 or not entry or _num(entry.get("age_s"), 0) <= ttl:
+        return False
+    t = time.time() if now is None else now
+    if not ensure_data_dir(DATA_DIR):
+        return False
+    stamp = DATA_DIR / _FABLE_STAMP
+    try:
+        last = float(stamp.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        last = 0.0
+    if 0 < t - last < ttl:
+        return False
+    if not atomic_write_text(stamp, repr(t)):
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, str(pathlib.Path(__file__).resolve()), "--refresh-fable"],
+            cwd=str(DATA_DIR), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True,
+            creationflags=_DETACH_FLAGS, start_new_session=not _IS_WIN,
+        )
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _kill_tree(proc):
+    """Kill the refresher's `claude` child and everything it started."""
+    try:
+        if _IS_WIN:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def run_fable_refresh(ttl=None):
+    """Body of `statusline.py --refresh-fable`. Returns a short status string
+    (locked / fresh / no-claude / timeout / error / refreshed) for tests and logs."""
+    ttl = FABLE_REFRESH_SEC if ttl is None else ttl
+    if not ensure_data_dir(DATA_DIR):
+        return "error"
+    lock = acquire_singleton_lock(DATA_DIR / _FABLE_LOCK)
+    if lock is None:
+        return "locked"
+    try:
+        cur = read_fable_weekly()
+        if cur is not None and _num(cur.get("age_s"), 0) <= ttl:
+            return "fresh"  # another refresher (or /usage) got there first
+        exe = shutil.which("claude")
+        if not exe:
+            return "no-claude"
+        settings = DATA_DIR / _FABLE_SETTINGS
+        # No user hooks fire inside our helper process; the helper sends one
+        # control request and exits, it never starts a model turn.
+        if not atomic_write_text(settings, json.dumps({"disableAllHooks": True})):
+            return "error"
+        argv = [exe, "-p", "--setting-sources", "user", "--settings", str(settings),
+                "--strict-mcp-config", "--no-session-persistence",
+                "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+        req = json.dumps({"type": "control_request", "request_id": "cc-aio-mon-fable",
+                          "request": {"subtype": "get_usage", "skip_behaviors": True}}) + "\n"
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=str(DATA_DIR), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if _IS_WIN else 0,
+                start_new_session=not _IS_WIN,
+            )
+        except (OSError, ValueError):
+            return "error"
+        try:
+            proc.communicate(input=req, timeout=FABLE_REFRESH_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            try:
+                proc.communicate(timeout=5)
+            except (subprocess.SubprocessError, OSError):
+                pass
+            return "timeout"
+        except OSError:
+            return "error"
+        return "refreshed"
+    finally:
+        try:
+            lock.close()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--refresh-fable":
+        run_fable_refresh()
+        return
     # SIGPIPE: silent exit when piped to head/less on Unix (no BrokenPipeError traceback)
     if hasattr(signal, "SIGPIPE"):
         try:
@@ -325,8 +486,9 @@ def main():
         if rl:
             display = {**data, "rate_limits": rl}
 
+    fable = read_fable_weekly()
     cols = _get_terminal_width(fallback=120)
-    line = build_line(display, cols, brn=brn)
+    line = build_line(display, cols, brn=brn, fable=fable)
     if line:
         # Claude Code reads this line from the statusline subprocess's stdout.
         # If it closed the pipe early (e.g. the event was superseded), print()
@@ -339,6 +501,9 @@ def main():
 
     # Feed data to TUI monitor
     write_shared_state(data)
+
+    # After the line is out: refresh the Fable usage cache when it is old
+    _maybe_refresh_fable(fable)
 
 
 # ---------------------------------------------------------------------------

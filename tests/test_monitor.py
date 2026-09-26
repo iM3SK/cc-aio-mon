@@ -2232,6 +2232,20 @@ class TestListSessions(unittest.TestCase):
         result = list_sessions()
         self.assertEqual(result, [])
 
+    def test_fable_refresher_settings_file_is_reserved(self):
+        # statusline.run_fable_refresh writes its --settings JSON into DATA_DIR.
+        # Its stem matches _SID_RE, so unless reserved, list_sessions() treats it
+        # as a model-less "dead artifact" and deletes it after 1 h — possibly
+        # between the refresher's write and `claude` reading it.
+        import statusline
+        f = pathlib.Path(self._tmp) / statusline._FABLE_SETTINGS
+        f.write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+        old = time.time() - 2 * 3600
+        os.utime(f, (old, old))
+        self.assertEqual(list_sessions(), [])
+        self.assertTrue(f.exists())
+        self.assertIn(f.stem, RESERVED_SIDS)
+
     def test_valid_session_found(self):
         sid = "validSession123"
         p = pathlib.Path(self._tmp) / f"{sid}.json"
@@ -4735,6 +4749,50 @@ class TestAuditFixesV1130(unittest.TestCase):
             monitor._join_update_worker(timeout=0.01)  # must not raise
         finally:
             monitor._update_thread = orig
+
+
+# ---------------------------------------------------------------------------
+# Fable weekly pool row (v1.16.0)
+# ---------------------------------------------------------------------------
+class TestFableRow(unittest.TestCase):
+
+    _RL = {"five_hour": {"used_percentage": 25, "resets_at": 9999999999},
+           "seven_day": {"used_percentage": 10, "resets_at": 9999999999}}
+
+    def _plain(self, fable, rl=_RL):
+        buf = render_frame(_full_data(), [], 80, 60, rate_limits=rl, fable=fable)
+        return [_ANSI_RE.sub("", l) for l in buf]
+
+    def test_row_between_5hl_and_7dl(self):
+        lines = self._plain({"used_percentage": 7, "resets_at": 9999999999, "age_s": 20})
+        idx = {lbl: next(i for i, l in enumerate(lines) if l.startswith(lbl)) for lbl in ("5HL", "FBL", "7DL")}
+        self.assertLess(idx["5HL"], idx["FBL"])
+        self.assertLess(idx["FBL"], idx["7DL"])
+        self.assertIn("RST:", lines[idx["FBL"] + 1])
+
+    def test_absent_bucket_no_row(self):
+        self.assertFalse(any(l.startswith("FBL") for l in self._plain(None)))
+
+    def test_stale_row_tagged(self):
+        lines = self._plain({"used_percentage": 7, "resets_at": 9999999999, "age_s": 5000})
+        row = next(l for l in lines if l.startswith("FBL"))
+        self.assertIn("(stale", row)
+
+    def test_hidden_when_too_old(self):
+        lines = self._plain({"used_percentage": 7, "resets_at": 9999999999, "age_s": 90000})
+        self.assertFalse(any(l.startswith("FBL") for l in lines))
+
+    def test_fable_alone_without_rate_limits(self):
+        lines = self._plain({"used_percentage": 7, "resets_at": 9999999999, "age_s": 20}, rl=None)
+        self.assertTrue(any(l.startswith("FBL") for l in lines))
+        self.assertFalse(any("subscription data unavailable" in l for l in lines))
+
+    def test_rows_and_legend_share_one_table(self):
+        labels = [row[1] for row in monitor._RL_ROWS]
+        self.assertEqual(labels, ["5HL", "FBL", "7DL"])
+        plain = _ANSI_RE.sub("", "\n".join(render_legend(80, 80)))
+        for row in monitor._RL_ROWS:
+            self.assertIn(f"{row[1]} {row[3]}", plain)
 
 
 if __name__ == "__main__":
