@@ -12,6 +12,7 @@ import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import json
 import os
 import pathlib
 import re
@@ -45,7 +46,9 @@ from statusline import (
     build_line,
     cpc_base,
     _last_known_rate_limits,
+    seg_fable,
 )
+import statusline
 
 # ---------------------------------------------------------------------------
 # Shared helpers (canonical home: tests/_helpers.py)
@@ -887,6 +890,208 @@ class TestIPCForwardCompatNoSchemaVersion(unittest.TestCase):
         # All pre-existing fields preserved
         self.assertEqual(loaded["model"]["display_name"], "Opus 4.5")
         self.assertEqual(loaded["cost"]["total_cost_usd"], 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Fable weekly pool segment + refresher (v1.16.0)
+# ---------------------------------------------------------------------------
+_NOW = 2_000_000_000.0
+
+
+def _fbl(pct=7, age_s=30.0, resets_in=86400.0 * 2):
+    return {"used_percentage": pct, "resets_at": _NOW + resets_in, "age_s": age_s}
+
+
+class TestSegFable(unittest.TestCase):
+
+    def test_renders_label_pct_and_countdown(self):
+        with patch("statusline.time.time", return_value=_NOW):
+            text, vl = seg_fable(_fbl(), now=_NOW, ttl=300)
+        plain = _ANSI_RE.sub("", text)
+        self.assertTrue(plain.startswith("FBL 7%"), plain)
+        self.assertIn("→ 2d", plain)
+        self.assertEqual(vl, _vlen(text))
+
+    def test_absent_bucket_no_segment(self):
+        self.assertIsNone(seg_fable(None, now=_NOW, ttl=300))
+
+    def test_hidden_when_too_old_or_past_reset(self):
+        self.assertIsNone(seg_fable(_fbl(age_s=90000), now=_NOW, ttl=300))
+        self.assertIsNone(seg_fable(_fbl(resets_in=-5), now=_NOW, ttl=300))
+
+    def test_stale_is_dim_with_tilde(self):
+        text, vl = seg_fable(_fbl(age_s=1200), now=_NOW, ttl=300)
+        plain = _ANSI_RE.sub("", text)
+        self.assertIn("~7%", plain)
+        self.assertTrue(text.startswith(C_DIM))
+        self.assertNotIn(C_YEL, text)
+        self.assertEqual(vl, _vlen(text))
+
+    def test_threshold_colors(self):
+        text, _ = seg_fable(_fbl(pct=85), now=_NOW, ttl=300)
+        self.assertIn(C_RED, text)
+
+
+class TestBuildLineFable(unittest.TestCase):
+
+    def _plain(self, cols, fable):
+        with patch("statusline.time.time", return_value=_NOW):
+            return _ANSI_RE.sub("", build_line(_full_data(), cols, fable=fable))
+
+    def test_position_between_5hl_and_7dl(self):
+        plain = self._plain(300, _fbl())
+        self.assertLess(plain.index("5HL"), plain.index("FBL"))
+        self.assertLess(plain.index("FBL"), plain.index("7DL"))
+
+    def test_absent_bucket_leaves_line_unchanged(self):
+        with patch("statusline.time.time", return_value=_NOW):
+            self.assertEqual(build_line(_full_data(), 300, fable=None), build_line(_full_data(), 300))
+
+    def test_7dl_survives_narrowing_before_fable(self):
+        full = self._plain(300, _fbl())
+        # width that fits everything up to and including 7DL minus the FBL segment
+        without = self._plain(300, None)
+        cols = len(without.split(" │ CST")[0])
+        plain = self._plain(cols, _fbl())
+        self.assertIn("7DL", plain)
+        self.assertNotIn("FBL", plain)
+        self.assertIn("FBL", full)
+
+    def test_line_fits_cols(self):
+        for cols in (40, 60, 90, 120, 300):
+            with patch("statusline.time.time", return_value=_NOW):
+                line = build_line(_full_data(), cols, fable=_fbl())
+            self.assertLessEqual(_vlen(line), cols, cols)
+
+
+class TestMaybeRefreshFable(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dd = pathlib.Path(self.tmp.name) / "d"
+        self.p = patch.object(statusline, "DATA_DIR", self.dd)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def test_spawns_detached_when_stale(self):
+        with patch("statusline.subprocess.Popen") as po:
+            self.assertTrue(statusline._maybe_refresh_fable(_fbl(age_s=400), ttl=300, now=_NOW))
+        po.assert_called_once()
+        argv = po.call_args[0][0]
+        self.assertIn("--refresh-fable", argv)
+        kw = po.call_args[1]
+        self.assertIs(kw["stdin"], statusline.subprocess.DEVNULL)
+        self.assertEqual(kw["cwd"], str(self.dd))
+
+    def test_no_spawn_when_fresh(self):
+        with patch("statusline.subprocess.Popen") as po:
+            self.assertFalse(statusline._maybe_refresh_fable(_fbl(age_s=100), ttl=300, now=_NOW))
+        po.assert_not_called()
+
+    def test_no_spawn_read_only(self):
+        with patch("statusline.subprocess.Popen") as po:
+            self.assertFalse(statusline._maybe_refresh_fable(_fbl(age_s=99999), ttl=0, now=_NOW))
+        po.assert_not_called()
+
+    def test_no_spawn_without_bucket(self):
+        # accounts without the Fable pool never pay for a refresh
+        with patch("statusline.subprocess.Popen") as po:
+            self.assertFalse(statusline._maybe_refresh_fable(None, ttl=300, now=_NOW))
+        po.assert_not_called()
+
+    def test_backoff_stamp_blocks_second_spawn(self):
+        with patch("statusline.subprocess.Popen") as po:
+            self.assertTrue(statusline._maybe_refresh_fable(_fbl(age_s=400), ttl=300, now=_NOW))
+            self.assertFalse(statusline._maybe_refresh_fable(_fbl(age_s=400), ttl=300, now=_NOW + 10))
+            self.assertTrue(statusline._maybe_refresh_fable(_fbl(age_s=800), ttl=300, now=_NOW + 301))
+        self.assertEqual(po.call_count, 2)
+
+    def test_spawn_failure_is_swallowed(self):
+        with patch("statusline.subprocess.Popen", side_effect=OSError("boom")):
+            self.assertFalse(statusline._maybe_refresh_fable(_fbl(age_s=400), ttl=300, now=_NOW))
+
+
+class TestRunFableRefresh(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dd = pathlib.Path(self.tmp.name) / "d"
+        self.p = patch.object(statusline, "DATA_DIR", self.dd)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def _proc(self, timeout=False):
+        proc = MagicMock()
+        proc.pid = 4242
+        if timeout:
+            proc.communicate.side_effect = [statusline.subprocess.TimeoutExpired("claude", 20), ("", "")]
+        else:
+            proc.communicate.return_value = ("", "")
+        return proc
+
+    def test_runs_get_usage_control_request(self):
+        proc = self._proc()
+        with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
+             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.subprocess.Popen", return_value=proc) as po:
+            self.assertEqual(statusline.run_fable_refresh(ttl=300), "refreshed")
+        argv = po.call_args[0][0]
+        self.assertEqual(argv[0], "/bin/claude")
+        for flag in ("-p", "--input-format", "--output-format", "--no-session-persistence",
+                     "--strict-mcp-config", "--settings"):
+            self.assertIn(flag, argv)
+        self.assertNotIn("--bare", argv)
+        sent = proc.communicate.call_args[1]["input"]
+        req = json.loads(sent)
+        self.assertEqual(req["request"]["subtype"], "get_usage")
+        self.assertTrue(req["request"]["skip_behaviors"])
+        settings = json.loads(pathlib.Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
+        self.assertTrue(settings["disableAllHooks"])
+
+    def test_second_worker_exits_on_held_lock(self):
+        holder = shared.ensure_data_dir(self.dd) and shared.acquire_singleton_lock(self.dd / "fable-refresh.lock")
+        try:
+            with patch("statusline.subprocess.Popen") as po:
+                self.assertEqual(statusline.run_fable_refresh(ttl=300), "locked")
+            po.assert_not_called()
+        finally:
+            holder.close()
+
+    def test_skips_when_already_refreshed(self):
+        with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=5)), \
+             patch("statusline.subprocess.Popen") as po:
+            self.assertEqual(statusline.run_fable_refresh(ttl=300), "fresh")
+        po.assert_not_called()
+
+    def test_missing_claude_binary(self):
+        with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
+             patch("statusline.shutil.which", return_value=None), \
+             patch("statusline.subprocess.Popen") as po:
+            self.assertEqual(statusline.run_fable_refresh(ttl=300), "no-claude")
+        po.assert_not_called()
+
+    def test_timeout_kills_tree(self):
+        proc = self._proc(timeout=True)
+        with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
+             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.subprocess.Popen", return_value=proc), \
+             patch("statusline._kill_tree") as kt:
+            self.assertEqual(statusline.run_fable_refresh(ttl=300), "timeout")
+        kt.assert_called_once_with(proc)
+
+    def test_main_dispatches_refresh_flag(self):
+        with patch.object(sys, "argv", ["statusline.py", "--refresh-fable"]), \
+             patch("statusline.run_fable_refresh", return_value="fresh") as rf, \
+             patch("statusline.sys.stdin") as stdin:
+            statusline.main()
+        rf.assert_called_once()
+        stdin.buffer.read.assert_not_called()
 
 
 if __name__ == "__main__":

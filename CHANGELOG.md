@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.16.0 — 2026-09-26
+
+**Features — Fable weekly pool (FBL):**
+- **FBL indicator between 5HL and 7DL.** Claude Max plans have a separate weekly
+  Fable pool that Claude Code's statusline JSON does not carry. FBL reads it
+  from Claude Code's own usage cache (`cachedUsageUtilization` in
+  `.claude.json`, honouring `CLAUDE_CONFIG_DIR`) — the data `/usage` shows —
+  via `shared.read_fable_weekly()`. The bucket is matched by kind and model
+  name, never by index; a cache written under another account is ignored; the
+  OAuth credentials file is never read. Shown in the statusline
+  (`statusline.seg_fable`) and as a dashboard row with reset countdown.
+  Accounts without the pool see no change.
+  - One display rule for both surfaces (`shared.fable_display_state`): hidden
+    when absent, older than 24 h or past its reset; dim with `~` when stale.
+  - Statusline drop order is now separate from display order — FBL sits
+    between 5HL and 7DL but is dropped before 7DL on narrow terminals.
+- **Usage-cache refresher.** Claude Code rewrites the cache only when usage is
+  requested, so when the copy is older than `CC_AIO_MON_FABLE_REFRESH_SEC`
+  (default 300 s, `0` = read-only) the statusline starts one detached
+  `statusline.py --refresh-fable` helper after printing its line. The helper
+  sends the SDK `get_usage` control request to a headless `claude -p` (no model
+  turn, no tokens, no transcript, hooks disabled), with a 20 s timeout and a
+  process-tree kill. A backoff stamp and a singleton lock in the data dir keep
+  it to one `claude` process across all sessions.
+
+**Refactor — single source of truth:**
+- Dashboard rate-limit rows and their legend lines are generated from one
+  table, `monitor._RL_ROWS` (5HL · FBL · 7DL).
+
+**Tests:** 795 passing (+64).
+
 ## v1.15.3 — 2026-06-24
 
 **Security:**

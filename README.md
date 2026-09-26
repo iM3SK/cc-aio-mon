@@ -65,7 +65,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin. No log scraping, no file watching, no API polling. Real data, real-time.
 - **Two-tier architecture** — `statusline.py` (single-line status bar, triggered per Claude Code event) + `monitor.py` (fullscreen TUI, polls temp files independently).
 - **Temp file IPC** — atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/`. No sockets, no databases, no shared memory. Works across terminal sessions.
-- **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/7DL segments also show a reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
+- **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, FBL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/FBL/7DL segments also show a reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
 - **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
 - **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Model bars and daily peak (PEAK) count all token types: input + output + cache_read + cache_write.
@@ -131,6 +131,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **CHR** | Cache read tokens / total cache | 0-100% | dashboard |
 | **CTX** | Context window usage | 0-100% | statusline + dashboard |
 | **5HL** | 5-hour rate limit usage + reset countdown (`→ 2h 15m`) | 0-100% | statusline + dashboard |
+| **FBL** | Fable weekly pool usage + reset countdown — shown only on plans that have the pool; read from Claude Code's cached `/usage` data (see below) | 0-100% | statusline + dashboard |
 | **7DL** | 7-day rate limit usage + reset countdown (`→ 6d 12h`) | 0-100% | statusline + dashboard |
 | **BRN** | Cost burn rate | 0-10.0 $/min (env: `CC_MON_BRN_MAX`) | statusline + dashboard |
 | **CTR** | Context consumption rate | 0-10.0 %/min (env: `CC_MON_CTR_MAX`) | dashboard |
@@ -155,7 +156,9 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 
 ### Statusline
 
-Runs automatically on each Claude Code status update via stdin JSON. Outputs a single ANSI-colored line: Model │ CTX │ 5HL → countdown │ 7DL → countdown │ CST │ BRN. Trailing segments drop when terminal is narrow. No background padding — CC notifications share the right side of the row. APR and CHR live only in the dashboard where the horizontal space isn't constrained.
+Runs automatically on each Claude Code status update via stdin JSON. Outputs a single ANSI-colored line: Model │ CTX │ 5HL → countdown │ FBL → countdown │ 7DL → countdown │ CST │ BRN. Trailing segments drop when terminal is narrow (FBL drops before 7DL). No background padding — CC notifications share the right side of the row. APR and CHR live only in the dashboard where the horizontal space isn't constrained.
+
+**FBL — Fable weekly pool.** Claude Code's statusline JSON carries only the 5-hour and 7-day limits, so FBL is read from Claude Code's own usage cache (`cachedUsageUtilization` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`) — the same data `/usage` shows. OAuth credentials are never read. The segment appears only when that cache holds a Fable bucket for the logged-in account; a copy older than twice the refresh interval is shown dimmed with `~`, and one older than a day or past its reset is hidden. Because Claude Code rewrites the cache only when asked, the statusline refreshes it when it is older than 5 minutes: it starts one detached helper that sends the SDK `get_usage` control request to a headless `claude -p` (about 2-4 s, no model tokens, no transcript, hooks disabled; a lock keeps it to one process across sessions). Set `CC_AIO_MON_FABLE_REFRESH_SEC=0` to keep FBL read-only — see [CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ### Dashboard
 
@@ -221,7 +224,7 @@ Both scripts import shared.py for shared BRN/CTR calculation.
 | 50-79% | Yellow | Approaching limits |
 | >= 80% | Red | Critical |
 
-Exception: 5HL/7DL labels use yellow as base color (even below 50%) to visually distinguish rate limits from performance metrics.
+Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visually distinguish rate limits from performance metrics.
 
 ## Configuration
 

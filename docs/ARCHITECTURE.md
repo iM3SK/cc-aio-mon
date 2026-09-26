@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.15.3 · Target reader: new contributor who just cloned the repo.
+> v1.16.0 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -58,15 +58,18 @@ lets both processes operate independently without sockets or shared memory.
 ## 3. Five Modules
 
 **statusline.py** — Entry point 1. Reads Claude Code's statusline JSON from
-stdin, renders the single-line ANSI status bar (Model, CTX, 5HL, 7DL, CST,
+stdin, renders the single-line ANSI status bar (Model, CTX, 5HL, FBL, 7DL, CST,
 BRN segments), and writes the IPC snapshot + history via `write_shared_state()`.
-Segment builders (`seg_model`, `seg_ctx`, `seg_5hl`, `seg_7dl`, `seg_cost`,
-`seg_brn`) each return `(text, visible_length)` and are dropped from the right
-by `build_line()` when the terminal is too narrow. On Windows, terminal width
+Segment builders (`seg_model`, `seg_ctx`, `seg_5hl`, `seg_fable`, `seg_7dl`,
+`seg_cost`, `seg_brn`) each return `(text, visible_length)`; `build_line()`
+drops them by a drop rank when the terminal is too narrow (right to left,
+except that FBL goes before 7DL). A second entry point,
+`statusline.py --refresh-fable` (`run_fable_refresh`), is the detached helper
+that refreshes Claude Code's usage cache for FBL (`_maybe_refresh_fable`). On Windows, terminal width
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~3 740 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~3 760 LOC. Owns the event
 loop, all `render_*` functions, the session picker, and the daemon worker
 threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
@@ -332,8 +335,9 @@ for `git rev-list --left-right --count` output in both files.
 | Change hardcoded model pricing | `monitor._MODELS` dict (single source of truth, keyed by model ID) read via `_get_pricing()`; `_model_base()` normalizes the ID (strips `[...]` + `-YYYYMMDD`), `_DEFAULT_PRICING` is the Sonnet-tier fallback, `speed="fast"` selects the `pricing_fast` rates |
 | Add a field to the IPC snapshot | `statusline.write_shared_state()` → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` (and extend `pulse.PulseSnapshot` if it is a pulse field) |
 | Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()`, end it with `_window_buf(buf, rows)` so it scrolls (pinned header + scroll-position hint), and wire a key in the event loop |
-| Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` |
+| Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` with a drop rank (display order and drop order are separate) |
 | Change the Anthropic Pulse scoring weights | `pulse.py` constants `_W_INDICATOR`, `_W_INCIDENTS`, `_W_LATENCY` and `_INDICATOR_SCORE` / `_IMPACT_DEDUCT` dicts |
 | Add a new Python file to the project | Append the filename to `shared.PY_FILES` — this propagates to the post-update syntax check and the compile-check in the test suite |
 | Understand the session file format | `statusline.py:write_shared_state()` writes it; `monitor.py:load_state()` reads it; field names mirror the Claude Code statusline JSON protocol keys |
+| Change the Fable weekly pool (FBL) | Reader + display rule: `shared.read_fable_weekly()` / `fable_display_state()`; statusline segment `seg_fable()` and refresher `_maybe_refresh_fable()` / `run_fable_refresh()`; dashboard row + legend come from `monitor._RL_ROWS`. See FILE-IPC-CONTRACT "Fable weekly pool" |
 | Change how 5HL/7DL rate limits are sourced | `monitor.cached_freshest_rate_limits()` — account-wide read from the freshest snapshot across all sessions (per-account limits, idle snapshots freeze); injected via `render_frame(..., rate_limits=...)`. See FILE-IPC-CONTRACT "Rate Limits — account-wide read semantics" |

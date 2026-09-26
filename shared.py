@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from datetime import datetime, timezone
 from typing import IO, Iterable, List, Optional, Tuple
 
 # Platform-conditional lock primitives used by acquire_singleton_lock().
@@ -25,7 +26,10 @@ else:
 MIN_EPOCH = 1_577_836_800  # 2020-01-01 — reject implausible timestamps
 
 # Session IDs / file stems reserved for internal use. Never valid session names.
-RESERVED_SIDS = frozenset({"rls", "stats", "pulse"})
+# "fable-refresh-settings" is the --settings file statusline's Fable refresher
+# keeps in DATA_DIR (without the reservation monitor would purge it as a dead snapshot).
+FABLE_SETTINGS_STEM = "fable-refresh-settings"
+RESERVED_SIDS = frozenset({"rls", "stats", "pulse", FABLE_SETTINGS_STEM})
 
 # Shared constants — single source of truth for statusline.py + monitor.py
 # Session ID: alphanumeric + underscore/hyphen, 1-128 chars.
@@ -53,7 +57,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.15.3"
+VERSION = "1.16.0"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -635,6 +639,158 @@ def unlock_file_handle(fh) -> None:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Fable weekly pool (FBL) — read from Claude Code's own usage cache
+# ---------------------------------------------------------------------------
+# The statusline stdin JSON carries only rate_limits.five_hour / seven_day.
+# The Fable pool is a separate weekly window that Claude Code learns from
+# /api/oauth/usage and persists in `.claude.json` → `cachedUsageUtilization`
+# (the data `/usage` shows). We read that copy — never the OAuth credentials —
+# and match the bucket by kind + model name, never by list index.
+CLAUDE_JSON_MAX = 8 * MAX_FILE_SIZE  # .claude.json grows with per-project history
+FABLE_MAX_AGE = SECONDS_1D           # older cache → hide the row entirely
+FABLE_REFRESH_DEFAULT = 300
+FABLE_REFRESH_MIN = 60               # never refresh more often than CC throttles its own writes
+_FABLE_NAME_RE = re.compile(r"^fable\b", re.IGNORECASE)
+_ISO_FRAC_RE = re.compile(r"\.(\d+)(?=[+-]\d\d:\d\d$|$)")
+
+
+def _env_refresh_sec() -> int:
+    """CC_AIO_MON_FABLE_REFRESH_SEC: 0 = read-only (never spawn a refresh);
+    invalid/negative → default; positive values are floored at FABLE_REFRESH_MIN."""
+    raw = os.environ.get("CC_AIO_MON_FABLE_REFRESH_SEC", "").strip()
+    try:
+        v = int(raw)
+    except ValueError:
+        return FABLE_REFRESH_DEFAULT
+    if v < 0:
+        return FABLE_REFRESH_DEFAULT
+    if v == 0:
+        return 0
+    return max(FABLE_REFRESH_MIN, v)
+
+
+FABLE_REFRESH_SEC = _env_refresh_sec()
+
+
+def iso_to_epoch(s) -> float:
+    """ISO-8601 → epoch seconds; 0.0 on anything unparseable. Python 3.8's
+    fromisoformat rejects 'Z' and fraction lengths other than 3/6 — normalized."""
+    if not isinstance(s, str) or not s:
+        return 0.0
+    t = s.strip()
+    if t.endswith(("Z", "z")):
+        t = t[:-1] + "+00:00"
+    t = _ISO_FRAC_RE.sub(lambda m: "." + (m.group(1) + "000000")[:6], t)
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def claude_json_path() -> pathlib.Path:
+    """Claude Code's global config file: $CLAUDE_CONFIG_DIR/.claude.json, else ~/.claude.json."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    base = pathlib.Path(cfg).expanduser() if cfg else pathlib.Path.home()
+    return base / ".claude.json"
+
+
+def extract_fable_weekly(doc) -> Optional[dict]:
+    """Pure: pick the Fable weekly bucket out of a parsed .claude.json.
+
+    Returns {"used_percentage", "resets_at", "fetched_at"} or None when the
+    cache is absent, malformed, belongs to another account, or carries no
+    Fable bucket (plans without the pool)."""
+    if not isinstance(doc, dict):
+        return None
+    cache = doc.get("cachedUsageUtilization")
+    if not isinstance(cache, dict):
+        return None
+    acct = doc.get("oauthAccount")
+    if isinstance(acct, dict):
+        cur, cached = acct.get("accountUuid"), cache.get("accountUuid")
+        if cur and cached and cur != cached:
+            return None  # cache written while another account was logged in
+    util = cache.get("utilization")
+    limits = util.get("limits") if isinstance(util, dict) else None
+    if not isinstance(limits, list):
+        return None
+    for lim in limits:
+        if not isinstance(lim, dict) or lim.get("kind") != "weekly_scoped":
+            continue
+        scope = lim.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        name = model.get("display_name") if isinstance(model, dict) else None
+        if not isinstance(name, str) or not _FABLE_NAME_RE.match(name.strip()):
+            continue
+        pct = lim.get("percent")
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            return None
+        return {
+            "used_percentage": max(0, min(100, pct)),
+            "resets_at": iso_to_epoch(lim.get("resets_at")),
+            "fetched_at": _num(cache.get("fetchedAtMs"), 0) / 1000.0,
+        }
+    return None
+
+
+# mtime/size-gated parse cache: the monitor polls every frame, and the file is
+# ~100 KB — reparse only when Claude Code actually rewrote it.
+_fable_cache: dict = {}
+
+
+def read_fable_weekly(path=None, now=None) -> Optional[dict]:
+    """Current Fable bucket as {"used_percentage", "resets_at", "age_s"} or None.
+    `age_s` is how old Claude Code's cached copy is; display rules live in
+    fable_display_state(). Never raises."""
+    p = pathlib.Path(path) if path is not None else claude_json_path()
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    key = (str(p), st.st_mtime_ns, st.st_size)
+    if _fable_cache.get("key") == key:
+        entry = _fable_cache.get("entry")
+    else:
+        entry = None
+        raw = safe_read(p, CLAUDE_JSON_MAX)
+        if raw is not None:
+            try:
+                entry = extract_fable_weekly(json.loads(raw.decode("utf-8")))
+            except (ValueError, UnicodeDecodeError, RecursionError):
+                entry = None
+        _fable_cache.clear()
+        _fable_cache.update({"key": key, "entry": entry})
+    if entry is None:
+        return None
+    t = time.time() if now is None else now
+    fetched = entry["fetched_at"]
+    return {
+        "used_percentage": entry["used_percentage"],
+        "resets_at": entry["resets_at"],
+        "age_s": max(0.0, t - fetched) if fetched > 0 else float(FABLE_MAX_AGE + 1),
+    }
+
+
+def fable_display_state(entry, now=None, ttl=None) -> str:
+    """'hidden' | 'fresh' | 'stale' — one rule for statusline and dashboard.
+    Hidden when absent, older than FABLE_MAX_AGE, or past its reset (the cached
+    percentage belongs to a window that no longer exists). Stale past 2×TTL
+    (read-only mode judges staleness against the default TTL)."""
+    if not entry:
+        return "hidden"
+    t = time.time() if now is None else now
+    age = _num(entry.get("age_s"), FABLE_MAX_AGE + 1)
+    resets = _num(entry.get("resets_at"), 0)
+    if age > FABLE_MAX_AGE or (resets > 0 and resets <= t):
+        return "hidden"
+    ttl = FABLE_REFRESH_SEC if ttl is None else ttl
+    return "stale" if age > 2 * (ttl if ttl > 0 else FABLE_REFRESH_DEFAULT) else "fresh"
 
 
 def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:

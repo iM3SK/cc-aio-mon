@@ -67,6 +67,7 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
+                    read_fable_weekly, fable_display_state,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
 
@@ -737,6 +738,17 @@ def mkbar(pct, color=None, show_pct=True):
     return bar
 
 
+# Rate-limit rows in display order — one table feeds render_frame and the legend.
+# (source key, label, window seconds, legend text). "fable" is not part of CC's
+# rate_limits payload: it comes from shared.read_fable_weekly() (Claude Code's
+# cached /usage data) and is merged into the row source by render_frame.
+_RL_ROWS = (
+    ("five_hour", "5HL", SECONDS_5H, "5-Hour Rate Limit"),
+    ("fable", "FBL", SECONDS_7D, "Fable Weekly Pool"),
+    ("seven_day", "7DL", SECONDS_7D, "7-Day Rate Limit"),
+)
+
+
 def _limit_color(pct):
     """Dynamic color for rate limit metrics — yellow base, red >= CRIT_PCT."""
     if pct >= CRIT_PCT:
@@ -1365,7 +1377,7 @@ def _apply_scroll(off, k, rows):
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
-def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False, rate_limits=None):
+def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False, rate_limits=None, fable=None):
     if show_menu:
         return render_menu(cols, rows)
     if show_cost:
@@ -1486,32 +1498,44 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn}")
     buf.append(sep(SW))
 
-    # ── 5HL / 7DL ──
-    if rl is not None:
-        def _render_rate_limit(data_obj, label, window_sec):
-            """SIZE-002: shared renderer for 5-hour and 7-day rate-limit
-            blocks. Both differ only in the data key, label, and reset
+    # ── 5HL / FBL / 7DL ──
+    # `fable` is shared.read_fable_weekly() output (None when the account has
+    # no Fable pool); fable_display_state() hides a too-old or expired cache.
+    fable_state = fable_display_state(fable)
+    if rl is not None or fable_state != "hidden":
+        def _render_rate_limit(data_obj, label, window_sec, tag=""):
+            """SIZE-002: shared renderer for every rate-limit block in
+            _RL_ROWS. Rows differ only in the data source, label and reset
             window length; rendering logic (pct, expired tag, color,
             countdown) is identical. Closure over `buf`, `c`, `mkbar`
             keeps the helper colocated with its only caller."""
             if not data_obj:
-                return
+                return False
             pct = round(_num(data_obj.get("used_percentage")), 1)
             resets = _num(data_obj.get("resets_at"), 0)
             expired = resets > 0 and resets < time.time()
             if expired:
                 pct = 0.0
             lc = c(_limit_color(pct))
-            expired_tag = f"  {C_DIM}(expired){R}" if expired else ""
+            expired_tag = f"  {C_DIM}(expired){R}" if expired else tag
             buf.append(f"{lc}{B}{label}{R} {mkbar(pct, lc)}{expired_tag}")
             rc = c(_reset_color(resets, window_sec))
             buf.append(f"    {C_DIM}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
+            return True
 
-        fh = rl.get("five_hour")
-        sd = rl.get("seven_day")
-        _render_rate_limit(fh, "5HL", SECONDS_5H)
-        _render_rate_limit(sd, "7DL", SECONDS_7D)
-        if not fh and not sd:
+        src = dict(rl) if isinstance(rl, dict) else {}
+        fable_tag = ""
+        if fable_state == "hidden":
+            src.pop("fable", None)
+        else:
+            src["fable"] = fable
+            if fable_state == "stale":
+                fable_tag = f"  {C_DIM}(stale {int(_num(fable.get('age_s'))) // 60}m){R}"
+        shown = [
+            _render_rate_limit(src.get(key), label, window, fable_tag if key == "fable" else "")
+            for key, label, window, _legend in _RL_ROWS
+        ]
+        if not any(shown):
             buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
@@ -1619,8 +1643,8 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM} CRD  Cache Read - CWR  Cache Write{R}")
     buf.append(f"{C_CYN}CTX{R} {C_DIM}Context Window{R}")
     buf.append(f"{C_DIM} INP  Input Tokens - OUT  Output Tokens{R}")
-    buf.append(f"{C_YEL}5HL{R} {C_DIM}5-Hour Rate Limit{R}")
-    buf.append(f"{C_YEL}7DL{R} {C_DIM}7-Day Rate Limit{R}")
+    for _key, label, _window, legend in _RL_ROWS:
+        buf.append(f"{C_YEL}{label}{R} {C_DIM}{legend}{R}")
     buf.append(f"{C_DIM} RST  Reset Countdown{R}")
     buf.append(f"{C_ORN}BRN{R} {C_DIM}Burn Rate{R} {C_DIM}0-{BRN_MAX} $/min{R}")
     buf.append(f"{C_YEL}CTR{R} {C_DIM}Context Rate{R} {C_DIM}0-{CTR_MAX} %/min{R}")
@@ -3720,6 +3744,7 @@ def main():
                         show_legend, show_menu, show_cost, stale=is_stale,
                         show_agents=show_agents, agents_active_only=agents_active_only,
                         rate_limits=cached_freshest_rate_limits(last_data.get("rate_limits")),
+                        fable=read_fable_weekly(),
                     ),
                     cols,
                 )

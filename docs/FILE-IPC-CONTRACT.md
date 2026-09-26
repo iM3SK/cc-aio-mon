@@ -1,8 +1,8 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.15.3
+# FILE-IPC CONTRACT: cc-aio-mon v1.16.0
 
 **Status**: Active  
-**Version**: 1.15.2 (`SCHEMA_VERSION` = 1)  
-**Last Updated**: 2026-06-14  
+**Version**: 1.16.0 (`SCHEMA_VERSION` = 1)  
+**Last Updated**: 2026-09-26  
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
@@ -88,13 +88,15 @@ _SID_RE = re.compile(
 **Source**: `shared.py`
 
 ```python
-RESERVED_SIDS = frozenset({"rls", "stats", "pulse"})
+FABLE_SETTINGS_STEM = "fable-refresh-settings"
+RESERVED_SIDS = frozenset({"rls", "stats", "pulse", FABLE_SETTINGS_STEM})
 ```
 
 These are reserved for internal use:
 - `rls`: release/update checking state (monitor only)
 - `stats`: aggregated cost statistics (monitor only)
 - `pulse`: Anthropic status monitor snapshots (pulse.py only)
+- `fable-refresh-settings`: the `--settings` file of the FBL refresher (statusline only). Reserved so `monitor.list_sessions()` never purges it as a model-less dead snapshot.
 
 **Validation**: `statusline.write_shared_state()` and `monitor.load_state()` return early if `sid in RESERVED_SIDS`.
 
@@ -238,6 +240,31 @@ with no override the function falls back to the passed session's own field.
 **Caveat**: snapshots carry **no account identifier**, so with multiple accounts
 running concurrently this may surface another account's limits. Single-account
 (the common case) is exact.
+
+### Fable weekly pool — external read of `.claude.json` (v1.16.0)
+
+FBL is **not** part of the IPC snapshot and adds nothing to it — `SCHEMA_VERSION`
+stays 1. Both statusline and monitor read it directly from Claude Code's own
+config file via `shared.read_fable_weekly()`:
+
+- **Path:** `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`
+  (`shared.claude_json_path()`). Bounded read (`CLAUDE_JSON_MAX`, 8 MB); parsed
+  only when `(mtime_ns, size)` changes (`shared._fable_cache`).
+- **Field:** `cachedUsageUtilization` → `{fetchedAtMs, accountUuid, utilization{…, limits[]}}`.
+  The bucket is the `limits[]` entry with `kind == "weekly_scoped"` whose
+  `scope.model.display_name` starts with `Fable` — selected by content, never
+  by index. `resets_at` is ISO-8601 (`shared.iso_to_epoch`).
+- **Account check:** the cache is ignored when its `accountUuid` differs from
+  `oauthAccount.accountUuid` in the same file (written under another login).
+- **Display rule** (`shared.fable_display_state`): hidden when absent, older
+  than 24 h or past `resets_at`; stale (dim, `~`) when older than
+  2 × `CC_AIO_MON_FABLE_REFRESH_SEC`.
+- **Never read:** `.credentials.json` or any OAuth token.
+
+Refresher files in the data dir (statusline only, see File Manifest):
+`fable-refresh.stamp` (last attempt, backoff), `fable-refresh.lock` (singleton
+lock held by the helper for its lifetime), `fable-refresh-settings.json`
+(`{"disableAllHooks": true}`, passed to `claude -p --settings`).
 
 ### Schema Version
 
@@ -767,6 +794,9 @@ No deprecated fields yet. When a field is retired:
 | `pulse.jsonl` | API stability log (persistence only — monitor displays from in-memory `get_pulse_snapshot()`) | pulse.py (worker) | pulse.py (startup seed), external tools | Atomic trim; non-atomic append | Trimmed to 500 lines @ 1 MB; startup cleanup drops >24h entries |
 | `monitor-crash.log` | Crash traceback | monitor (excepthook) | User (post-mortem) | None (diagnostic only) | Rotated to `.log.1` on every crash (v1.12.2+); size guard still applies for non-crash callers |
 | `monitor.lock` | Singleton lock | monitor | monitor (check at startup) | Atomic fcntl/msvcrt | Process lifetime; auto-released on exit |
+| `fable-refresh.stamp` | FBL refresh backoff (epoch of last attempt) | statusline | statusline | Atomic replace | Persistent, rewritten at most once per TTL |
+| `fable-refresh.lock` | FBL refresher singleton lock | statusline `--refresh-fable` | statusline `--refresh-fable` | Atomic fcntl/msvcrt | Helper lifetime (~2-20 s) |
+| `fable-refresh-settings.json` | `claude -p --settings` file (hooks disabled); reserved stem | statusline `--refresh-fable` | Claude Code CLI | Atomic replace | Persistent, rewritten per refresh |
 
 ---
 
@@ -827,6 +857,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.15.3  
-**Last Verified**: 2026-06-24  
+**Document Version**: 1.16.0  
+**Last Verified**: 2026-09-26  
 **Status**: Production
