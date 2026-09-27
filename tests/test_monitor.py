@@ -3069,22 +3069,6 @@ class TestModelCodeSanitization(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Security: run_git env whitelist (FIX 3)
 # ---------------------------------------------------------------------------
-class TestPrePushHook(unittest.TestCase):
-
-    @staticmethod
-    def _hook_path():
-        return pathlib.Path(__file__).resolve().parent.parent / ".githooks" / "pre-push"
-
-    def test_new_branch_scans_tip_tree(self):
-        hook = self._hook_path()
-        if not hook.exists():
-            self.skipTest("pre-push hook missing")
-        src = hook.read_text(encoding="utf-8")
-        self.assertIn('git diff-tree --no-commit-id --name-only -r "$local_sha"', src)
-        self.assertIn('git diff-tree --no-commit-id -p -r "$local_sha"', src)
-        self.assertNotIn('range="$local_sha"  # new branch', src)
-
-
 # ---------------------------------------------------------------------------
 # Regression: _SID_RE rejects Windows reserved device names (SEC-002 v1.9.1)
 # ---------------------------------------------------------------------------
@@ -4737,6 +4721,7 @@ class TestAuditFixesV1130(unittest.TestCase):
             monitor._update_thread = orig
 
 
+
 class TestJsonReadersRejectInvalidShapes(unittest.TestCase):
     def test_snapshots_are_rejected_without_modifying_file(self):
         import monitor
@@ -4777,7 +4762,6 @@ class TestJsonReadersRejectInvalidShapes(unittest.TestCase):
             (root / "session.jsonl").write_text("\n".join(rows), encoding="utf-8")
             with patch.object(monitor, "DATA_DIR", root):
                 self.assertEqual(monitor.calc_cross_session_costs(), (2.0, 2.0))
-
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)

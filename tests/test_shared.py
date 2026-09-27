@@ -1055,6 +1055,147 @@ class TestJsonObjectBoundaries(unittest.TestCase):
                 self.assertEqual(shared.calc_rates(hist), (0.0, 0.0))
 
 
+class TestPrePushHistory(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        import subprocess
+        self.git_bin = shutil.which("git")
+        # On Windows prefer Git for Windows Bash over the WindowsApps WSL shim.
+        self.bash = shutil.which("bash")
+        if sys.platform == "win32" and self.git_bin:
+            candidate = pathlib.Path(self.git_bin).parent.parent / "bin" / "bash.exe"
+            if candidate.is_file():
+                self.bash = str(candidate)
+        if not self.git_bin or not self.bash:
+            self.skipTest("git and bash required")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.hook = pathlib.Path(__file__).resolve().parent.parent / ".githooks" / "pre-push"
+        self.env = dict(os.environ)
+        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                        GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                        GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
+                        GIT_TERMINAL_PROMPT="0")
+        self.git("init", "-q")
+        self.git("config", "core.autocrlf", "false")
+
+    def git(self, *args):
+        import subprocess
+        return subprocess.run([self.git_bin] + list(args), cwd=self.root, env=self.env,
+                              capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+
+    def commit(self, name, content="harmless fixture\n"):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        self.git("add", "--", name)
+        self.git("-c", "core.hooksPath=", "commit", "-qm", "fixture")
+        return self.git("rev-parse", "HEAD")
+
+    def run_hook(self, refs, remote="origin"):
+        import subprocess
+        stdin = "".join("refs/heads/local %s %s %s\n" % (tip, ref, base)
+                        for tip, base, ref in refs)
+        return subprocess.run([self.bash, str(self.hook), remote, "unused"],
+                              cwd=self.root, env=self.env, input=stdin.encode("utf-8"),
+                              capture_output=True, timeout=30)
+
+    def test_root_and_earlier_deleted_file_are_blocked(self):
+        zero = "0" * 40
+        bad = self.commit("fixture.log")
+        self.assertEqual(self.run_hook([(bad, zero, "refs/heads/new")]).returncode, 1)
+        self.git("rm", "fixture.log")
+        self.git("-c", "core.hooksPath=", "commit", "-qm", "remove fixture")
+        tip = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.run_hook([(tip, zero, "refs/heads/new")]).returncode, 1)
+
+    def test_existing_branch_checks_each_commit_and_deduplicates_refs(self):
+        base = self.commit("readme.txt")
+        self.commit("fixture.log")
+        self.git("rm", "fixture.log")
+        self.git("-c", "core.hooksPath=", "commit", "-qm", "remove")
+        tip = self.git("rev-parse", "HEAD")
+        one = self.run_hook([(tip, base, "refs/heads/a")])
+        two = self.run_hook([(tip, base, "refs/heads/a"), (tip, base, "refs/heads/b")])
+        self.assertEqual(one.returncode, 1)
+        self.assertEqual(two.stderr, one.stderr)
+
+    def test_new_branch_excludes_only_the_named_remotes_history(self):
+        base = self.commit("fixture.log")
+        self.git("update-ref", "refs/remotes/origin/main", base)
+        tip = self.commit("readme.txt")
+        self.assertEqual(self.run_hook([(tip, "0" * 40, "refs/heads/new")]).returncode, 0)
+        self.assertEqual(self.run_hook([(tip, "0" * 40, "refs/heads/new")],
+                                       remote="elsewhere").returncode, 1)
+
+    def test_merge_resolution_is_checked(self):
+        base = self.commit("readme.txt")
+        self.git("checkout", "-qb", "side")
+        self.commit("side.txt")
+        self.git("checkout", "-qb", "target", base)
+        self.commit("target.txt")
+        self.git("merge", "--no-ff", "--no-commit", "side")
+        (self.root / "merge.log").write_text("harmless", encoding="utf-8")
+        self.git("add", "merge.log")
+        self.git("-c", "core.hooksPath=", "commit", "-qm", "merge")
+        self.assertEqual(self.run_hook([(self.git("rev-parse", "HEAD"), base,
+                                       "refs/heads/main")]).returncode, 1)
+
+    def test_rename_and_spaces_in_filename(self):
+        base = self.commit("safe.txt")
+        self.git("mv", "safe.txt", "has spaces.log")
+        self.git("-c", "core.hooksPath=", "commit", "-qm", "rename")
+        self.assertEqual(self.run_hook([(self.git("rev-parse", "HEAD"), base,
+                                       "refs/heads/main")]).returncode, 1)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows forbids newline filenames")
+    def test_newline_filename(self):
+        base = self.commit("readme.txt")
+        tip = self.commit("prefix\n.env")
+        # This filename is not .env: its newline must not become another path.
+        self.assertEqual(self.run_hook([(tip, base, "refs/heads/main")]).returncode, 0)
+        tip = self.commit("prefix\nfile.log")
+        self.assertEqual(self.run_hook([(tip, base, "refs/heads/main")]).returncode, 1)
+
+    def test_clean_push_and_remote_deletion(self):
+        tip = self.commit("readme.txt")
+        self.assertEqual(self.run_hook([(tip, "0" * 40, "refs/heads/main")]).returncode, 0)
+        self.assertEqual(self.run_hook([("0" * 40, tip, "refs/heads/main")]).returncode, 0)
+
+    def test_git_failure_blocks(self):
+        tip = self.commit("readme.txt")
+        self.assertEqual(self.run_hook([(tip, "f" * 40, "refs/heads/main")]).returncode, 1)
+
+    def test_content_pattern_is_blocked_without_echoing_value(self):
+        base = self.commit("readme.txt")
+        fake = "sk-ant-" + "X" * 24  # Synthetic, never a working credential.
+        self.commit("config.py", 'value = "' + fake + '"\n')
+        tip = self.commit("config.py", 'value = "removed"\n')
+        result = self.run_hook([(tip, base, "refs/heads/main")])
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn(fake.encode("ascii"), result.stdout + result.stderr)
+
+
+    def test_git_diff_failure_blocks_after_successful_enumeration(self):
+        wrapper = self.root / "git-failure.sh"
+        wrapper.write_text('git() { if [ "$1" = "diff-tree" ]; then return 42; fi; '
+                           'command git "$@"; }\n', encoding="utf-8")
+        tip = self.commit("readme.txt")
+        self.env["BASH_ENV"] = wrapper.as_posix()
+        result = self.run_hook([(tip, "0" * 40, "refs/heads/main")])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"unable to inspect", result.stderr)
+
+    def test_second_ref_is_not_lost_after_clean_first_ref(self):
+        base = self.commit("readme.txt")
+        clean = self.commit("clean.txt")
+        self.git("checkout", "-qb", "other", base)
+        bad = self.commit("fixture.log")
+        result = self.run_hook([(clean, base, "refs/heads/clean"),
+                                (bad, base, "refs/heads/other")])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"sensitive filename", result.stderr)
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
