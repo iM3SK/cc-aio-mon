@@ -889,6 +889,30 @@ class TestIPCForwardCompatNoSchemaVersion(unittest.TestCase):
         self.assertEqual(loaded["cost"]["total_cost_usd"], 0.5)
 
 
+
+class TestMalformedJsonInput(unittest.TestCase):
+    def test_main_rejects_nonobjects_without_writing(self):
+        import io
+        import statusline
+        for raw in (b"[]", b"1", b'"text"', b"null", b"{", b"[" * 20000 + b"]" * 20000):
+            with self.subTest(raw=raw[:20]), \
+                 patch.object(statusline, "ensure_utf8_stdout"), \
+                 patch.object(statusline.sys, "stdin", io.TextIOWrapper(io.BytesIO(raw))), \
+                 patch.object(statusline, "write_shared_state") as write:
+                statusline.main()
+                write.assert_not_called()
+
+    def test_optional_objects_match_missing_fields(self):
+        import statusline
+        for key in ("model", "cost", "context_window", "rate_limits"):
+            for value in ([1], "wrong", 3, None):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(statusline.build_line({key: value}, 200),
+                                     statusline.build_line({}, 200))
+        for key in ("five_hour", "seven_day"):
+            self.assertEqual(statusline.build_line({"rate_limits": {key: [1]}}, 200),
+                             statusline.build_line({}, 200))
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

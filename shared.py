@@ -149,6 +149,20 @@ def _num(v, default=0):
         return default
 
 
+def as_dict(value) -> dict:
+    """Treat an optional JSON object of the wrong type as a missing field."""
+    return value if isinstance(value, dict) else {}
+
+
+def json_object(raw) -> Optional[dict]:
+    """Parse a JSON object; reject malformed, too-deep and non-object input."""
+    try:
+        value = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (ValueError, TypeError, UnicodeDecodeError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def load_history(sid: str, n: int = HISTORY_RATE_SAMPLES, data_dir: Optional[pathlib.Path] = None) -> List[dict]:
     """Read last n JSONL history entries for session `sid`.
 
@@ -194,16 +208,12 @@ def load_history(sid: str, n: int = HISTORY_RATE_SAMPLES, data_dir: Optional[pat
                 pass
     if raw is None:
         return []
-    try:
-        lines = raw.decode("utf-8").splitlines()
-    except UnicodeDecodeError:
-        return []
+    lines = raw.splitlines()
     out = []
     for ln in lines[-n:]:
-        try:
-            out.append(json.loads(ln))
-        except json.JSONDecodeError:
-            pass
+        entry = json_object(ln)
+        if entry is not None:
+            out.append(entry)
     return out
 
 
@@ -482,6 +492,8 @@ def parse_ahead_behind(rev_list_output: str) -> Tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
+
+
 def rotate_crash_log(path: pathlib.Path, max_bytes: int = MAX_FILE_SIZE, always: bool = False) -> None:
     """Rotate ``path`` to ``path.1`` when size exceeds ``max_bytes``, or
     unconditionally when ``always=True``.
@@ -657,11 +669,11 @@ def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:
     dt = t1 - t0
     if dt < 10:
         return None, None
-    # `or {}` handles explicit JSON null on disk (default {} only triggers on missing key).
-    c0 = _num((hist[0].get("cost") or {}).get("total_cost_usd"))
-    c1 = _num((hist[-1].get("cost") or {}).get("total_cost_usd"))
-    x0 = _num((hist[0].get("context_window") or {}).get("used_percentage"))
-    x1 = _num((hist[-1].get("context_window") or {}).get("used_percentage"))
+    # Optional object fields of the wrong type have missing-field semantics.
+    c0 = _num(as_dict(hist[0].get("cost")).get("total_cost_usd"))
+    c1 = _num(as_dict(hist[-1].get("cost")).get("total_cost_usd"))
+    x0 = _num(as_dict(hist[0].get("context_window")).get("used_percentage"))
+    x1 = _num(as_dict(hist[-1].get("context_window")).get("used_percentage"))
     brn = (c1 - c0) / dt * 60 if c1 >= c0 else None
     ctr = (x1 - x0) / dt * 60 if x1 >= x0 else None
     return brn, ctr

@@ -20,7 +20,7 @@ import struct
 import sys
 import time
 
-from shared import (calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
+from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
                     f_tok, f_cost, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
                     lock_file_handle, unlock_file_handle,
@@ -139,14 +139,14 @@ _SEP_VLEN = 3  # " │ "
 # Segment builders — each returns (text, visible_length) or None
 # ---------------------------------------------------------------------------
 def seg_model(data):
-    name = _sanitize((data.get("model") or {}).get("display_name", ""))
+    name = _sanitize(as_dict(data.get("model")).get("display_name", ""))
     name = strip_context_suffix(name).replace(" (200k)", "")
     text = f"{B}{C_WHT}{name}{R}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def seg_ctx(data):
-    cw = data.get("context_window") or {}
+    cw = as_dict(data.get("context_window"))
     pct = round(max(0.0, min(100.0, _num(cw.get("used_percentage")))))
     total = _num(cw.get("context_window_size"), 0)
     used = int(total * pct / 100) if total else 0
@@ -157,10 +157,10 @@ def seg_ctx(data):
 
 
 def seg_5hl(data):
-    rl = data.get("rate_limits")
+    rl = as_dict(data.get("rate_limits"))
     if not rl:
         return None
-    fh = rl.get("five_hour")
+    fh = as_dict(rl.get("five_hour"))
     if not fh:
         return None
     pct = round(_num(fh.get("used_percentage")))
@@ -175,10 +175,10 @@ def seg_5hl(data):
 
 
 def seg_7dl(data):
-    rl = data.get("rate_limits")
+    rl = as_dict(data.get("rate_limits"))
     if not rl:
         return None
-    sd = rl.get("seven_day")
+    sd = as_dict(rl.get("seven_day"))
     if not sd:
         return None
     pct = round(_num(sd.get("used_percentage")))
@@ -193,7 +193,7 @@ def seg_7dl(data):
 
 
 def seg_cost(data):
-    usd = _num((data.get("cost") or {}).get("total_cost_usd"))
+    usd = _num(as_dict(data.get("cost")).get("total_cost_usd"))
     if usd <= 0:
         return None
     text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost(usd)}{R}"
@@ -216,7 +216,7 @@ def _last_known_rate_limits(hist):
     (2) the freshest *.json snapshot across all sessions (account-wide, since
     5H/7D limits are per-account). Returns None when nothing usable is found."""
     for entry in reversed(hist or []):
-        if isinstance(entry, dict) and entry.get("rate_limits"):
+        if isinstance(entry, dict) and as_dict(entry.get("rate_limits")):
             sv = entry.get("_schema_version")
             if isinstance(sv, int) and sv > SCHEMA_VERSION:
                 continue  # written by a newer build — skip, same gate as snapshot branch
@@ -234,7 +234,7 @@ def _last_known_rate_limits(hist):
                     raw = safe_read(f, MAX_FILE_SIZE)
                     if raw is None:
                         continue
-                    d = json.loads(raw.decode("utf-8"))
+                    d = json_object(raw)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
                     continue
                 if not isinstance(d, dict):
@@ -242,7 +242,7 @@ def _last_known_rate_limits(hist):
                 sv = d.get("_schema_version")
                 if isinstance(sv, int) and sv > SCHEMA_VERSION:
                     continue  # newer-build snapshot — same gate as monitor.load_state
-                rl = d.get("rate_limits")
+                rl = as_dict(d.get("rate_limits"))
                 if rl:
                     best_mt, best_rl = mt, rl
     except OSError:
@@ -303,8 +303,11 @@ def main():
         if not raw_bytes.strip():
             return
         raw = raw_bytes.decode("utf-8", errors="replace")
-        data = json.loads(raw)
+        data = json_object(raw)
     except (json.JSONDecodeError, ValueError, UnicodeDecodeError, RecursionError):
+        return
+
+    if data is None:
         return
 
     sid = data.get("session_id") or "default"
@@ -320,7 +323,7 @@ def main():
     # don't blink out between updates. Display-only — the snapshot/history written
     # below keep just what CC actually sent (no synthetic rate_limits leak into IPC).
     display = data
-    if not data.get("rate_limits"):
+    if not as_dict(data.get("rate_limits")):
         rl = _last_known_rate_limits(hist)
         if rl:
             display = {**data, "rate_limits": rl}
@@ -359,6 +362,8 @@ def _load_history_for_rates(sid, n=HISTORY_RATE_SAMPLES):
 
 
 def write_shared_state(data: dict):
+    if not isinstance(data, dict):
+        return
     sid = str(data.get("session_id") or "default")
     if not _SID_RE.match(sid):
         sid = "default"
@@ -375,7 +380,7 @@ def write_shared_state(data: dict):
     try:
         snapshot = json.dumps({**data, "_schema_version": SCHEMA_VERSION})
         entry = json.dumps({**data, "_schema_version": SCHEMA_VERSION, "t": time.time()})
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return
 
     # Atomic write of current state via unpredictable temp file (shared helper)

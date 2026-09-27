@@ -4737,6 +4737,48 @@ class TestAuditFixesV1130(unittest.TestCase):
             monitor._update_thread = orig
 
 
+class TestJsonReadersRejectInvalidShapes(unittest.TestCase):
+    def test_snapshots_are_rejected_without_modifying_file(self):
+        import monitor
+        for raw in ('[]', '1', '"text"', 'null', '{', '[' * 20000 + ']' * 20000):
+            with self.subTest(raw=raw[:20]), tempfile.TemporaryDirectory() as td:
+                root = pathlib.Path(td)
+                path = root / "session.json"
+                path.write_text(raw, encoding="utf-8")
+                with patch.object(monitor, "DATA_DIR", root):
+                    self.assertIsNone(monitor.load_state("session"))
+                    self.assertEqual(monitor.list_sessions(), [])
+                self.assertEqual(path.read_text(encoding="utf-8"), raw)
+
+    def test_transcript_continues_after_bad_rows(self):
+        import json
+        import monitor
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "session.jsonl"
+            valid = {"type": "assistant", "message": {"model": "test",
+                     "usage": {"input_tokens": 7, "output_tokens": 2}}}
+            path.write_text("\n".join(['[]', '1', 'null', '{',
+                            '[' * 20000 + ']' * 20000, json.dumps(valid)]), encoding="utf-8")
+            models = {}
+            monitor._aggregate_transcript(path, path.stat(), "session", False, 0,
+                                          models, set(), {}, {})
+            self.assertEqual(models["test"]["input"], 7)
+            self.assertEqual(models["test"]["output"], 2)
+
+    def test_cross_session_history_keeps_valid_rows(self):
+        import json
+        import monitor
+        now = time.time()
+        rows = ['[]', '1', 'null', '{', '[' * 20000 + ']' * 20000]
+        rows += [json.dumps({"t": now - 10, "cost": {"total_cost_usd": 1}}),
+                 json.dumps({"t": now, "cost": {"total_cost_usd": 3}})]
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "session.jsonl").write_text("\n".join(rows), encoding="utf-8")
+            with patch.object(monitor, "DATA_DIR", root):
+                self.assertEqual(monitor.calc_cross_session_costs(), (2.0, 2.0))
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

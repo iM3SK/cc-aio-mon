@@ -1037,6 +1037,26 @@ class TestCheckSyntaxAfterPull(unittest.TestCase):
         self.assertEqual(shared.check_syntax_after_pull(self.root, ["nope.py"]), [])
 
 
+class TestJsonObjectBoundaries(unittest.TestCase):
+    def test_history_skips_bad_rows_and_keeps_later_object(self):
+        import json
+        bad = ['[]', '1', '"text"', 'null', '{', '[' * 20000 + ']' * 20000]
+        valid = {"t": 1700000060, "cost": {"total_cost_usd": 2}}
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "session.jsonl"
+            raw = "\n".join(bad + [json.dumps(valid)]) + "\n"
+            path.write_text(raw, encoding="utf-8")
+            self.assertEqual(shared.load_history("session", data_dir=path.parent), [valid])
+            self.assertEqual(path.read_text(encoding="utf-8"), raw)
+
+    def test_wrong_nested_objects_have_missing_field_semantics(self):
+        for value in ([1], "wrong", 3, None):
+            with self.subTest(value=value):
+                hist = [{"t": 1700000000, "cost": value, "context_window": value},
+                        {"t": 1700000060, "cost": value, "context_window": value}]
+                self.assertEqual(shared.calc_rates(hist), (0.0, 0.0))
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)
