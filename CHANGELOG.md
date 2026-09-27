@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.15.4 — 2026-09-27
+
+**Fixed:**
+
+- Session JSON readers reject non-object and excessively nested input, skip bad
+  JSONL records, and treat malformed optional objects as missing without repairing
+  input files. Valid later records remain usable; IPC schema stays at 1.
+- CLI and TUI updates stop on failed Git safety checks or invalid comparison
+  results. Missing, unreadable and syntactically invalid runtime files fail
+  verification. The CLI exits with code 1, releases its lock, and only reports
+  completion after successful verification. Both paths retain the original
+  commit for manual recovery; no automatic reset is performed.
+- The pre-push hook inspects each outgoing commit once, including root and merge
+  commits, renamed files and changes removed before the branch tip. It uses the
+  supplied remote baseline, handles filenames with NUL delimiters, and blocks
+  on Git inspection errors without printing credential values.
+
 ## v1.15.3 — 2026-06-24
 
 **Security:**

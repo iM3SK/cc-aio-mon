@@ -53,7 +53,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.15.3"
+VERSION = "1.15.4"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -149,6 +149,20 @@ def _num(v, default=0):
         return default
 
 
+def as_dict(value) -> dict:
+    """Treat an optional JSON object of the wrong type as a missing field."""
+    return value if isinstance(value, dict) else {}
+
+
+def json_object(raw) -> Optional[dict]:
+    """Parse a JSON object; reject malformed, too-deep and non-object input."""
+    try:
+        value = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (ValueError, TypeError, UnicodeDecodeError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def load_history(sid: str, n: int = HISTORY_RATE_SAMPLES, data_dir: Optional[pathlib.Path] = None) -> List[dict]:
     """Read last n JSONL history entries for session `sid`.
 
@@ -194,16 +208,12 @@ def load_history(sid: str, n: int = HISTORY_RATE_SAMPLES, data_dir: Optional[pat
                 pass
     if raw is None:
         return []
-    try:
-        lines = raw.decode("utf-8").splitlines()
-    except UnicodeDecodeError:
-        return []
+    lines = raw.splitlines()
     out = []
     for ln in lines[-n:]:
-        try:
-            out.append(json.loads(ln))
-        except json.JSONDecodeError:
-            pass
+        entry = json_object(ln)
+        if entry is not None:
+            out.append(entry)
     return out
 
 
@@ -443,8 +453,8 @@ def verify_origin_remote(repo_root) -> Optional[str]:
 def check_syntax_after_pull(repo_root: pathlib.Path, py_files: Optional[Iterable[str]] = None) -> List[str]:
     """Compile each .py file under ``repo_root`` to catch syntax errors after
     a self-update. Returns a list of relative filenames that failed to compile
-    (empty when all files pass). Files missing from disk are silently skipped;
-    unreadable / oversized files (>MAX_FILE_SIZE) count as failures.
+    (empty when all files pass). Missing, unreadable, oversized or invalid
+    UTF-8 files count as failures.
 
     Shared by update.py:apply_update() (CLI) and monitor.py:_apply_update_worker()
     (TUI background thread) — they used to carry byte-for-byte duplicate loops.
@@ -454,15 +464,13 @@ def check_syntax_after_pull(repo_root: pathlib.Path, py_files: Optional[Iterable
     bad = []
     for f in py_files:
         fp = repo_root / f
-        if not fp.exists():
-            continue
         raw = safe_read(fp, MAX_FILE_SIZE)
         if raw is None:
             bad.append(f)
             continue
         try:
-            compile(raw.decode("utf-8", errors="replace"), str(fp), "exec")
-        except SyntaxError:
+            compile(raw.decode("utf-8"), str(fp), "exec")
+        except (SyntaxError, UnicodeDecodeError, ValueError, RecursionError):
             bad.append(f)
     return bad
 
@@ -477,9 +485,17 @@ def parse_ahead_behind(rev_list_output: str) -> Tuple[int, int]:
     can swap on the return — keeping the parser canonical here.
     """
     parts = rev_list_output.strip().split()
-    if len(parts) != 2:
-        raise ValueError(f"Unexpected rev-list output: {rev_list_output!r}")
+    if len(parts) != 2 or any(not re.fullmatch(r"[0-9]+", p) for p in parts):
+        raise ValueError("Invalid git rev-list counts")
     return int(parts[0]), int(parts[1])
+
+
+def parse_commit_id(output: str) -> str:
+    """Accept only a complete SHA-1/SHA-256 object ID for recovery hints."""
+    value = output.strip()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) or not value.strip("0"):
+        raise ValueError("Invalid recovery commit from git")
+    return value
 
 
 def rotate_crash_log(path: pathlib.Path, max_bytes: int = MAX_FILE_SIZE, always: bool = False) -> None:
@@ -657,11 +673,11 @@ def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:
     dt = t1 - t0
     if dt < 10:
         return None, None
-    # `or {}` handles explicit JSON null on disk (default {} only triggers on missing key).
-    c0 = _num((hist[0].get("cost") or {}).get("total_cost_usd"))
-    c1 = _num((hist[-1].get("cost") or {}).get("total_cost_usd"))
-    x0 = _num((hist[0].get("context_window") or {}).get("used_percentage"))
-    x1 = _num((hist[-1].get("context_window") or {}).get("used_percentage"))
+    # Optional object fields of the wrong type have missing-field semantics.
+    c0 = _num(as_dict(hist[0].get("cost")).get("total_cost_usd"))
+    c1 = _num(as_dict(hist[-1].get("cost")).get("total_cost_usd"))
+    x0 = _num(as_dict(hist[0].get("context_window")).get("used_percentage"))
+    x1 = _num(as_dict(hist[-1].get("context_window")).get("used_percentage"))
     brn = (c1 - c0) / dt * 60 if c1 >= c0 else None
     ctr = (x1 - x0) / dt * 60 if x1 >= x0 else None
     return brn, ctr

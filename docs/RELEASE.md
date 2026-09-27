@@ -293,9 +293,9 @@ following are true after your push:
 | What the code checks | Where it reads | Failure mode if wrong |
 |---|---|---|
 | Remote VERSION string | `git show origin/main:shared.py` → `VERSION_RE` (`shared.py`) | Reports `error` in release indicator; `RuntimeError: VERSION constant not found in remote shared.py` on `--apply` |
-| Remote CHANGELOG entry | `git show origin/main:CHANGELOG.md` → `extract_changelog_entry(text, version, max_lines=None)` (`shared.py`) | Update modal shows no changelog preview; not fatal |
+| Remote CHANGELOG entry | `git show origin/main:CHANGELOG.md` → `extract_changelog_entry(text, version, max_lines=None)` (`shared.py`) | A missing entry is allowed; a failed Git read stops the CLI update. The TUI preview is advisory |
 | `git pull --ff-only` succeeds | Requires `main` is linear (no force-push, no rebase of published history) | `git pull` exits non-zero; user is left on old version with the rollback tag as recovery point |
-| Post-pull syntax check passes | `shared.check_syntax_after_pull(repo_root)` iterates `PY_FILES` (`shared.py`) | Warns user `Syntax errors in: <file>` and shows rollback hint |
+| Post-pull syntax check passes | `shared.check_syntax_after_pull(repo_root)` iterates `PY_FILES` (`shared.py`) | CLI exits 1; TUI reports failure with the verified recovery commit. Missing and unreadable files also fail verification |
 
 **Critical constraint:** `git pull --ff-only` requires that `origin/main` is a
 fast-forward ancestor of the user's local `main`. If you ever rebase or
@@ -304,6 +304,11 @@ force-push `main` after users have pulled, `git pull --ff-only` will fail with
 There is no recovery path short of users manually running `git reset --hard
 origin/main` (which discards any local changes). Do not rewrite published
 history on `main`.
+
+Both updater paths capture and validate the original commit before pulling.
+Git safety-check failures, timeouts and invalid comparison output block the pull.
+The CLI requires its recovery tag to be created successfully and closes the
+singleton lock on every outcome. Neither updater performs an automatic reset.
 
 **The syntax check covers exactly the five files in `PY_FILES`.** If you add
 a new `.py` module to the project, add it to `PY_FILES` in `shared.py` so

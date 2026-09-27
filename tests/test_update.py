@@ -232,8 +232,8 @@ class TestUpdate(unittest.TestCase):
         fake.returncode = 128
         fake.stdout = ""
         with patch("update.run_git", return_value=fake):
-            result = get_remote_changelog_entry("2.0.0")
-        self.assertIsNone(result)
+            with self.assertRaises(RuntimeError):
+                get_remote_changelog_entry("2.0.0")
 
     # -- check_clean ---------------------------------------------------------
 
@@ -431,7 +431,7 @@ class TestApplyUpdateAction(unittest.TestCase):
         # Test the synchronous worker directly (not the thread-spawning wrapper).
         # _update_checks is patched clean — the worker now blocks on warnings.
         with patch("monitor._update_checks", return_value=[]):
-            with patch("monitor._git_cmd", return_value=(0, "ok", "")):
+            with patch("monitor._git_cmd", return_value=(0, "a" * 40, "")):
                 with patch("pathlib.Path.exists", return_value=True):
                     with patch("pathlib.Path.read_text", return_value="# valid python\nx = 1\n"):
                         _apply_update_worker()
@@ -467,13 +467,13 @@ class TestApplyUpdateAction(unittest.TestCase):
             repo_root = pathlib.Path(td)
             (repo_root / "monitor.py").write_text("# stub")
             with patch("monitor._update_checks", return_value=[]):
-                with patch("monitor._git_cmd", return_value=(0, "ok", "")):
+                with patch("monitor._git_cmd", return_value=(0, "a" * 40, "")):
                     with patch.object(shared, "PY_FILES", ("monitor.py",)):
                         with patch.object(monitor, "_REPO_ROOT", repo_root):
                             with patch("shared.safe_read", return_value=None) as mock_safe_read:
                                 _apply_update_worker()
             mock_safe_read.assert_called_once()
-            self.assertIn("syntax errors", monitor._update_result)
+            self.assertIn("Runtime verification failed", monitor._update_result)
 
     def test_nonzero_rc_marks_failed_with_stderr(self):
         with patch("monitor._update_checks", return_value=[]):
@@ -544,8 +544,8 @@ class TestUpdateFlowFunctions(unittest.TestCase):
     def test_get_new_commits_failure(self):
         from update import get_new_commits
         with patch("update.run_git", return_value=self._mock_result(1, "")):
-            commits = get_new_commits()
-        self.assertEqual(commits, [])
+            with self.assertRaises(RuntimeError):
+                get_new_commits()
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +728,140 @@ class TestUpdateMainFlow(unittest.TestCase):
         # Local diverged (ahead AND behind) -> manual merge required, exit 1.
         self.assertEqual(self._run_main(behind=3, ahead=1), 1)
 
+
+
+class TestUpdateFailureBoundaries(unittest.TestCase):
+    SHA = "a" * 40
+
+    def _git(self, args, **kwargs):
+        import subprocess
+        out = {"--is-inside-work-tree": "true", "--abbrev-ref": "main"}
+        if args[0] == "rev-parse":
+            value = out.get(args[1], self.SHA)
+        elif args[0] == "rev-list":
+            value = "0 1"
+        else:
+            value = ""
+        return subprocess.CompletedProcess(args, 0, value, "")
+
+    def test_cli_failed_prechecks_never_pull(self):
+        import io
+        import subprocess
+        import update
+        for command in ("rev-parse", "status", "fetch", "rev-list", "log", "show"):
+            for failure in ("rc", "timeout"):
+                calls = []
+                def git(args, **kwargs):
+                    calls.append(args)
+                    if args[0] == command:
+                        if failure == "timeout":
+                            raise subprocess.TimeoutExpired(args, 30)
+                        return subprocess.CompletedProcess(args, 1, "main", "check failed")
+                    return self._git(args, **kwargs)
+                with self.subTest(command=command, failure=failure), \
+                     patch.object(update, "run_git", side_effect=git), \
+                     patch.object(update, "verify_origin_remote", return_value=None), \
+                     patch.object(update, "get_local_version", return_value="1.0.0"), \
+                     patch.object(update, "get_remote_version", return_value="1.0.1"), \
+                     patch.object(update, "_init_terminal", return_value=False), \
+                     patch.object(sys, "argv", ["update.py", "--apply"]), \
+                     patch.object(sys, "stdout", io.StringIO()), \
+                     patch.object(sys, "stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        update.main()
+                    self.assertEqual(raised.exception.code, 1)
+                self.assertFalse(any(c[0] == "pull" for c in calls))
+
+    def test_tui_failed_checks_never_pull(self):
+        import monitor
+        for index in range(3):
+            for bad in ((1, "", "failed"), (-2, "", "timeout")):
+                replies = [(0, "main", ""), (0, "", ""), (0, "0 1", "")]
+                replies[index] = bad
+                with self.subTest(index=index, bad=bad), \
+                     patch.object(monitor, "_git_cmd", side_effect=replies) as git, \
+                     patch.object(monitor, "verify_origin_remote", return_value=None):
+                    monitor._apply_update_worker()
+                self.assertFalse(any(c.args[0][0] == "pull" for c in git.call_args_list))
+                self.assertIn("blocked", monitor._get_update_result())
+
+    def test_tui_malformed_comparison_never_pulls(self):
+        import monitor
+        for value in ("", "nonsense", "-1 0", "0 1 2"):
+            with self.subTest(value=value), \
+                 patch.object(monitor, "_git_cmd", side_effect=[
+                     (0, "main", ""), (0, "", ""), (0, value, "")]) as git, \
+                 patch.object(monitor, "verify_origin_remote", return_value=None):
+                monitor._apply_update_worker()
+            self.assertFalse(any(c.args[0][0] == "pull" for c in git.call_args_list))
+            self.assertIn("blocked", monitor._get_update_result())
+
+    def test_cli_verification_and_pull_outcomes_release_lock(self):
+        import io
+        import subprocess
+        import update
+        from unittest.mock import MagicMock
+        for failure in (None, "syntax", "version", "pull", "timeout", "sha", "tag"):
+            lock = MagicMock()
+            output, errors, calls = io.StringIO(), io.StringIO(), []
+            def git(args, **kwargs):
+                calls.append(args)
+                if failure == "timeout" and args[0] == "pull":
+                    raise subprocess.TimeoutExpired(args, 30)
+                if args[0] == failure:
+                    return subprocess.CompletedProcess(args, 1, "", "failed")
+                if failure == "sha" and args[:2] == ["rev-parse", "--verify"]:
+                    return subprocess.CompletedProcess(args, 0, "bad-sha", "")
+                return self._git(args, **kwargs)
+            with self.subTest(failure=failure), \
+                 patch.object(update, "run_git", side_effect=git), \
+                 patch.object(update, "ensure_data_dir", return_value=True), \
+                 patch.object(update, "acquire_singleton_lock", return_value=lock), \
+                 patch.object(update, "get_local_version",
+                              side_effect=RuntimeError("bad version") if failure == "version" else None,
+                              return_value="1.15.4"), \
+                 patch.object(update, "check_syntax_after_pull",
+                              return_value=["monitor.py"] if failure == "syntax" else []), \
+                 patch.object(sys, "stdout", output), patch.object(sys, "stderr", errors):
+                if failure:
+                    with self.assertRaises(SystemExit) as raised:
+                        update.apply_update()
+                    self.assertEqual(raised.exception.code, 1)
+                    self.assertNotIn("Update complete", output.getvalue())
+                else:
+                    update.apply_update()
+                    self.assertIn("Update complete", output.getvalue())
+                lock.close.assert_called_once()
+                if failure not in ("sha", "tag"):
+                    self.assertIn(self.SHA, output.getvalue() + errors.getvalue())
+                if failure in ("sha", "tag"):
+                    self.assertFalse(any(c[0] == "pull" for c in calls))
+
+
+    def test_tui_post_pull_verifies_real_runtime_files(self):
+        import monitor
+        for failure in (None, "missing", "syntax", "unreadable"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
+                root = pathlib.Path(td)
+                for filename in shared.PY_FILES:
+                    if failure == "missing" and filename == "monitor.py":
+                        continue
+                    body = "def broken(:\n" if failure == "syntax" and filename == "monitor.py" else "x = 1\n"
+                    (root / filename).write_text(body, encoding="utf-8")
+                with patch.object(monitor, "_REPO_ROOT", root), \
+                     patch.object(monitor, "_update_checks", return_value=[]), \
+                     patch.object(monitor, "_git_cmd", side_effect=[
+                         (0, self.SHA, ""), (0, "", "")]), \
+                     patch.object(shared, "safe_read", return_value=None) if failure == "unreadable" else \
+                     patch.object(shared, "safe_read", wraps=shared.safe_read):
+                    monitor._apply_update_worker()
+                result = monitor._get_update_result()
+                if failure:
+                    self.assertIn("failed", result)
+                    self.assertIn(self.SHA, result)
+                    self.assertNotIn("complete", result)
+                else:
+                    self.assertIn("complete", result)
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
