@@ -482,11 +482,9 @@ class TestParseAheadBehind(unittest.TestCase):
         self.assertEqual((ahead, behind), (3, 5))
 
     def test_negative_integer_rejected(self):
-        # int() accepts negative values; parser applies no sign validation.
-        # This anchors the current behavior: negatives ARE accepted (no validation).
         from shared import parse_ahead_behind
-        ahead, behind = parse_ahead_behind("-3\t5")
-        self.assertEqual((ahead, behind), (-3, 5))
+        with self.assertRaises(ValueError):
+            parse_ahead_behind("-3\t5")
 
 
 class TestAcquireSingletonLock(unittest.TestCase):
@@ -1032,9 +1030,9 @@ class TestCheckSyntaxAfterPull(unittest.TestCase):
         (self.root / "good.py").write_text("y = 2\n", encoding="utf-8")
         self.assertEqual(shared.check_syntax_after_pull(self.root, ["good.py"]), [])
 
-    def test_missing_file_skipped_not_flagged(self):
-        # Absent files are not a syntax failure — they must not land in `bad`.
-        self.assertEqual(shared.check_syntax_after_pull(self.root, ["nope.py"]), [])
+    def test_missing_runtime_file_is_a_failure(self):
+        self.assertEqual(shared.check_syntax_after_pull(self.root, ["nope.py"]), ["nope.py"])
+
 
 
 class TestJsonObjectBoundaries(unittest.TestCase):
@@ -1055,6 +1053,7 @@ class TestJsonObjectBoundaries(unittest.TestCase):
                 hist = [{"t": 1700000000, "cost": value, "context_window": value},
                         {"t": 1700000060, "cost": value, "context_window": value}]
                 self.assertEqual(shared.calc_rates(hist), (0.0, 0.0))
+
 
 
 if __name__ == "__main__":

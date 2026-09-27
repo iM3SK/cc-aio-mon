@@ -65,7 +65,7 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     badge_context_suffix,
                     extract_changelog_entry,
-                    check_syntax_after_pull, parse_ahead_behind, verify_origin_remote,
+                    check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
@@ -2436,6 +2436,8 @@ def _git_cmd(args, timeout=15):
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except FileNotFoundError:
         return -1, "", "git not found"
+    except OSError:
+        return -1, "", "git unavailable"
     except subprocess.TimeoutExpired:
         return -2, "", "timeout"
 
@@ -2444,19 +2446,28 @@ def _update_checks():
     """Return list of warning strings for update safety."""
     warns = []
     rc, out, _ = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"])
-    if rc == 0 and out != "main":
+    if rc != 0:
+        warns.append("Could not verify current branch")
+    elif out != "main":
         warns.append(f"Not on main branch (current: {out})")
     rc, out, _ = _git_cmd(["status", "--porcelain", "-uno"])
-    if rc == 0 and out:
+    if rc != 0:
+        warns.append("Could not verify working tree")
+    elif out:
         warns.append("Uncommitted changes in working tree")
     rc, out, _ = _git_cmd(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
     if rc == 0:
         try:
             ahead, behind = parse_ahead_behind(out)
         except ValueError:
-            ahead = behind = 0
-        if ahead > 0 and behind > 0:
-            warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+            warns.append("Invalid commit comparison")
+        else:
+            if ahead > 0 and behind > 0:
+                warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+            elif ahead > 0:
+                warns.append(f"Local has {ahead} commits ahead of origin/main")
+    else:
+        warns.append("Could not compare commits")
     # SEC: pin self-update to the canonical repo (same guard as update.py CLI).
     remote_problem = verify_origin_remote(_REPO_ROOT)
     if remote_problem:
@@ -2587,29 +2598,27 @@ def _apply_update_worker():
     syntax check. Sets _update_result. The checks mirror the update.py CLI
     guards (branch / clean tree / divergence / pinned origin) — the modal
     render is advisory only, so the worker must enforce them itself."""
+    recovery = None
     try:
         warns = _update_checks()
         if warns:
-            _set_update_result(
-                "Update blocked: " + "; ".join(_sanitize(w) for w in warns)
-            )
+            _set_update_result("Update blocked: " + "; ".join(_sanitize(w) for w in warns))
             return
+        rc, out, _ = _git_cmd(["rev-parse", "--verify", "HEAD"])
+        if rc != 0:
+            raise RuntimeError("Could not read recovery commit")
+        recovery = parse_commit_id(out)
         rc, out, err = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
-        if rc == 0:
-            # Drop modal git cache so post-pull state (no commits ahead, etc.)
-            # is reflected immediately on the next render.
-            _invalidate_update_modal_cache()
-            # Syntax check via compile() — avoids interpreter version mismatch.
-            # Shared with update.py CLI so both paths cover identical file set.
-            bad = check_syntax_after_pull(_REPO_ROOT)
-            if bad:
-                _set_update_result(f"Updated but syntax errors in: {', '.join(bad)}")
-            else:
-                _set_update_result("Update complete. Restart monitor to apply.")
-        else:
-            _set_update_result(f"Update failed: {_sanitize(err or out or 'unknown error')}")
+        if rc != 0:
+            raise RuntimeError("git pull failed")
+        _invalidate_update_modal_cache()
+        bad = check_syntax_after_pull(_REPO_ROOT)
+        if bad:
+            raise RuntimeError(f"Runtime verification failed: {', '.join(bad)}")
+        _set_update_result("Update complete. Restart monitor to apply.")
     except Exception as e:
-        _set_update_result(f"Update error: {_sanitize(str(e))}")
+        hint = f" Recovery commit: {recovery}." if recovery else ""
+        _set_update_result(f"Update failed: {_sanitize(str(e))}.{hint}")
 
 
 def _apply_update_action():

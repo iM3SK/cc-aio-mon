@@ -453,8 +453,8 @@ def verify_origin_remote(repo_root) -> Optional[str]:
 def check_syntax_after_pull(repo_root: pathlib.Path, py_files: Optional[Iterable[str]] = None) -> List[str]:
     """Compile each .py file under ``repo_root`` to catch syntax errors after
     a self-update. Returns a list of relative filenames that failed to compile
-    (empty when all files pass). Files missing from disk are silently skipped;
-    unreadable / oversized files (>MAX_FILE_SIZE) count as failures.
+    (empty when all files pass). Missing, unreadable, oversized or invalid
+    UTF-8 files count as failures.
 
     Shared by update.py:apply_update() (CLI) and monitor.py:_apply_update_worker()
     (TUI background thread) — they used to carry byte-for-byte duplicate loops.
@@ -464,15 +464,13 @@ def check_syntax_after_pull(repo_root: pathlib.Path, py_files: Optional[Iterable
     bad = []
     for f in py_files:
         fp = repo_root / f
-        if not fp.exists():
-            continue
         raw = safe_read(fp, MAX_FILE_SIZE)
         if raw is None:
             bad.append(f)
             continue
         try:
-            compile(raw.decode("utf-8", errors="replace"), str(fp), "exec")
-        except SyntaxError:
+            compile(raw.decode("utf-8"), str(fp), "exec")
+        except (SyntaxError, UnicodeDecodeError, ValueError, RecursionError):
             bad.append(f)
     return bad
 
@@ -487,11 +485,17 @@ def parse_ahead_behind(rev_list_output: str) -> Tuple[int, int]:
     can swap on the return — keeping the parser canonical here.
     """
     parts = rev_list_output.strip().split()
-    if len(parts) != 2:
-        raise ValueError(f"Unexpected rev-list output: {rev_list_output!r}")
+    if len(parts) != 2 or any(not re.fullmatch(r"[0-9]+", p) for p in parts):
+        raise ValueError("Invalid git rev-list counts")
     return int(parts[0]), int(parts[1])
 
 
+def parse_commit_id(output: str) -> str:
+    """Accept only a complete SHA-1/SHA-256 object ID for recovery hints."""
+    value = output.strip()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) or not value.strip("0"):
+        raise ValueError("Invalid recovery commit from git")
+    return value
 
 
 def rotate_crash_log(path: pathlib.Path, max_bytes: int = MAX_FILE_SIZE, always: bool = False) -> None:

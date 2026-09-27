@@ -327,7 +327,7 @@ The script is **read-only by default** — it shows you what would change (versi
 git reset --hard pre-update-YYYYMMDD-HHMMSS
 ```
 
-(The exact tag name is printed during update.) Post-pull syntax check runs on all five modules (`monitor.py`, `statusline.py`, `shared.py`, `pulse.py`, `update.py`) — if any fail to compile, the rollback hint is shown.
+(The exact tag name is printed during update.) Both update paths record the original commit before pulling. Failed Git checks block the pull; missing, unreadable or syntactically invalid runtime files fail verification. The CLI exits with code 1 and the TUI displays an error with the recovery commit. “Update complete” is shown only after successful verification. Recovery is manual; no reset is performed automatically.
 
 **Manual fallback** — if you prefer plain git:
 

@@ -13,13 +13,14 @@ macOS/Linux: python3). Stdlib only.
 import argparse
 import datetime
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 from shared import (
     VERSION_RE, MAX_FILE_SIZE, _sanitize, run_git as _shared_run_git,
     ensure_utf8_stdout, extract_changelog_entry, PY_FILES, safe_read,
-    check_syntax_after_pull, parse_ahead_behind, verify_origin_remote,
+    check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
     DATA_DIR, ensure_data_dir, acquire_singleton_lock,
 )
 
@@ -98,6 +99,8 @@ def check_repo():
 
 def check_branch():
     r = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    if r.returncode != 0:
+        raise RuntimeError("Could not verify current branch")
     branch = r.stdout.strip()
     if branch == "HEAD":
         err("Detached HEAD — not on any branch")
@@ -111,6 +114,8 @@ def check_branch():
 def check_clean():
     # -uno: ignore untracked files — they don't affect git pull
     r = run_git(["status", "--porcelain", "-uno"])
+    if r.returncode != 0:
+        raise RuntimeError("Could not verify working tree")
     if r.stdout.strip():
         err("Working tree has uncommitted changes:")
         print(r.stdout)
@@ -168,14 +173,14 @@ def get_ahead_behind() -> Tuple[int, int]:
 def get_new_commits() -> List[str]:
     r = run_git(["log", "--oneline", "HEAD..origin/main"])
     if r.returncode != 0:
-        return []
+        raise RuntimeError("Failed to read new commits")
     return [line for line in r.stdout.strip().split("\n") if line]
 
 
 def get_remote_changelog_entry(version: str) -> Optional[str]:
     r = run_git(["show", "origin/main:CHANGELOG.md"])
     if r.returncode != 0:
-        return None
+        raise RuntimeError("Failed to read remote changelog")
     entry = extract_changelog_entry(r.stdout, version)
     return entry if entry else None
 
@@ -192,7 +197,7 @@ def apply_update():
     hdr("Applying update")
 
     # Singleton lock — fail fast if monitor.py is running. Lock handle stays in
-    # function scope; OS releases it when apply_update() returns or sys.exit().
+    # function scope; finally closes it on success and every failure.
     if ensure_data_dir(DATA_DIR):
         _lock_handle = acquire_singleton_lock(DATA_DIR / "monitor.lock")
         if _lock_handle is None:
@@ -207,53 +212,46 @@ def apply_update():
         note(f"Data dir: {DATA_DIR} (check permissions/ownership)")
         sys.exit(1)
 
-    # Rollback point — created before pull so user can revert via `git reset --hard <tag>`
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    rollback_tag = f"pre-update-{ts}"
-    tr = run_git(["tag", rollback_tag])
-    if tr.returncode == 0:
-        ok(f"Rollback tag: {rollback_tag}")
-        note(f"  Recover with: git reset --hard {rollback_tag}")
-    else:
-        warn(f"Could not create rollback tag (continuing): {_sanitize(tr.stderr.strip())}")
-
-    r = run_git(["pull", "--ff-only", "origin", "main"])
-    if r.returncode != 0:
-        err(f"git pull failed: {_sanitize(r.stderr or r.stdout or 'unknown error')}")
-        note(f"Revert with: git reset --hard {rollback_tag}")
-        sys.exit(1)
-    if r.stdout.strip():
-        for line in r.stdout.strip().split("\n"):
-            note(_sanitize(line))
-    ok("Pulled latest changes")
-
+    recovery = None
     try:
+        head = run_git(["rev-parse", "--verify", "HEAD"])
+        if head.returncode != 0:
+            raise RuntimeError("Could not read recovery commit")
+        recovery = parse_commit_id(head.stdout)
+        note(f"Recovery commit: {recovery}")
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        rollback_tag = f"pre-update-{ts}"
+        tr = run_git(["tag", rollback_tag, recovery])
+        if tr.returncode != 0:
+            raise RuntimeError("Could not create recovery tag")
+        ok(f"Rollback tag: {rollback_tag}")
+
+        r = run_git(["pull", "--ff-only", "origin", "main"])
+        if r.returncode != 0:
+            raise RuntimeError("git pull failed")
+        ok("Pulled latest changes")
         new_ver = get_local_version()
-        # VERSION_RE matches [^"']+ — on-disk shared.py could carry ANSI;
-        # sanitize before echoing to terminal.
         ok(f"New VERSION: {_sanitize(new_ver)}")
-    except Exception as e:
-        warn(f"Could not verify new VERSION: {_sanitize(str(e))}")
-
-    # Syntax check — catch broken updates before user runs monitor.
-    # File list + check logic come from shared (single source of truth across
-    # update.py CLI and monitor.py TUI worker).
-    bad = check_syntax_after_pull(REPO_ROOT)
-    if bad:
-        warn(f"Syntax errors in: {', '.join(bad)} — update may be broken")
-        note(f"Revert with: git reset --hard {rollback_tag}")
-    else:
+        bad = check_syntax_after_pull(REPO_ROOT)
+        if bad:
+            raise RuntimeError(f"Runtime verification failed: {', '.join(bad)}")
         ok(f"Syntax check passed ({len(PY_FILES)} files)")
+        print()
+        print(f"{GRN}Update complete.{R}")
+        note("Restart Claude Code to pick up the new statusline.py")
+        note("Recommended: re-run check-requirements to verify dependencies:")
+        note("  macOS/Linux: bash check-requirements.sh")
+        note("  Windows:     .\\check-requirements.ps1")
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as e:
+        err(f"Update failed: {_sanitize(str(e))}")
+        if recovery:
+            note(f"Recovery commit: {recovery} (no automatic reset performed)")
+        sys.exit(1)
+    finally:
+        _lock_handle.close()
 
-    print()
-    print(f"{GRN}Update complete.{R}")
-    note("Restart Claude Code to pick up the new statusline.py")
-    note("Recommended: re-run check-requirements to verify dependencies:")
-    note("  macOS/Linux: bash check-requirements.sh")
-    note("  Windows:     .\\check-requirements.ps1")
 
-
-def main():
+def _main():
     global GRN, YEL, RED, CYN, DIM, R
     # SIGPIPE: silent exit when piped to head/less on Unix (no BrokenPipeError traceback)
     if hasattr(signal, "SIGPIPE"):
@@ -338,6 +336,14 @@ def main():
         sys.exit(0)
 
     apply_update()
+
+
+def main():
+    try:
+        _main()
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as e:
+        err(f"Update failed: {_sanitize(str(e))}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
