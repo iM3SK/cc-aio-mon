@@ -1,8 +1,8 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.15.4
+# FILE-IPC CONTRACT: cc-aio-mon v1.15.5
 
 **Status**: Active  
-**Version**: 1.15.4 (`SCHEMA_VERSION` = 1)\
-**Last Updated**: 2026-09-27\
+**Version**: 1.15.5 (`SCHEMA_VERSION` = 1)\
+**Last Updated**: 2026-09-29\
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
@@ -824,6 +824,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.15.3  
+**Document Version**: 1.15.5\
 **Last Verified**: 2026-06-24  
 **Status**: Production
