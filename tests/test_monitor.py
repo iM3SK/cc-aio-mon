@@ -1581,13 +1581,23 @@ class TestStatsLoadingRegression(unittest.TestCase):
                                       "cache_read": 0, "cache_write": 0}}
         overview = {"sessions": 1, "active_days": set(), "longest_dur_ms": 0,
                     "first_date": None, "daily_tokens": {}, "truncated": False}
-        monitor._usage_cache["all"] = {"t": 0, "models": models, "overview": overview}
-        with patch.object(monitor, "scan_transcript_stats", side_effect=ValueError):
+        # A runner can have less than 30 seconds of monotonic uptime, so t=0
+        # does not guarantee an expired cache. Exercise that case explicitly.
+        now = 10.0
+        monitor._usage_cache["all"] = {"t": now - 31.0, "models": models,
+                                       "overview": overview}
+        with patch.object(monitor.time, "monotonic", return_value=now), \
+             patch.object(monitor, "scan_transcript_stats", side_effect=ValueError) as scanner:
             render_stats(80, 50, "all")
-            monitor._stats_scan_thread.join(2)
+            worker = monitor._stats_scan_thread
+            self.assertIsNotNone(worker)
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+            scanner.assert_called_once_with("all")
             plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 50, "all")))
             self.assertIn("previous results", plain)
             self.assertIn("4.6", plain)
+            scanner.assert_called_once_with("all")
 
     def test_thread_start_failure_is_visible(self):
         with patch.object(monitor.threading.Thread, "start", side_effect=RuntimeError):

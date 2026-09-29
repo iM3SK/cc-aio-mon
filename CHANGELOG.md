@@ -12,6 +12,8 @@
   have explanations. The transcript estimate total remains visible without a
   reported CST; transcripts without usage no longer imply a zero-cost session.
 
+**Tests:** 766 tests.
+
 ## v1.15.4 — 2026-09-27
 
 **Fixed:**
