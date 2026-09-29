@@ -258,7 +258,14 @@ class TestSegCost(unittest.TestCase):
     def test_zero_cost(self):
         d = _full_data()
         d["cost"]["total_cost_usd"] = 0
-        self.assertIsNone(seg_cost(d))
+        text, width = seg_cost(d)
+        self.assertIn("0.00 $", text)
+        self.assertEqual(width, _vlen(text))
+
+    def test_missing_cost(self):
+        text, width = seg_cost({})
+        self.assertIn("n/a", text)
+        self.assertEqual(width, _vlen(text))
 
 
 class TestSegBrn(unittest.TestCase):

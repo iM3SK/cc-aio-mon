@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.15.4 · Target reader: new contributor who just cloned the repo.
+> v1.15.5 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -166,7 +166,7 @@ three run on a recurring cadence while the dashboard renders (`pulse-worker`,
 | `pulse-worker` | `pulse.start_pulse_worker()` | Fetch Anthropic status + ping API every 30 s |
 | `rls-check` (anonymous) | `_rls_maybe_check()` | Check GitHub for new release once per hour |
 | `update-apply` | `_apply_update_action()` | Run `git pull --ff-only` when user presses `a` |
-| `stats-scan` | `_stats_refresh_async()` | Re-scan `~/.claude/projects` transcripts for the token-stats modal (off-thread refresh; only the first open scans synchronously) |
+| `stats-scan` | `_stats_refresh_async()` | Scan `~/.claude/projects` transcripts off-thread, including the first open and period changes; show loading/errors and retain prior results on refresh failure |
 | `subagents-scan` | `_subagents_refresh_async()` | Scan the watched session's `subagents/` dir for the agents fan-out modal |
 | `cost-scan` | `_cost_refresh_async()` | Aggregate cross-session TDY/WEK cost (glob + per-line JSONL re-parse of every session's history) off the render thread; refreshes every 30 s |
 
