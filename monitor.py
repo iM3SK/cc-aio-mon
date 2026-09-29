@@ -1702,7 +1702,7 @@ _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_wri
 # Adding a new model = one entry here, not three. Used by _get_pricing (below)
 # and _model_code (token-stats modal section).
 _MODELS = {
-    "claude-fable-5": {"name": "Fable 5", "code": ("FA", "5"),
+    "claude-fable-5": {"name": "Fable 5", "code": ("FBL", "5"),
                        "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     # Project Glasswing only — same tier as Fable 5. Rare in transcripts.
     "claude-mythos-5": {"name": "Mythos 5", "code": ("MY", "5"),
@@ -2789,10 +2789,17 @@ def render_update_modal(cols, rows):
 _PERIOD_LABELS = {"all": "All Time", "7d": "Last 7 Days", "30d": "Last 30 Days"}
 _PERIOD_CYCLE = ["all", "7d", "30d"]
 
-_MODEL_ID_RE = re.compile(r"^claude-(opus|sonnet|haiku)-(\d+)-(\d+)")
+_MODEL_ID_RE = re.compile(
+    r"^claude-(opus|sonnet|haiku|mythos|fable)-(\d+)(?:-(\d+))?$"
+)
 # Match human-readable display names (e.g. "Opus 4.6 (1M context)") — used by render_picker
-_MODEL_LABEL_RE = re.compile(r"(Opus|Sonnet|Haiku)\s+(\d+)\.(\d+)")
-_LABEL_FAMILY_CODES = {"Opus": "OP", "Sonnet": "SO", "Haiku": "HA"}
+_MODEL_LABEL_RE = re.compile(
+    r"\b(Opus|Sonnet|Haiku|Mythos|Fable)\s+(\d+)(?:\.(\d+))?\b"
+)
+_LABEL_FAMILY_CODES = {
+    "Opus": "OP", "Sonnet": "SO", "Haiku": "HA", "Mythos": "MY", "Fable": "FBL",
+}
+_MODEL_FAMILY_CODES = {key.lower(): value for key, value in _LABEL_FAMILY_CODES.items()}
 
 
 def _model_code_from_label(label):
@@ -2803,7 +2810,10 @@ def _model_code_from_label(label):
     """
     mm = _MODEL_LABEL_RE.search(label or "")
     if mm:
-        return (_LABEL_FAMILY_CODES[mm.group(1)], f"{mm.group(2)}.{mm.group(3)}")
+        version = mm.group(2)
+        if mm.group(3):
+            version += f".{mm.group(3)}"
+        return (_LABEL_FAMILY_CODES[mm.group(1)], version)
     return (strip_context_suffix(label or "").strip(), "")
 
 
@@ -2815,7 +2825,12 @@ def _model_label(model_id):
     m = _MODEL_ID_RE.match(base)
     if m:
         fam = m.group(1).capitalize()
-        return f"{fam} {m.group(2)}.{m.group(3)}"
+        version = m.group(2)
+        if m.group(3):
+            version += f".{m.group(3)}"
+        return f"{fam} {version}"
+    if base == "fable":
+        return "Fable"
     return base or "?"
 
 
@@ -2827,8 +2842,12 @@ def _model_code(model_id):
         return entry["code"]
     m = _MODEL_ID_RE.match(base)
     if m:
-        short = {"opus": "OP", "sonnet": "SO", "haiku": "HA"}[m.group(1)]
-        return (short, f"{m.group(2)}.{m.group(3)}")
+        version = m.group(2)
+        if m.group(3):
+            version += f".{m.group(3)}"
+        return (_MODEL_FAMILY_CODES[m.group(1)], version)
+    if base == "fable":
+        return ("FBL", "")
     # Unknown model — sanitize raw input to prevent ANSI injection via transcript
     safe = _sanitize(base[:3]).upper() if base else ""
     return (safe or "?", "")
@@ -3502,6 +3521,7 @@ def main():
     last_mt = 0
     last_seen = 0  # monotonic timestamp of last successful data load
     last_data = None
+    last_fable = None
     last_size = (0, 0)
     last_hist_mt = 0
     last_hist = []
@@ -3738,6 +3758,7 @@ def main():
             # Load state (only on data interval, not resize)
             if since_data >= data_interval:
                 last_data_load = now_mono
+                last_fable = read_fable_weekly()
                 jp = DATA_DIR / f"{sid}.json"
                 try:
                     mt = jp.stat().st_mtime
@@ -3779,7 +3800,7 @@ def main():
                         show_legend, show_menu, show_cost, stale=is_stale,
                         show_agents=show_agents, agents_active_only=agents_active_only,
                         rate_limits=cached_freshest_rate_limits(last_data.get("rate_limits")),
-                        fable=read_fable_weekly(),
+                        fable=last_fable,
                     ),
                     cols,
                 )

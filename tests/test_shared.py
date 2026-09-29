@@ -1086,6 +1086,18 @@ class TestIsoToEpoch(unittest.TestCase):
         for bad in (None, "", "tomorrow", 42, {"x": 1}):
             self.assertEqual(shared.iso_to_epoch(bad), 0.0)
 
+    def test_timestamp_platform_error_returns_zero(self):
+        class BadTimestamp:
+            tzinfo = shared.timezone.utc
+
+            def timestamp(self):
+                raise OSError("outside platform epoch range")
+
+        fake_datetime = MagicMock()
+        fake_datetime.fromisoformat.return_value = BadTimestamp()
+        with patch.object(shared, "datetime", fake_datetime):
+            self.assertEqual(shared.iso_to_epoch("2026-09-27T16:00:00Z"), 0.0)
+
 
 class TestExtractFableWeekly(unittest.TestCase):
 
@@ -1137,6 +1149,22 @@ class TestExtractFableWeekly(unittest.TestCase):
         self.assertIsNone(shared.extract_fable_weekly(_fable_doc(percent="lots")))
         self.assertIsNone(shared.extract_fable_weekly(_fable_doc(percent=None)))
 
+    def test_nonfinite_percent_rejected(self):
+        for label, percent in (("nan", float("nan")), ("infinity", float("inf")),
+                               ("negative_infinity", float("-inf")),
+                               ("huge_integer", 10 ** 10000)):
+            with self.subTest(percent=label):
+                self.assertIsNone(shared.extract_fable_weekly(_fable_doc(percent=percent)))
+
+    def test_malformed_or_nonfinite_fetched_at_rejected(self):
+        for label, fetched in (("none", None), ("string", "soon"), ("bool", True),
+                               ("nan", float("nan")), ("infinity", float("inf")),
+                               ("huge_integer", 10 ** 10000)):
+            with self.subTest(fetched=label):
+                doc = _fable_doc()
+                doc["cachedUsageUtilization"]["fetchedAtMs"] = fetched
+                self.assertIsNone(shared.extract_fable_weekly(doc))
+
     def test_percent_clamped(self):
         self.assertEqual(shared.extract_fable_weekly(_fable_doc(percent=140))["used_percentage"], 100)
         self.assertEqual(shared.extract_fable_weekly(_fable_doc(percent=-3))["used_percentage"], 0)
@@ -1181,6 +1209,9 @@ class TestFableDisplayState(unittest.TestCase):
         e["resets_at"] = 0.0
         self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "fresh")
 
+    def test_malformed_entry_is_hidden(self):
+        self.assertEqual(shared.fable_display_state(["not an entry"]), "hidden")
+
 
 class TestReadFableWeekly(unittest.TestCase):
 
@@ -1205,6 +1236,10 @@ class TestReadFableWeekly(unittest.TestCase):
 
     def test_missing_file(self):
         self.assertIsNone(shared.read_fable_weekly(self.dir / "nope.json"))
+
+    def test_invalid_path_never_raises(self):
+        self.assertIsNone(shared.read_fable_weekly(object()))
+        self.assertIsNone(shared.read_fable_weekly("\0"))
 
     def test_invalid_json(self):
         self.path.write_text("{not json", encoding="utf-8")

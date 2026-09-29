@@ -12,13 +12,13 @@
 **CC AIO MON is a real-time terminal monitor for Claude Code CLI.** It surfaces
 context-window usage, API rate limits, session cost, burn rate, and cache
 performance in a compact TUI dashboard. It is an independent community project —
-not affiliated with Anthropic — and interacts with Claude Code exclusively
-through the documented `statusLine` stdin hook and the user's own local files.
+not affiliated with Anthropic — and reads the documented `statusLine` stdin
+hook and the user's own local files. The optional Fable refresher uses an
+internal, version-dependent usage control request through Claude Code CLI.
 
-The project exists because every alternative either scrapes log files or
-estimates from token counts. CC AIO MON reads the **official Claude Code
-statusline JSON** — the same data Claude Code uses internally — so the numbers
-are authoritative and real-time.
+CC AIO MON reads session metrics from the **official Claude Code statusline
+JSON**. The separate Fable weekly limit comes from Claude Code's usage cache;
+its age controls whether it is displayed normally, marked stale, or hidden.
 
 Design center: five runtime Python files, stdlib only, no build step, no pip
 install. Python 3.8+ on Windows, macOS, and Linux.
@@ -69,7 +69,7 @@ that refreshes Claude Code's usage cache for FBL (`_maybe_refresh_fable`). On Wi
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~3 760 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~3 820 LOC. Owns the event
 loop, all `render_*` functions, the session picker, and the daemon worker
 threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would

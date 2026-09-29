@@ -970,6 +970,40 @@ class TestBuildLineFable(unittest.TestCase):
                 line = build_line(_full_data(), cols, fable=_fbl())
             self.assertLessEqual(_vlen(line), cols, cols)
 
+    def test_main_reads_separate_fable_cache_without_changing_ipc(self):
+        import io
+        from datetime import datetime, timezone
+        payload = {"session_id": "fable-fixture", "model": {"display_name": "Opus 5"},
+                   "rate_limits": {"five_hour": {"used_percentage": 6},
+                                   "seven_day": {"used_percentage": 22}}}
+        cache = {"oauthAccount": {"accountUuid": "fixture"},
+                 "cachedUsageUtilization": {
+                     "accountUuid": "fixture", "fetchedAtMs": _NOW * 1000,
+                     "utilization": {"limits": [{
+                         "kind": "weekly_scoped", "percent": 27,
+                         "resets_at": datetime.fromtimestamp(_NOW + 86400, timezone.utc).isoformat(),
+                         "scope": {"model": {"id": None, "display_name": "Fable"}},
+                     }]}}}
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            (pathlib.Path(td) / ".claude.json").write_text(json.dumps(cache), encoding="utf-8")
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": td}), \
+                 patch.object(sys, "argv", ["statusline.py"]), \
+                 patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(payload).encode()))), \
+                 patch.object(sys, "stdout", output), \
+                 patch("statusline.ensure_utf8_stdout"), \
+                 patch("statusline._get_terminal_width", return_value=300), \
+                 patch("statusline._load_history_for_rates", return_value=[]), \
+                 patch("statusline.write_shared_state") as write, \
+                 patch("statusline._maybe_refresh_fable"), \
+                 patch("statusline.time.time", return_value=_NOW):
+                statusline.main()
+        plain = _ANSI_RE.sub("", output.getvalue())
+        self.assertIn("5HL 6%", plain)
+        self.assertIn("FBL 27%", plain)
+        self.assertIn("7DL 22%", plain)
+        write.assert_called_once_with(payload)
+
 
 class TestMaybeRefreshFable(unittest.TestCase):
 
@@ -1036,6 +1070,7 @@ class TestRunFableRefresh(unittest.TestCase):
     def _proc(self, timeout=False):
         proc = MagicMock()
         proc.pid = 4242
+        proc.returncode = 0
         if timeout:
             proc.communicate.side_effect = [statusline.subprocess.TimeoutExpired("claude", 20), ("", "")]
         else:
@@ -1044,7 +1079,7 @@ class TestRunFableRefresh(unittest.TestCase):
 
     def test_runs_get_usage_control_request(self):
         proc = self._proc()
-        with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
+        with patch("statusline.read_fable_weekly", side_effect=[_fbl(age_s=400), _fbl(age_s=0)]), \
              patch("statusline.shutil.which", return_value="/bin/claude"), \
              patch("statusline.subprocess.Popen", return_value=proc) as po:
             self.assertEqual(statusline.run_fable_refresh(ttl=300), "refreshed")
@@ -1060,6 +1095,54 @@ class TestRunFableRefresh(unittest.TestCase):
         self.assertTrue(req["request"]["skip_behaviors"])
         settings = json.loads(pathlib.Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
         self.assertTrue(settings["disableAllHooks"])
+
+    def test_nonzero_exit_is_failure_and_releases_lock(self):
+        proc = self._proc()
+        proc.returncode = 1
+        with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
+             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.subprocess.Popen", return_value=proc):
+            self.assertEqual(statusline.run_fable_refresh(ttl=300), "error")
+        holder = shared.acquire_singleton_lock(self.dd / "fable-refresh.lock")
+        self.assertIsNotNone(holder)
+        holder.close()
+
+    def test_zero_exit_without_fresh_cache_is_failure(self):
+        for after in (None, _fbl(age_s=400)):
+            with self.subTest(after=after), \
+                 patch("statusline.read_fable_weekly", side_effect=[_fbl(age_s=400), after]), \
+                 patch("statusline.shutil.which", return_value="/bin/claude"), \
+                 patch("statusline.subprocess.Popen", return_value=self._proc()):
+                self.assertEqual(statusline.run_fable_refresh(ttl=300), "error")
+
+    def test_usage_child_does_not_inherit_nested_session_marker(self):
+        with patch.dict(os.environ, {"CLAUDECODE": "1", "FABLE_FIXTURE_ENV": "preserved"}), \
+             patch("statusline.read_fable_weekly", side_effect=[_fbl(age_s=400), _fbl(age_s=0)]), \
+             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.subprocess.Popen", return_value=self._proc()) as po:
+            self.assertEqual(statusline.run_fable_refresh(ttl=300), "refreshed")
+            self.assertNotIn("CLAUDECODE", po.call_args[1]["env"])
+            self.assertEqual(po.call_args[1]["env"]["FABLE_FIXTURE_ENV"], "preserved")
+            self.assertEqual(os.environ["CLAUDECODE"], "1")
+
+    def test_communication_error_kills_reaps_and_releases_lock(self):
+        proc = self._proc()
+        proc.communicate.side_effect = [OSError("fixture pipe error"), ("", "")]
+        with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
+             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.subprocess.Popen", return_value=proc), \
+             patch("statusline._kill_tree") as kt:
+            self.assertEqual(statusline.run_fable_refresh(ttl=300), "error")
+        kt.assert_called_once_with(proc)
+        self.assertEqual(proc.communicate.call_count, 2)
+        holder = shared.acquire_singleton_lock(self.dd / "fable-refresh.lock")
+        self.assertIsNotNone(holder)
+        holder.close()
+
+    def test_read_only_manual_entry_never_spawns(self):
+        with patch("statusline.subprocess.Popen") as po:
+            self.assertEqual(statusline.run_fable_refresh(ttl=0), "disabled")
+        po.assert_not_called()
 
     def test_second_worker_exits_on_held_lock(self):
         holder = shared.ensure_data_dir(self.dd) and shared.acquire_singleton_lock(self.dd / "fable-refresh.lock")

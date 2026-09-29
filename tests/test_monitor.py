@@ -994,6 +994,19 @@ class TestModelLabel(unittest.TestCase):
     def test_mythos_5(self):
         self.assertEqual(_model_label("claude-mythos-5"), "Mythos 5")
 
+    def test_fable_5_variants(self):
+        self.assertEqual(_model_label("claude-fable-5"), "Fable 5")
+        self.assertEqual(_model_label("claude-fable-5-1-20260101[1m]"), "Fable 5.1")
+
+    def test_short_fable(self):
+        self.assertEqual(_model_label("fable"), "Fable")
+
+    def test_major_only_family_version(self):
+        self.assertEqual(_model_label("claude-opus-5"), "Opus 5")
+
+    def test_unknown_claude_family_is_preserved(self):
+        self.assertEqual(_model_label("claude-future-5"), "claude-future-5")
+
 
 class TestEnvFloat(unittest.TestCase):
 
@@ -1375,6 +1388,20 @@ class TestRenderStats(unittest.TestCase):
         self.assertIn("DAY", plain)
         self.assertIn("STK", plain)
         self.assertIn("LSS", plain)
+
+    def test_fable_transcript_uses_fbl_label_and_keeps_its_tokens(self):
+        import json
+        lines = [json.dumps({
+            "type": "assistant", "timestamp": "2026-09-29T10:00:00Z",
+            "message": {"model": "claude-fable-5-1-20260901[1m]",
+                        "usage": {"input_tokens": 123, "output_tokens": 456}},
+        })]
+        _write_session(self.tmpdir, "proj1", "sess1", lines)
+        scan_transcript_stats("all", ttl=0)
+        plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 40, "all")))
+        self.assertIn("FBL 5.1", plain)
+        self.assertNotIn("CLA", plain)
+        self.assertIn("INP: 123 OUT: 456 CLS: 1", plain)
 
     def test_period_labels(self):
         buf_all = render_stats(80, 24, "all")
@@ -2836,6 +2863,19 @@ class TestModelCode(unittest.TestCase):
     def test_mythos_5(self):
         self.assertEqual(_model_code("claude-mythos-5"), ("MY", "5"))
 
+    def test_fable_5_variants(self):
+        self.assertEqual(_model_code("claude-fable-5"), ("FBL", "5"))
+        self.assertEqual(_model_code("claude-fable-5-1-20260101[1m]"), ("FBL", "5.1"))
+
+    def test_short_fable(self):
+        self.assertEqual(_model_code("fable"), ("FBL", ""))
+
+    def test_major_only_family_version(self):
+        self.assertEqual(_model_code("claude-opus-5"), ("OP", "5"))
+
+    def test_unknown_claude_family_is_preserved(self):
+        self.assertEqual(_model_code("claude-future-5"), ("CLA", ""))
+
 
 # ---------------------------------------------------------------------------
 # TestCostThirds — _cost_thirds()
@@ -3679,6 +3719,9 @@ class TestAuditRegressionV1105(unittest.TestCase):
         self.assertEqual(monitor._model_code_from_label("Sonnet 4.5 (1M context)"),
                          ("SO", "4.5"))
         self.assertEqual(monitor._model_code_from_label("Haiku 3.5"), ("HA", "3.5"))
+        self.assertEqual(monitor._model_code_from_label("Fable 5.1 (1M context)"),
+                         ("FBL", "5.1"))
+        self.assertEqual(monitor._model_code_from_label("Opus 5"), ("OP", "5"))
         # Unknown label — fallback path, no crash
         code, ver = monitor._model_code_from_label("Unknown Model")
         self.assertEqual(ver, "")

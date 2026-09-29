@@ -260,12 +260,25 @@ config file via `shared.read_fable_weekly()`:
 - **Display rule** (`shared.fable_display_state`): hidden when absent, older
   than 24 h or past `resets_at`; stale (dim, `~`) when older than
   2 × `CC_AIO_MON_FABLE_REFRESH_SEC`.
+- **Validation:** malformed or non-finite percentages and fetch times (`NaN`
+  or infinity) invalidate the cache entry. An unparseable reset timestamp
+  suppresses the countdown; it does not crash the reader.
 - **Never read:** `.credentials.json` or any OAuth token.
 
 Refresher files in the data dir (statusline only, see File Manifest):
 `fable-refresh.stamp` (last attempt, backoff), `fable-refresh.lock` (singleton
 lock held by the helper for its lifetime), `fable-refresh-settings.json`
 (`{"disableAllHooks": true}`, passed to `claude -p --settings`).
+
+The refresher is an internal, version-dependent best-effort fallback. It runs
+only when a valid cached Fable bucket already exists and is stale; it sends one
+`get_usage` control request without a prompt to `claude -p`. The child uses
+hooks-disabled settings, `--no-session-persistence`, and an environment without
+the `CLAUDECODE` nesting marker. A nonzero return code, communication error, or
+absence of a fresh valid cache after the request is a failed refresh; a
+communication error also cleans up the child process. `CC_AIO_MON_FABLE_REFRESH_SEC=0`
+disables spawning. Users must run `/usage` once to create a missing cache and
+again after switching accounts.
 
 ### Schema Version
 
@@ -792,7 +805,7 @@ No deprecated fields yet. When a field is retired:
 | `monitor-crash.log` | Crash traceback | monitor (excepthook) | User (post-mortem) | None (diagnostic only) | Rotated to `.log.1` on every crash (v1.12.2+); size guard still applies for non-crash callers |
 | `monitor.lock` | Singleton lock | monitor | monitor (check at startup) | Atomic fcntl/msvcrt | Process lifetime; auto-released on exit |
 | `fable-refresh.stamp` | FBL refresh backoff (epoch of last attempt) | statusline | statusline | Atomic replace | Persistent, rewritten at most once per TTL |
-| `fable-refresh.lock` | FBL refresher singleton lock | statusline `--refresh-fable` | statusline `--refresh-fable` | Atomic fcntl/msvcrt | Helper lifetime (~2-20 s) |
+| `fable-refresh.lock` | FBL refresher singleton lock | statusline `--refresh-fable` | statusline `--refresh-fable` | Atomic fcntl/msvcrt | Helper lifetime |
 | `fable-refresh-settings.json` | `claude -p --settings` file (hooks disabled); reserved stem | statusline `--refresh-fable` | Claude Code CLI | Atomic replace | Persistent, rewritten per refresh |
 
 ---

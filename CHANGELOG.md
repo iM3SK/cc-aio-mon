@@ -19,17 +19,26 @@
 - **Usage-cache refresher.** Claude Code rewrites the cache only when usage is
   requested, so when the copy is older than `CC_AIO_MON_FABLE_REFRESH_SEC`
   (default 300 s, `0` = read-only) the statusline starts one detached
-  `statusline.py --refresh-fable` helper after printing its line. The helper
-  sends the SDK `get_usage` control request to a headless `claude -p` (no model
-  turn, no tokens, no transcript, hooks disabled), with a 20 s timeout and a
-  process-tree kill. A backoff stamp and a singleton lock in the data dir keep
-  it to one `claude` process across all sessions.
+  `statusline.py --refresh-fable` helper after printing its line. The internal,
+  version-dependent fallback sends a `get_usage` control request without a
+  prompt to headless `claude -p`; hooks are disabled, session persistence is
+  disabled, and the child removes the `CLAUDECODE` nesting marker. It starts
+  only from an existing valid Fable cache, treats a nonzero return code or an
+  unchanged/invalid result as failure, and cleans up after communication
+  errors. Run `/usage` once to bootstrap a missing cache or after an account
+  switch. A backoff stamp and singleton lock in the data dir limit concurrent
+  refreshes.
+- **Model labels.** Fable 5 and 5.1 IDs (including dated/context-suffixed IDs)
+  and the `fable` alias display as `FBL`; major-only family IDs such as
+  `claude-opus-5` retain their family code. Pricing is unchanged.
 
 **Refactor — single source of truth:**
 - Dashboard rate-limit rows and their legend lines are generated from one
   table, `monitor._RL_ROWS` (5HL · FBL · 7DL).
 
-**Tests:** 817 passing (+64).
+**Tests:** 850 tests (+84 from v1.15.5), including transcript-to-FBL rendering,
+independent Fable usage through the statusline entry point, malformed cache
+values, and refresher failure/cleanup regressions. Platform skips vary.
 
 ## v1.15.5 — 2026-09-29
 

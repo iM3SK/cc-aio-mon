@@ -313,9 +313,10 @@ def build_line(data, cols, brn=None, fable=None):
 # Fable usage refresher — Claude Code rewrites `.claude.json`'s usage cache
 # only when something asks for usage (/usage). When our copy is older than the
 # TTL, the statusline spawns ONE detached `statusline.py --refresh-fable`, which
-# sends the SDK `get_usage` control request to a headless `claude -p`: ~2-4 s,
-# zero model tokens, no transcript. Claude Code persists the fresh numbers
-# itself; we write nothing but a backoff stamp and a lock.
+# sends a `get_usage` control request (no prompt) to a headless `claude -p`.
+# This internal protocol is version-dependent: success requires a fresh cache,
+# not just a successful process exit. Claude Code persists the fresh numbers;
+# our files are only a backoff stamp, a lock and hook-disabling settings.
 # ---------------------------------------------------------------------------
 FABLE_REFRESH_TIMEOUT = 20
 _FABLE_STAMP = "fable-refresh.stamp"
@@ -383,8 +384,10 @@ def _kill_tree(proc):
 
 def run_fable_refresh(ttl=None):
     """Body of `statusline.py --refresh-fable`. Returns a short status string
-    (locked / fresh / no-claude / timeout / error / refreshed) for tests and logs."""
+    (disabled / locked / fresh / no-claude / timeout / error / refreshed)."""
     ttl = FABLE_REFRESH_SEC if ttl is None else ttl
+    if ttl <= 0:
+        return "disabled"
     if not ensure_data_dir(DATA_DIR):
         return "error"
     lock = acquire_singleton_lock(DATA_DIR / _FABLE_LOCK)
@@ -407,25 +410,33 @@ def run_fable_refresh(ttl=None):
                 "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
         req = json.dumps({"type": "control_request", "request_id": "cc-aio-mon-fable",
                           "request": {"subtype": "get_usage", "skip_behaviors": True}}) + "\n"
+        # Claude Code marks descendants as nested sessions. This isolated usage
+        # worker sends no model prompt; omit the nesting marker only in its env.
+        child_env = os.environ.copy()
+        child_env.pop("CLAUDECODE", None)
         try:
             proc = subprocess.Popen(
                 argv, cwd=str(DATA_DIR), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if _IS_WIN else 0,
                 start_new_session=not _IS_WIN,
+                env=child_env,
             )
         except (OSError, ValueError):
             return "error"
         try:
             proc.communicate(input=req, timeout=FABLE_REFRESH_TIMEOUT)
-        except subprocess.TimeoutExpired:
+        except (subprocess.SubprocessError, OSError) as exc:
             _kill_tree(proc)
             try:
                 proc.communicate(timeout=5)
             except (subprocess.SubprocessError, OSError):
                 pass
-            return "timeout"
-        except OSError:
+            return "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "error"
+        if proc.returncode != 0:
+            return "error"
+        updated = read_fable_weekly()
+        if updated is None or _num(updated.get("age_s"), ttl + 1) > ttl:
             return "error"
         return "refreshed"
     finally:

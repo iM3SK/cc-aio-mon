@@ -4,6 +4,7 @@
 
 import codecs
 import json
+import math
 import os
 import pathlib
 import re
@@ -725,7 +726,10 @@ def iso_to_epoch(s) -> float:
         return 0.0
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    try:
+        return dt.timestamp()
+    except (OSError, OverflowError, ValueError):
+        return 0.0
 
 
 def claude_json_path() -> pathlib.Path:
@@ -733,6 +737,17 @@ def claude_json_path() -> pathlib.Path:
     cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     base = pathlib.Path(cfg).expanduser() if cfg else pathlib.Path.home()
     return base / ".claude.json"
+
+
+def _fable_finite_number(value) -> Optional[float]:
+    """Return a finite JSON number, without overflowing on a huge integer."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def extract_fable_weekly(doc) -> Optional[dict]:
@@ -763,13 +778,14 @@ def extract_fable_weekly(doc) -> Optional[dict]:
         name = model.get("display_name") if isinstance(model, dict) else None
         if not isinstance(name, str) or not _FABLE_NAME_RE.match(name.strip()):
             continue
-        pct = lim.get("percent")
-        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+        pct = _fable_finite_number(lim.get("percent"))
+        fetched_ms = _fable_finite_number(cache.get("fetchedAtMs"))
+        if pct is None or fetched_ms is None:
             return None
         return {
             "used_percentage": max(0, min(100, pct)),
             "resets_at": iso_to_epoch(lim.get("resets_at")),
-            "fetched_at": _num(cache.get("fetchedAtMs"), 0) / 1000.0,
+            "fetched_at": fetched_ms / 1000.0,
         }
     return None
 
@@ -783,10 +799,10 @@ def read_fable_weekly(path=None, now=None) -> Optional[dict]:
     """Current Fable bucket as {"used_percentage", "resets_at", "age_s"} or None.
     `age_s` is how old Claude Code's cached copy is; display rules live in
     fable_display_state(). Never raises."""
-    p = pathlib.Path(path) if path is not None else claude_json_path()
     try:
+        p = pathlib.Path(path) if path is not None else claude_json_path()
         st = p.stat()
-    except OSError:
+    except (OSError, TypeError, ValueError, OverflowError):
         return None
     key = (str(p), st.st_mtime_ns, st.st_size)
     if _fable_cache.get("key") == key:
@@ -795,10 +811,7 @@ def read_fable_weekly(path=None, now=None) -> Optional[dict]:
         entry = None
         raw = safe_read(p, CLAUDE_JSON_MAX)
         if raw is not None:
-            try:
-                entry = extract_fable_weekly(json.loads(raw.decode("utf-8")))
-            except (ValueError, UnicodeDecodeError, RecursionError):
-                entry = None
+            entry = extract_fable_weekly(json_object(raw))
         _fable_cache.clear()
         _fable_cache.update({"key": key, "entry": entry})
     if entry is None:
@@ -817,7 +830,7 @@ def fable_display_state(entry, now=None, ttl=None) -> str:
     Hidden when absent, older than FABLE_MAX_AGE, or past its reset (the cached
     percentage belongs to a window that no longer exists). Stale past 2×TTL
     (read-only mode judges staleness against the default TTL)."""
-    if not entry:
+    if not isinstance(entry, dict) or not entry:
         return "hidden"
     t = time.time() if now is None else now
     age = _num(entry.get("age_s"), FABLE_MAX_AGE + 1)

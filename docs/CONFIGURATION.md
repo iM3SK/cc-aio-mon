@@ -70,14 +70,18 @@ If you add a new env var, add it here in the same commit.
   (`shared.fable_display_state`)
 - **Effect:** how old Claude Code's cached usage data (`cachedUsageUtilization`
   in `.claude.json`) may get before the statusline starts one detached
-  `statusline.py --refresh-fable` helper. The helper sends the SDK `get_usage`
-  control request to a headless `claude -p` (no model turn, no tokens, no
-  transcript, hooks disabled via a `--settings` file in the data dir), and
-  Claude Code rewrites the cache itself. A lock in the data dir allows one
-  refresh at a time across all sessions. The helper runs only when the cache
-  already holds a Fable bucket, so accounts without the pool never trigger it.
-  FBL turns dim with `~` once the cache is older than twice this value (twice
-  the default when `0`).
+  `statusline.py --refresh-fable` helper. This is an internal,
+  version-dependent best-effort fallback: it sends a `get_usage` control
+  request without a prompt to headless `claude -p`, with hooks disabled by the
+  data-dir `--settings` file and `--no-session-persistence`. Its child
+  environment removes the `CLAUDECODE` nesting marker. A nonzero exit,
+  communication error, or lack of a fresh valid cache after the request is a
+  failed refresh; communication errors clean up the child process. A lock in
+  the data dir allows one refresh at a time across all sessions. The helper
+  starts only when an existing valid Fable bucket is stale, so accounts without
+  the pool never trigger it. Run `/usage` once if the cache is missing or after
+  switching accounts. FBL turns dim with `~` once the cache is older than twice
+  this value (twice the default when `0`).
 - **When to set:** `0` when no background `claude` process should ever be
   started by the statusline (FBL then updates only when you run `/usage`);
   a larger value to refresh less often.
