@@ -25,8 +25,8 @@
    `unittest discover tests/`, so the `py tests.py` invocation continues to work
    unchanged.
 
-   **Baseline: 795 tests passing (skip count is platform-dependent — 0 on a standard Linux/macOS box with git; a few skip on Windows or where git/symlinks/SIGPIPE are unavailable).**
-   Contributions must not reduce the passing count without explanation. If you add
+   **Baseline: 766 tests (skip count is platform-dependent — 0 on a standard Linux/macOS box with git; a few skip on Windows or where git/symlinks/SIGPIPE are unavailable).**
+   Contributions must not reduce the test count without explanation. If you add
    tests, put them in the file that matches the module under test — helpers go in
    `test_shared.py`, TUI logic in `test_monitor.py`, and so on.
 

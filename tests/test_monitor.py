@@ -1327,6 +1327,9 @@ class TestRenderStats(unittest.TestCase):
         self._orig_cache = monitor._usage_cache.copy()
         monitor._CLAUDE_DIR = pathlib.Path(self.tmpdir)
         monitor._usage_cache.clear()
+        self.refresh = patch.object(monitor, "_stats_refresh_async")
+        self.refresh.start()
+        self.addCleanup(self.refresh.stop)
 
     def tearDown(self):
         import shutil, monitor
@@ -1336,6 +1339,7 @@ class TestRenderStats(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_no_data_shows_placeholder(self):
+        scan_transcript_stats("all", ttl=0)
         buf = render_stats(80, 24, "all")
         plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("No transcript data", plain)
@@ -1348,6 +1352,7 @@ class TestRenderStats(unittest.TestCase):
                         "usage": {"input_tokens": 100, "output_tokens": 200}},
         })]
         _write_session(self.tmpdir, "proj1", "sess1", lines)
+        scan_transcript_stats("all", ttl=0)
         buf = render_stats(80, 40, "all")
         plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("OP", plain)
@@ -1363,6 +1368,7 @@ class TestRenderStats(unittest.TestCase):
                         "usage": {"input_tokens": 100, "output_tokens": 200}},
         })]
         _write_session(self.tmpdir, "proj1", "sess1", lines)
+        scan_transcript_stats("all", ttl=0)
         buf = render_stats(80, 40, "all")
         plain = _ANSI_RE.sub("", "\n".join(buf))
         self.assertIn("SES", plain)
@@ -1494,6 +1500,162 @@ class TestRenderMenu(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # render_cost_breakdown
 # ---------------------------------------------------------------------------
+class TestStatsLoadingRegression(unittest.TestCase):
+    def setUp(self):
+        self.cache = patch.object(monitor, "_usage_cache", {})
+        self.cache.start()
+        self.addCleanup(self.cache.stop)
+        self.thread = patch.object(monitor, "_stats_scan_thread", None)
+        self.thread.start()
+        self.addCleanup(self.thread.stop)
+
+    def test_first_open_and_period_switch_do_not_scan_on_render_thread(self):
+        import threading
+        for period in ("all", "7d", "30d"):
+            with self.subTest(period=period):
+                started, release = threading.Event(), threading.Event()
+                callers = []
+                def scan(selected):
+                    callers.append(threading.get_ident())
+                    started.set()
+                    release.wait(1)
+                    return {}, {"sessions": 0, "active_days": set(), "daily_tokens": {}}
+                with patch.object(monitor, "scan_transcript_stats", side_effect=scan):
+                    try:
+                        plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 24, period)))
+                        self.assertTrue(started.wait(1))
+                        self.assertNotEqual(callers, [threading.get_ident()])
+                        self.assertIn("Loading", plain)
+                        self.assertNotIn("No transcript data", plain)
+                    finally:
+                        release.set()
+                        worker = monitor._stats_scan_thread
+                        if worker is not None:
+                            worker.join(2)
+
+    def test_scan_error_is_visible_and_not_retried_every_frame(self):
+        with patch.object(monitor, "scan_transcript_stats", side_effect=OSError("private path")) as scan:
+            render_stats(80, 24, "all")
+            worker = monitor._stats_scan_thread
+            if worker is not None:
+                worker.join(2)
+            plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 24, "all")))
+            self.assertIn("Unable to load", plain)
+            self.assertNotIn("private path", plain)
+            self.assertEqual(scan.call_count, 1)
+
+    def test_one_worker_and_results_appear_after_completion(self):
+        import threading
+        started, release = threading.Event(), threading.Event()
+        def scan(period):
+            started.set()
+            release.wait(2)
+            return {}, {"sessions": 0}
+        with patch.object(monitor, "scan_transcript_stats", side_effect=scan) as scanner:
+            try:
+                render_stats(80, 24, "all")
+                self.assertTrue(started.wait(1))
+                render_stats(80, 24, "all")
+                plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 24, "7d")))
+                self.assertIn("Loading", plain)
+                self.assertEqual(scanner.call_count, 1)
+            finally:
+                release.set()
+                monitor._stats_scan_thread.join(2)
+            plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 24, "all")))
+            self.assertIn("No transcript data", plain)
+            self.assertEqual(scanner.call_count, 1)
+            render_stats(80, 24, "7d")
+            monitor._stats_scan_thread.join(2)
+            self.assertEqual(scanner.call_count, 2)
+
+    def test_missing_directory_result_is_cached_after_completion(self):
+        with patch.object(monitor, "is_safe_dir", return_value=False) as safe:
+            render_stats(80, 24, "all")
+            monitor._stats_scan_thread.join(2)
+            render_stats(80, 24, "all")
+            self.assertEqual(safe.call_count, 1)
+
+    def test_failed_refresh_keeps_previous_models(self):
+        models = {"claude-opus-4-6": {"input": 10, "output": 0, "calls": 1,
+                                      "cache_read": 0, "cache_write": 0}}
+        overview = {"sessions": 1, "active_days": set(), "longest_dur_ms": 0,
+                    "first_date": None, "daily_tokens": {}, "truncated": False}
+        # A runner can have less than 30 seconds of monotonic uptime, so t=0
+        # does not guarantee an expired cache. Exercise that case explicitly.
+        now = 10.0
+        monitor._usage_cache["all"] = {"t": now - 31.0, "models": models,
+                                       "overview": overview}
+        with patch.object(monitor.time, "monotonic", return_value=now), \
+             patch.object(monitor, "scan_transcript_stats", side_effect=ValueError) as scanner:
+            render_stats(80, 50, "all")
+            worker = monitor._stats_scan_thread
+            self.assertIsNotNone(worker)
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+            scanner.assert_called_once_with("all")
+            plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 50, "all")))
+            self.assertIn("previous results", plain)
+            self.assertIn("4.6", plain)
+            scanner.assert_called_once_with("all")
+
+    def test_thread_start_failure_is_visible(self):
+        with patch.object(monitor.threading.Thread, "start", side_effect=RuntimeError):
+            plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 24, "all")))
+        self.assertIn("Unable to load", plain)
+
+    def test_slow_scan_cache_ttl_starts_at_completion(self):
+        clock = [10.0]
+        def scan(period):
+            clock[0] = 100.0
+            return {}, {"sessions": 0}
+        with patch.object(monitor.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(monitor, "scan_transcript_stats", side_effect=scan) as scanner:
+            render_stats(80, 24, "all")
+            monitor._stats_scan_thread.join(2)
+            render_stats(80, 24, "all")
+            self.assertEqual(scanner.call_count, 1)
+
+
+class TestCostDisplayRegression(unittest.TestCase):
+    def plain(self, data, session=None):
+        with patch.object(monitor, "_aggregate_session_cost", return_value=session):
+            return _ANSI_RE.sub("", "\n".join(render_cost_breakdown(data, [], 100, 200)))
+
+    def test_missing_cost_and_usage_are_explained(self):
+        plain = self.plain({})
+        self.assertIn("CST n/a", plain)
+        self.assertIn("Claude Code has not supplied", plain)
+        self.assertIn("INP n/a", plain)
+        self.assertIn("Session estimate unavailable", plain)
+
+    def test_real_zero_is_displayed_as_zero(self):
+        data = _full_data()
+        data["cost"]["total_cost_usd"] = 0
+        data["context_window"]["current_usage"] = dict.fromkeys(
+            ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"), 0)
+        plain = self.plain(data)
+        self.assertIn("CST 0.00 $", plain)
+        self.assertIn("INP 0 ~0.00 $", plain)
+
+    def test_session_estimate_is_visible_without_reported_cost(self):
+        session = dict.fromkeys(("input", "output", "cache_read", "cache_write",
+                                "cost_input", "cost_output", "cost_cache_read", "cost_cache_write"), 0)
+        session["cost_total"] = 1.25
+        plain = self.plain({}, session)
+        self.assertIn("CST n/a", plain)
+        self.assertIn("SUM ~1.25 $", plain)
+        session["cost_total"] = 0
+        plain = self.plain({"cost": {"total_cost_usd": 1.0}}, session)
+        self.assertIn("SUM ~0.00 $", plain)
+
+    def test_invalid_cost_is_not_a_zero_or_nonfinite_amount(self):
+        for value in (None, "broken", -1, float("nan"), float("inf"), True):
+            with self.subTest(value=value):
+                plain = self.plain({"cost": {"total_cost_usd": value}})
+                self.assertIn("CST n/a", plain)
+
+
 class TestRenderCostBreakdown(unittest.TestCase):
 
     def test_returns_buffer(self):
@@ -1567,6 +1729,17 @@ class TestAggregateSessionCost(unittest.TestCase):
         # process would inherit them. unittest runs tearDown even on
         # failure, so this guarantees a clean slate.
         _SESSION_COST_CACHE.clear()
+
+    def test_transcript_without_usage_does_not_claim_zero_cost(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            transcript = root / "empty-session.jsonl"
+            transcript.write_text(json.dumps({"type": "assistant", "message": {}}) + "\n",
+                                  encoding="utf-8")
+            with patch.object(monitor, "CLAUDE_PROJECTS_DIR", root):
+                self.assertIsNone(_aggregate_session_cost({
+                    "session_id": "empty-session", "transcript_path": str(transcript)}))
 
     def test_aggregate_session_cost_via_transcript_path(self):
         import tempfile, shutil, pathlib as _pathlib

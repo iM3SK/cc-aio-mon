@@ -854,6 +854,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.16.0  
+**Document Version**: 1.16.0\
 **Last Verified**: 2026-09-26  
 **Status**: Production

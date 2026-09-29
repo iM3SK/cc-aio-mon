@@ -31,6 +31,20 @@
 
 **Tests:** 817 passing (+64).
 
+## v1.15.5 — 2026-09-29
+
+**Fixed:**
+
+- Token stats load on a background worker from the first opening, including
+  period switches. Loading and scan failures are visible; failed refreshes keep
+  previous results and retry after 30 seconds. Empty results are cached too.
+- CST and the cost detail distinguish a reported zero (`0.00 $`) from missing or
+  invalid data (`n/a`). Missing request usage and unavailable session estimates
+  have explanations. The transcript estimate total remains visible without a
+  reported CST; transcripts without usage no longer imply a zero-cost session.
+
+**Tests:** 766 tests.
+
 ## v1.15.4 — 2026-09-27
 
 **Fixed:**

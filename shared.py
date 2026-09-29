@@ -283,6 +283,25 @@ def f_cost(usd):
     return f"{usd:.2f} $"
 
 
+def nonnegative_number(value):
+    """A supplied finite nonnegative number, or None for unavailable data."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if 0 <= number < float("inf") else None
+
+
+def f_cost_value(value):
+    """Format an observed amount without conflating zero and missing data."""
+    amount = nonnegative_number(value)
+    if amount is None:
+        return "n/a"
+    return "0.00 $" if amount == 0 else f_cost(amount)
+
+
 def f_cd(epoch):
     """Countdown from now to `epoch`. Returns compact form (e.g. '2h 15m', '6d 12h')."""
     if epoch is None:

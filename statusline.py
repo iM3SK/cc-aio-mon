@@ -28,7 +28,7 @@ import sys
 import time
 
 from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
-                    f_tok, f_cost, f_cd,
+                    f_tok, f_cost, f_cost_value, f_cd,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
                     lock_file_handle, unlock_file_handle, acquire_singleton_lock,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
@@ -220,10 +220,8 @@ def seg_fable(entry, now=None, ttl=None):
 
 
 def seg_cost(data):
-    usd = _num(as_dict(data.get("cost")).get("total_cost_usd"))
-    if usd <= 0:
-        return None
-    text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost(usd)}{R}"
+    usd = as_dict(data.get("cost")).get("total_cost_usd")
+    text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost_value(usd)}{R}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 

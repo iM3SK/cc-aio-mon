@@ -54,6 +54,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 
 from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
+                    nonnegative_number, f_cost_value,
                     char_width, is_safe_dir, ensure_data_dir, ensure_utf8_stdout, run_git,
                     load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
@@ -1561,7 +1562,8 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # ── CST — session cost bar (scales to CST_MAX $) ───────
     cst_pct = min(100, usd / CST_MAX * 100) if usd > 0 else 0
     buf.append(f"{c(C_ORN)}{B}CST{R} {mkbar(cst_pct, c(C_ORN))}")
-    buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{f_cost(usd)}{R}")
+    reported_cost = f_cost_value(as_dict(data.get("cost")).get("total_cost_usd"))
+    buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{reported_cost}{R}")
     # ── Cross-session cost (TDY / WEK) ─────────────────────
     tdy, wek = cached_cross_session_costs()
     tdy_s = f_cost(tdy) if tdy > 0 else "--"
@@ -1951,6 +1953,7 @@ def _aggregate_session_cost(data):
 
     inp = out = cr = cw = 0.0
     ci = co = ccr = ccw = 0.0
+    has_usage = False
     wsr = wfr = 0
     c1h = c5m = 0
     try:
@@ -1981,6 +1984,11 @@ def _aggregate_session_cost(data):
                 u = msg.get("usage") or {}
                 if not isinstance(u, dict):
                     u = {}
+                if any(nonnegative_number(u.get(key)) is not None for key in (
+                    "input_tokens", "output_tokens", "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )):
+                    has_usage = True
                 mid = msg.get("model") or ""
                 if not isinstance(mid, str):
                     mid = ""
@@ -2008,6 +2016,10 @@ def _aggregate_session_cost(data):
                 # u.get("diagnostics"), u.get("inference_geo"), u.get("service_tier"),
                 # rec.get("context_management") — not needed for cost/token aggregation.
     except OSError:
+        _cache_sentinel()
+        return None
+
+    if not has_usage:
         _cache_sentinel()
         return None
 
@@ -2068,7 +2080,8 @@ def render_cost_breakdown(data, hist, cols, rows):
     buf.append(sep(SW))
 
     cost_d = as_dict(data.get("cost"))
-    usd = _num(cost_d.get("total_cost_usd"))
+    reported_usd = nonnegative_number(cost_d.get("total_cost_usd"))
+    usd = reported_usd if reported_usd is not None else 0
     dur = _num(cost_d.get("total_duration_ms"))
     cw = as_dict(data.get("context_window"))
     usage = as_dict(cw.get("current_usage"))
@@ -2077,24 +2090,20 @@ def render_cost_breakdown(data, hist, cols, rows):
     # detect fast mode — standard rates only. Session breakdown (transcript) does.
     pricing = _get_pricing(model_id)
 
-    # Token counts
-    inp = _num(usage.get("input_tokens", 0))
-    out = _num(usage.get("output_tokens", 0))
-    cr = _num(usage.get("cache_read_input_tokens", 0))
-    cwt = _num(usage.get("cache_creation_input_tokens", 0))
+    # A missing cache count cannot establish a savings estimate.
+    cr = nonnegative_number(usage.get("cache_read_input_tokens")) or 0
     total_in = _num(cw.get("total_input_tokens", 0))
     total_out = _num(cw.get("total_output_tokens", 0))
 
     model_name = _sanitize(as_dict(data.get("model")).get("display_name", "?"))
     # Strip verbose context suffix: "Opus 4.6 (1M context)" → "Opus 4.6 1M"
     model_short = compact_context_suffix(model_name)
-    buf.append(f"{C_ORN}{B}CST{R} {C_ORN}{B}{f_cost(usd)}{R} {C_DIM}{f_dur(dur)} - {model_short}{R}")
+    buf.append(f"{C_ORN}{B}CST{R} {C_ORN}{B}{f_cost_value(reported_usd)}{R} {C_DIM}{f_dur(dur)} - {model_short}{R}")
+    if reported_usd is None:
+        buf.append(f"{C_DIM}Claude Code has not supplied a valid session cost.{R}")
 
     # Cost estimates per token type
-    inp_cost = inp * pricing["input"] / 1_000_000
-    out_cost = out * pricing["output"] / 1_000_000
     cr_cost = cr * pricing["cache_read"] / 1_000_000
-    cw_cost = cwt * pricing["cache_write"] / 1_000_000
 
     # What would cache reads cost at full input price?
     cr_full_price = cr * pricing["input"] / 1_000_000
@@ -2107,10 +2116,18 @@ def render_cost_breakdown(data, hist, cols, rows):
     tc_pad = max(0, SW - len(tc_title))
     buf.append(f"{BG_BAR}{C_WHT}{B}{tc_title}{R}{BG_BAR}{' ' * tc_pad}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_ORN}INP{R} {C_WHT}{f_tok(inp)}{R} {C_DIM}~{f_cost(inp_cost)}{R}")
-    buf.append(f"{C_ORN}OUT{R} {C_WHT}{f_tok(out)}{R} {C_DIM}~{f_cost(out_cost)}{R}")
-    buf.append(f"{C_ORN}CRD{R} {C_WHT}{f_tok(cr)}{R} {C_DIM}~{f_cost(cr_cost)}{R}")
-    buf.append(f"{C_ORN}CWR{R} {C_WHT}{f_tok(cwt)}{R} {C_DIM}~{f_cost(cw_cost)}{R}")
+    for label, key, price in (
+        ("INP", "input_tokens", pricing["input"]),
+        ("OUT", "output_tokens", pricing["output"]),
+        ("CRD", "cache_read_input_tokens", pricing["cache_read"]),
+        ("CWR", "cache_creation_input_tokens", pricing["cache_write"]),
+    ):
+        count = nonnegative_number(usage.get(key))
+        tokens = "n/a" if count is None else (f_tok(count) if count else "0")
+        amount = count * price / 1_000_000 if count is not None else None
+        buf.append(f"{C_ORN}{label}{R} {C_WHT}{tokens}{R} {C_DIM}~{f_cost_value(amount)}{R}")
+    if not usage:
+        buf.append(f"{C_DIM}Last-request usage is unavailable from Claude Code.{R}")
 
     if cache_savings > 0.001:
         sav_pct = round(cache_savings / (cache_savings + cr_cost) * 100) if (cache_savings + cr_cost) > 0 else 0
@@ -2124,17 +2141,15 @@ def render_cost_breakdown(data, hist, cols, rows):
         sb_pad = max(0, SW - len(sb_title))
         buf.append(f"{BG_BAR}{C_WHT}{B}{sb_title}{R}{BG_BAR}{' ' * sb_pad}{R}")
         buf.append(sep(SW))
-        buf.append(f"{C_ORN}INP{R} {C_WHT}{f_tok(sess['input'])}{R} {C_DIM}~{f_cost(sess['cost_input'])}{R}")
-        buf.append(f"{C_ORN}OUT{R} {C_WHT}{f_tok(sess['output'])}{R} {C_DIM}~{f_cost(sess['cost_output'])}{R}")
-        buf.append(f"{C_ORN}CRD{R} {C_WHT}{f_tok(sess['cache_read'])}{R} {C_DIM}~{f_cost(sess['cost_cache_read'])}{R}")
-        buf.append(
-            f"{C_ORN}CWR{R} {C_WHT}{f_tok(sess['cache_write'])}{R} "
-            f"{C_DIM}~{f_cost(sess['cost_cache_write'])}{R}"
-        )
+        for label, key in (("INP", "input"), ("OUT", "output"),
+                           ("CRD", "cache_read"), ("CWR", "cache_write")):
+            tokens = f_tok(sess[key]) if sess[key] else "0"
+            amount = f_cost_value(sess["cost_" + key])
+            buf.append(f"{C_ORN}{label}{R} {C_WHT}{tokens}{R} {C_DIM}~{amount}{R}")
         delta = sess["cost_total"] - usd if usd > 0 else 0
         if usd > 0:
             pct_diff = abs(delta) / usd * 100 if usd > 0 else 0
-            sum_cost = f_cost(sess['cost_total'])
+            sum_cost = f_cost_value(sess['cost_total'])
             cst_cost = f_cost(usd)
             if pct_diff > 15:
                 buf.append(
@@ -2143,6 +2158,11 @@ def render_cost_breakdown(data, hist, cols, rows):
                 )
             else:
                 buf.append(f"{C_DIM}SUM ~{sum_cost} (~= CST {cst_cost}){R}")
+        else:
+            buf.append(f"{C_DIM}SUM ~{f_cost_value(sess['cost_total'])} (transcript estimate){R}")
+    else:
+        buf.append(f"{C_DIM}Session estimate unavailable: no usable transcript data.{R}")
+        buf.append(f"{C_DIM}Check transcript access and the {TRANSCRIPT_MAX_BYTES // (1024 * 1024)} MiB file limit.{R}")
 
     buf.append(sep(SW))
     st_title = "CONTEXT WINDOW"
@@ -2152,7 +2172,7 @@ def render_cost_breakdown(data, hist, cols, rows):
     # total_input_tokens/total_output_tokens are the CURRENT context window
     # (Claude Code v2.1.132+), not cumulative session totals — label accordingly.
     buf.append(f"{C_DIM}CIN:{R} {C_WHT}{f_tok(total_in)}{R} {C_DIM}COUT:{R} {C_WHT}{f_tok(total_out)}{R}")
-    if dur > 0:
+    if dur > 0 and reported_usd is not None:
         cpm_val = usd / (dur / 60000)
         buf.append(f"{C_DIM}CPM:{R} {C_ORN}{cpm_val:.4f} $/min{R}")
 
@@ -2828,11 +2848,22 @@ _stats_scan_thread = None
 _stats_scan_lock = threading.Lock()
 
 
+def _stats_scan_worker(period):
+    try:
+        models, overview = scan_transcript_stats(period)
+        # Freshness starts at completion, including scans taking over 30s.
+        _usage_cache[period] = {"t": time.monotonic(), "models": models,
+                                "overview": overview}
+    except Exception:
+        # Keep previous results and throttle retries; never expose file contents
+        # or paths from an exception in the terminal.
+        cached = dict(_usage_cache.get(period, {"models": {}, "overview": {}}))
+        cached.update(t=time.monotonic(), error=True)
+        _usage_cache[period] = cached
+
+
 def _stats_refresh_async(period):
-    """Kick a background scan_transcript_stats when its cache is stale, so the
-    ~0.6s read+parse of all transcripts never blocks the render/input thread
-    (mirrors _subagents_refresh_async / _rls_check_worker / the pulse worker).
-    render_stats reads the last _usage_cache result and never blocks."""
+    """Load missing/stale stats with at most one scan running off-thread."""
     global _stats_scan_thread
     cached = _usage_cache.get(period)
     if cached and time.monotonic() - cached["t"] < 30.0:
@@ -2840,10 +2871,16 @@ def _stats_refresh_async(period):
     with _stats_scan_lock:
         if _stats_scan_thread is not None and _stats_scan_thread.is_alive():
             return
-        t = threading.Thread(target=scan_transcript_stats, args=(period,),
+        t = threading.Thread(target=_stats_scan_worker, args=(period,),
                              name="stats-scan", daemon=True)
         _stats_scan_thread = t
-        t.start()
+        try:
+            t.start()
+        except RuntimeError:
+            cached = dict(_usage_cache.get(period, {"models": {}, "overview": {}}))
+            cached.update(t=time.monotonic(), error=True)
+            _usage_cache[period] = cached
+            _stats_scan_thread = None
 
 
 def render_stats(cols, rows, period="all"):
@@ -2855,19 +2892,20 @@ def render_stats(cols, rows, period="all"):
     buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * tp}{R}")
     buf.append(sep(SW))
 
+    _stats_refresh_async(period)
     cached = _usage_cache.get(period)
-    if cached is None:
-        # First open for this period: one synchronous scan so the modal shows
-        # data immediately (and fills the cache). Every later open reads the
-        # cache and refreshes it off-thread, so the ~0.6s read never blocks
-        # again — that repeated freeze was the Critical finding.
-        models, overview = scan_transcript_stats(period)
-    else:
-        _stats_refresh_async(period)  # refresh stale cache off the render thread
-        models, overview = cached["models"], cached["overview"]
+    models = cached["models"] if cached else {}
+    overview = cached["overview"] if cached else {}
+    if cached and cached.get("error") and models:
+        buf.append(f"{C_YEL}Refresh failed; showing previous results. Retrying shortly.{R}")
     if not models:
-        buf.append(f"{C_DIM}No transcript data found in ~/.claude/projects/{R}")
-        buf.append(f"{C_DIM}(stats appear after at least one CC session){R}")
+        if cached is None:
+            buf.append(f"{C_DIM}Loading token stats in the background...{R}")
+        elif cached.get("error"):
+            buf.append(f"{C_YEL}Unable to load token stats. Retrying shortly.{R}")
+        else:
+            buf.append(f"{C_DIM}No transcript data found in ~/.claude/projects/{R}")
+            buf.append(f"{C_DIM}(stats appear after at least one CC session){R}")
         buf.append(sep(SW))
         buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
         buf.append(f"{C_DIM}press any key to close{R}")
