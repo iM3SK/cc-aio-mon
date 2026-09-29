@@ -53,7 +53,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.15.4"
+VERSION = "1.15.5"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -277,6 +277,25 @@ def f_cost(usd):
     if usd < 0.01:
         return f"{usd:.4f} $"
     return f"{usd:.2f} $"
+
+
+def nonnegative_number(value):
+    """A supplied finite nonnegative number, or None for unavailable data."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if 0 <= number < float("inf") else None
+
+
+def f_cost_value(value):
+    """Format an observed amount without conflating zero and missing data."""
+    amount = nonnegative_number(value)
+    if amount is None:
+        return "n/a"
+    return "0.00 $" if amount == 0 else f_cost(amount)
 
 
 def f_cd(epoch):
