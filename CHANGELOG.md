@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.16.0 — 2026-09-29
+
+**Features — Fable weekly pool (FBL):**
+- **FBL indicator between 5HL and 7DL.** Claude Max plans have a separate weekly
+  Fable pool that Claude Code's statusline JSON does not carry. FBL reads it
+  from Claude Code's own usage cache (`cachedUsageUtilization` in
+  `.claude.json`, honouring `CLAUDE_CONFIG_DIR`) — the data `/usage` shows —
+  via `shared.read_fable_weekly()`. The bucket is matched by kind and model
+  name, never by index; a cache written under another account is ignored; the
+  OAuth credentials file is never read. Shown in the statusline
+  (`statusline.seg_fable`) and as a dashboard row with reset countdown.
+  Accounts without the pool see no change.
+  - One display rule for both surfaces (`shared.fable_display_state`): hidden
+    when absent, older than 24 h or past its reset; dim with `~` when stale.
+  - Statusline drop order is now separate from display order — FBL sits
+    between 5HL and 7DL but is dropped before 7DL on narrow terminals.
+- **Usage-cache refresher.** Claude Code rewrites the cache only when usage is
+  requested, so when the copy is older than `CC_AIO_MON_FABLE_REFRESH_SEC`
+  (default 300 s, `0` = read-only) the statusline starts one detached
+  `statusline.py --refresh-fable` helper after printing its line. The internal,
+  version-dependent fallback sends a `get_usage` control request without a
+  prompt to headless `claude -p`; hooks are disabled, session persistence is
+  disabled, and the child removes the `CLAUDECODE` nesting marker. It starts
+  only from an existing valid Fable cache, treats a nonzero return code or an
+  unchanged/invalid result as failure, and cleans up after communication
+  errors. Run `/usage` once to bootstrap a missing cache or after an account
+  switch. A backoff stamp and singleton lock in the data dir limit concurrent
+  refreshes.
+- **Model labels.** Fable 5 and 5.1 IDs (including dated/context-suffixed IDs)
+  and the `fable` alias display as `FBL`; major-only family IDs such as
+  `claude-opus-5` retain their family code. Pricing is unchanged.
+
+**Refactor — single source of truth:**
+- Dashboard rate-limit rows and their legend lines are generated from one
+  table, `monitor._RL_ROWS` (5HL · FBL · 7DL).
+
+**Tests:** 850 tests (+84 from v1.15.5), including transcript-to-FBL rendering,
+independent Fable usage through the statusline entry point, malformed cache
+values, and refresher failure/cleanup regressions. Platform skips vary.
+
 ## v1.15.5 — 2026-09-29
 
 **Fixed:**

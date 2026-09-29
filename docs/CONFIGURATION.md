@@ -59,6 +59,33 @@ If you add a new env var, add it here in the same commit.
   supply-chain guard (a rewritten `origin` cannot feed the updater foreign
   code).
 
+### `CC_AIO_MON_FABLE_REFRESH_SEC`
+
+- **Type:** integer seconds (`0` = read-only)
+- **Default:** `300`; values between 1 and 59 are raised to `60` (Claude Code
+  itself throttles usage-cache writes to one per minute); invalid or negative
+  values fall back to the default
+- **Read by:** `shared.py` (`FABLE_REFRESH_SEC`), used by `statusline.py`
+  (`_maybe_refresh_fable`, `run_fable_refresh`) and by the FBL stale rule
+  (`shared.fable_display_state`)
+- **Effect:** how old Claude Code's cached usage data (`cachedUsageUtilization`
+  in `.claude.json`) may get before the statusline starts one detached
+  `statusline.py --refresh-fable` helper. This is an internal,
+  version-dependent best-effort fallback: it sends a `get_usage` control
+  request without a prompt to headless `claude -p`, with hooks disabled by the
+  data-dir `--settings` file and `--no-session-persistence`. Its child
+  environment removes the `CLAUDECODE` nesting marker. A nonzero exit,
+  communication error, or lack of a fresh valid cache after the request is a
+  failed refresh; communication errors clean up the child process. A lock in
+  the data dir allows one refresh at a time across all sessions. The helper
+  starts only when an existing valid Fable bucket is stale, so accounts without
+  the pool never trigger it. Run `/usage` once if the cache is missing or after
+  switching accounts. FBL turns dim with `~` once the cache is older than twice
+  this value (twice the default when `0`).
+- **When to set:** `0` when no background `claude` process should ever be
+  started by the statusline (FBL then updates only when you run `/usage`);
+  a larger value to refresh less often.
+
 ### `CC_MON_BRN_MAX`
 
 - **Type:** float ($/min)
@@ -155,6 +182,16 @@ have a documented diagnostic anchor.
   that holds session snapshots, JSONL history, the singleton lock, the
   crash log, and the rotated crash log. Whitelisted in `shared.run_git`'s
   env scrub (`shared.py`).
+
+### `CLAUDE_CONFIG_DIR`
+
+- **Type:** path
+- **Default:** unset → `~/.claude.json`
+- **Read by:** `shared.claude_json_path()`
+- **Effect:** set by Claude Code users running a second account; when set,
+  the FBL reader uses `$CLAUDE_CONFIG_DIR/.claude.json` — the same file
+  Claude Code writes for that account. Inherited by the statusline from
+  Claude Code, so no manual setting is needed.
 
 ### `HOME` / `USERPROFILE`
 

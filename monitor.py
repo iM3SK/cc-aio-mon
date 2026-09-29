@@ -68,6 +68,7 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
+                    read_fable_weekly, fable_display_state,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
 
@@ -736,6 +737,17 @@ def mkbar(pct, color=None, show_pct=True):
     return bar
 
 
+# Rate-limit rows in display order — one table feeds render_frame and the legend.
+# (source key, label, window seconds, legend text). "fable" is not part of CC's
+# rate_limits payload: it comes from shared.read_fable_weekly() (Claude Code's
+# cached /usage data) and is merged into the row source by render_frame.
+_RL_ROWS = (
+    ("five_hour", "5HL", SECONDS_5H, "5-Hour Rate Limit"),
+    ("fable", "FBL", SECONDS_7D, "Fable Weekly Pool"),
+    ("seven_day", "7DL", SECONDS_7D, "7-Day Rate Limit"),
+)
+
+
 def _limit_color(pct):
     """Dynamic color for rate limit metrics — yellow base, red >= CRIT_PCT."""
     if pct >= CRIT_PCT:
@@ -1361,7 +1373,7 @@ def _apply_scroll(off, k, rows):
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
-def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False, rate_limits=None):
+def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False, rate_limits=None, fable=None):
     if show_menu:
         return render_menu(cols, rows)
     if show_cost:
@@ -1482,32 +1494,44 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn}")
     buf.append(sep(SW))
 
-    # ── 5HL / 7DL ──
-    if rl is not None:
-        def _render_rate_limit(data_obj, label, window_sec):
-            """SIZE-002: shared renderer for 5-hour and 7-day rate-limit
-            blocks. Both differ only in the data key, label, and reset
+    # ── 5HL / FBL / 7DL ──
+    # `fable` is shared.read_fable_weekly() output (None when the account has
+    # no Fable pool); fable_display_state() hides a too-old or expired cache.
+    fable_state = fable_display_state(fable)
+    if rl is not None or fable_state != "hidden":
+        def _render_rate_limit(data_obj, label, window_sec, tag=""):
+            """SIZE-002: shared renderer for every rate-limit block in
+            _RL_ROWS. Rows differ only in the data source, label and reset
             window length; rendering logic (pct, expired tag, color,
             countdown) is identical. Closure over `buf`, `c`, `mkbar`
             keeps the helper colocated with its only caller."""
             if not data_obj:
-                return
+                return False
             pct = round(_num(data_obj.get("used_percentage")), 1)
             resets = _num(data_obj.get("resets_at"), 0)
             expired = resets > 0 and resets < time.time()
             if expired:
                 pct = 0.0
             lc = c(_limit_color(pct))
-            expired_tag = f"  {C_DIM}(expired){R}" if expired else ""
+            expired_tag = f"  {C_DIM}(expired){R}" if expired else tag
             buf.append(f"{lc}{B}{label}{R} {mkbar(pct, lc)}{expired_tag}")
             rc = c(_reset_color(resets, window_sec))
             buf.append(f"    {C_DIM}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
+            return True
 
-        fh = as_dict(rl.get("five_hour"))
-        sd = as_dict(rl.get("seven_day"))
-        _render_rate_limit(fh, "5HL", SECONDS_5H)
-        _render_rate_limit(sd, "7DL", SECONDS_7D)
-        if not fh and not sd:
+        src = dict(rl) if isinstance(rl, dict) else {}
+        fable_tag = ""
+        if fable_state == "hidden":
+            src.pop("fable", None)
+        else:
+            src["fable"] = fable
+            if fable_state == "stale":
+                fable_tag = f"  {C_DIM}(stale {int(_num(fable.get('age_s'))) // 60}m){R}"
+        shown = [
+            _render_rate_limit(as_dict(src.get(key)), label, window, fable_tag if key == "fable" else "")
+            for key, label, window, _legend in _RL_ROWS
+        ]
+        if not any(shown):
             buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
@@ -1616,8 +1640,8 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM} CRD  Cache Read - CWR  Cache Write{R}")
     buf.append(f"{C_CYN}CTX{R} {C_DIM}Context Window{R}")
     buf.append(f"{C_DIM} INP  Input Tokens - OUT  Output Tokens{R}")
-    buf.append(f"{C_YEL}5HL{R} {C_DIM}5-Hour Rate Limit{R}")
-    buf.append(f"{C_YEL}7DL{R} {C_DIM}7-Day Rate Limit{R}")
+    for _key, label, _window, legend in _RL_ROWS:
+        buf.append(f"{C_YEL}{label}{R} {C_DIM}{legend}{R}")
     buf.append(f"{C_DIM} RST  Reset Countdown{R}")
     buf.append(f"{C_ORN}BRN{R} {C_DIM}Burn Rate{R} {C_DIM}0-{BRN_MAX} $/min{R}")
     buf.append(f"{C_YEL}CTR{R} {C_DIM}Context Rate{R} {C_DIM}0-{CTR_MAX} %/min{R}")
@@ -1678,7 +1702,7 @@ _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_wri
 # Adding a new model = one entry here, not three. Used by _get_pricing (below)
 # and _model_code (token-stats modal section).
 _MODELS = {
-    "claude-fable-5": {"name": "Fable 5", "code": ("FA", "5"),
+    "claude-fable-5": {"name": "Fable 5", "code": ("FBL", "5"),
                        "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     # Project Glasswing only — same tier as Fable 5. Rare in transcripts.
     "claude-mythos-5": {"name": "Mythos 5", "code": ("MY", "5"),
@@ -2765,10 +2789,17 @@ def render_update_modal(cols, rows):
 _PERIOD_LABELS = {"all": "All Time", "7d": "Last 7 Days", "30d": "Last 30 Days"}
 _PERIOD_CYCLE = ["all", "7d", "30d"]
 
-_MODEL_ID_RE = re.compile(r"^claude-(opus|sonnet|haiku)-(\d+)-(\d+)")
+_MODEL_ID_RE = re.compile(
+    r"^claude-(opus|sonnet|haiku|mythos|fable)-(\d+)(?:-(\d+))?$"
+)
 # Match human-readable display names (e.g. "Opus 4.6 (1M context)") — used by render_picker
-_MODEL_LABEL_RE = re.compile(r"(Opus|Sonnet|Haiku)\s+(\d+)\.(\d+)")
-_LABEL_FAMILY_CODES = {"Opus": "OP", "Sonnet": "SO", "Haiku": "HA"}
+_MODEL_LABEL_RE = re.compile(
+    r"\b(Opus|Sonnet|Haiku|Mythos|Fable)\s+(\d+)(?:\.(\d+))?\b"
+)
+_LABEL_FAMILY_CODES = {
+    "Opus": "OP", "Sonnet": "SO", "Haiku": "HA", "Mythos": "MY", "Fable": "FBL",
+}
+_MODEL_FAMILY_CODES = {key.lower(): value for key, value in _LABEL_FAMILY_CODES.items()}
 
 
 def _model_code_from_label(label):
@@ -2779,7 +2810,10 @@ def _model_code_from_label(label):
     """
     mm = _MODEL_LABEL_RE.search(label or "")
     if mm:
-        return (_LABEL_FAMILY_CODES[mm.group(1)], f"{mm.group(2)}.{mm.group(3)}")
+        version = mm.group(2)
+        if mm.group(3):
+            version += f".{mm.group(3)}"
+        return (_LABEL_FAMILY_CODES[mm.group(1)], version)
     return (strip_context_suffix(label or "").strip(), "")
 
 
@@ -2791,7 +2825,12 @@ def _model_label(model_id):
     m = _MODEL_ID_RE.match(base)
     if m:
         fam = m.group(1).capitalize()
-        return f"{fam} {m.group(2)}.{m.group(3)}"
+        version = m.group(2)
+        if m.group(3):
+            version += f".{m.group(3)}"
+        return f"{fam} {version}"
+    if base == "fable":
+        return "Fable"
     return base or "?"
 
 
@@ -2803,8 +2842,12 @@ def _model_code(model_id):
         return entry["code"]
     m = _MODEL_ID_RE.match(base)
     if m:
-        short = {"opus": "OP", "sonnet": "SO", "haiku": "HA"}[m.group(1)]
-        return (short, f"{m.group(2)}.{m.group(3)}")
+        version = m.group(2)
+        if m.group(3):
+            version += f".{m.group(3)}"
+        return (_MODEL_FAMILY_CODES[m.group(1)], version)
+    if base == "fable":
+        return ("FBL", "")
     # Unknown model — sanitize raw input to prevent ANSI injection via transcript
     safe = _sanitize(base[:3]).upper() if base else ""
     return (safe or "?", "")
@@ -3478,6 +3521,7 @@ def main():
     last_mt = 0
     last_seen = 0  # monotonic timestamp of last successful data load
     last_data = None
+    last_fable = None
     last_size = (0, 0)
     last_hist_mt = 0
     last_hist = []
@@ -3714,6 +3758,7 @@ def main():
             # Load state (only on data interval, not resize)
             if since_data >= data_interval:
                 last_data_load = now_mono
+                last_fable = read_fable_weekly()
                 jp = DATA_DIR / f"{sid}.json"
                 try:
                     mt = jp.stat().st_mtime
@@ -3755,6 +3800,7 @@ def main():
                         show_legend, show_menu, show_cost, stale=is_stale,
                         show_agents=show_agents, agents_active_only=agents_active_only,
                         rate_limits=cached_freshest_rate_limits(last_data.get("rate_limits")),
+                        fable=last_fable,
                     ),
                     cols,
                 )
