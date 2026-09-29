@@ -1,8 +1,8 @@
 # FILE-IPC CONTRACT: cc-aio-mon v1.16.0
 
 **Status**: Active  
-**Version**: 1.16.0 (`SCHEMA_VERSION` = 1)  
-**Last Updated**: 2026-09-26  
+**Version**: 1.16.0 (`SCHEMA_VERSION` = 1)\
+**Last Updated**: 2026-09-29\
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
@@ -162,9 +162,8 @@ def load_state(sid):
     raw = safe_read(DATA_DIR / f"{sid}.json", MAX_FILE_SIZE)
     if raw is None:
         return None
-    try:
-        d = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    d = json_object(raw)
+    if d is None:
         return None
     # Refuse a snapshot tagged newer than this build understands (schema gate).
     if (isinstance(d, dict) and isinstance(d.get("_schema_version"), int)
@@ -176,7 +175,9 @@ def load_state(sid):
 - Validates `sid` and directory safety
 - Bounded read: `safe_read()` caps at `MAX_FILE_SIZE` (1 MB)
 - Returns parsed dict or `None` on error
-- **No exception raised** on malformed JSON (returns `None`)
+- Malformed, excessively nested and non-object JSON returns `None`.
+- Optional objects of the wrong type are treated as missing by consumers.
+- Readers do not rewrite corrupted input files.
 - **Schema gate**: a `_schema_version` newer than `shared.SCHEMA_VERSION` degrades to `None`
 
 **Poll Cadence**: The main loop polls `load_state()` for each active session on every data-load interval.
@@ -351,16 +352,12 @@ def load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None):
     raw = safe_read(dd / f"{sid_s}.jsonl", HISTORY_READ_MAX)
     if raw is None:
         return []
-    try:
-        lines = raw.decode("utf-8").splitlines()
-    except UnicodeDecodeError:
-        return []
+    lines = raw.splitlines()
     out = []
     for ln in lines[-n:]:
-        try:
-            out.append(json.loads(ln))
-        except json.JSONDecodeError:
-            pass
+        entry = json_object(ln)
+        if entry is not None:
+            out.append(entry)
     return out
 ```
 
@@ -369,9 +366,9 @@ def load_history(sid, n=HISTORY_RATE_SAMPLES, data_dir=None):
 - Protects against unbounded file growth (e.g., TOCTOU race where file is resized between stat and read)
 - Returns `None` if file exceeds 2 MB
 
-**Encoding**: UTF-8 strict. A `UnicodeDecodeError` at the whole-file decode step makes `load_history` return `[]` rather than substituting replacement chars — corrupt history is treated as empty history so rate calculations see no spurious data.
+**Encoding**: UTF-8 strict per record. An undecodable line is skipped; later valid records remain readable.
 
-**Malformed Line Handling**: Lines that fail `json.loads()` are silently skipped (not appended to output).
+**Malformed Line Handling**: `shared.json_object()` rejects malformed JSON, non-object values and decoder recursion failures. Each bad record is skipped without changing the file.
 
 ### JSONL Schema (Per-Line)
 

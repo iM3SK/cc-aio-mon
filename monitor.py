@@ -53,7 +53,7 @@ import traceback
 from collections import OrderedDict
 from datetime import datetime, timedelta
 
-from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
+from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
                     char_width, is_safe_dir, ensure_data_dir, ensure_utf8_stdout, run_git,
                     load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
@@ -65,7 +65,7 @@ from shared import (calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     badge_context_suffix,
                     extract_changelog_entry,
-                    check_syntax_after_pull, parse_ahead_behind, verify_origin_remote,
+                    check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
                     read_fable_weekly, fable_display_state,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
@@ -173,7 +173,7 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
     and we skip it rather than aggregate from an unverified inode.
     """
     try:
-        with open(jl, encoding="utf-8") as f:
+        with open(jl, "rb") as f:
             try:
                 fst = os.fstat(f.fileno())
             except OSError:
@@ -181,11 +181,9 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
             if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
                 return
             for line in f:
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, RecursionError):
+                obj = json_object(line)
+                if obj is None:
                     continue
-
                 ts_str = obj.get("timestamp", "")
                 ts = _parse_ts(ts_str)
 
@@ -787,7 +785,7 @@ def collect_warnings(data, cpm, xpm):
     warnings = []
     # CTF — context filling fast
     if xpm and xpm > 0:
-        ctx_pct = _num((data.get("context_window") or {}).get("used_percentage"))
+        ctx_pct = _num(as_dict(data.get("context_window")).get("used_percentage"))
         if ctx_pct < 100:
             eta_mins = (100 - ctx_pct) / xpm
             if eta_mins < 30:
@@ -922,7 +920,7 @@ def _baseline_delta(entries, cutoff_ts):
         t = _num(e.get("t"), 0)
         if t <= 0:
             continue  # unplaceable (missing/invalid t) — can't partition it
-        cost = _num((e.get("cost") or {}).get("total_cost_usd"))
+        cost = _num(as_dict(e.get("cost")).get("total_cost_usd"))
         if t < cutoff_ts:
             baseline = cost
         else:
@@ -958,16 +956,11 @@ def calc_cross_session_costs():
         raw_bytes = safe_read(jl, HISTORY_AGGREGATE_MAX)
         if raw_bytes is None:
             continue
-        try:
-            raw = raw_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
         entries = []
-        for ln in raw.splitlines():
-            try:
-                entries.append(json.loads(ln))
-            except (json.JSONDecodeError, RecursionError):
-                pass
+        for ln in raw_bytes.splitlines():
+            entry = json_object(ln)
+            if entry is not None:
+                entries.append(entry)
         if not entries:
             continue
         entries.sort(key=lambda e: _num(e.get("t"), 0))
@@ -1097,9 +1090,11 @@ def list_sessions():
             raw = safe_read(f, MAX_FILE_SIZE)
             if raw is None:
                 continue
-            d = json.loads(raw.decode("utf-8"))
+            d = json_object(raw)
+            if d is None or ("model" in d and not isinstance(d["model"], dict)):
+                continue
             # Skip snapshots without usable model info (test artifacts / incomplete writes)
-            display_name = _sanitize((d.get("model") or {}).get("display_name", "")).strip()
+            display_name = _sanitize(as_dict(d.get("model")).get("display_name", "")).strip()
             if not display_name:
                 # Cleanup: dead artifact older than 1 hour
                 if (now - mt) > SECONDS_1H:
@@ -1134,9 +1129,8 @@ def load_state(sid):
     raw = safe_read(DATA_DIR / f"{sid}.json", MAX_FILE_SIZE)
     if raw is None:
         return None
-    try:
-        d = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    d = json_object(raw)
+    if d is None:
         return None
     # IPC schema gate (M-cross-2): statusline tags every snapshot with
     # _schema_version. A snapshot written by a NEWER build than this one —
@@ -1175,6 +1169,7 @@ def cached_freshest_rate_limits(fallback, ttl=0.5):
     rate_limits when no snapshot carries usable limits (empty dir / tests).
     TTL lowered to 0.5 s (F-21 / CACHE-03): stat-scan is cheap and 0.5 s
     reduces cross-session staleness without meaningful overhead."""
+    fallback = fallback if isinstance(fallback, dict) else None
     now = time.monotonic()
     if now - _rl_fresh_cache["t"] < ttl:
         rl = _rl_fresh_cache["rl"]
@@ -1194,7 +1189,7 @@ def cached_freshest_rate_limits(fallback, ttl=0.5):
                 raw = safe_read(f, MAX_FILE_SIZE)
                 if raw is None:
                     continue
-                d = json.loads(raw.decode("utf-8"))
+                d = json_object(raw)
             except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
                 continue
             if not isinstance(d, dict):
@@ -1202,7 +1197,7 @@ def cached_freshest_rate_limits(fallback, ttl=0.5):
             sv = d.get("_schema_version")
             if isinstance(sv, int) and sv > SCHEMA_VERSION:
                 continue  # newer-build snapshot — same gate as load_state
-            rl = d.get("rate_limits")
+            rl = as_dict(d.get("rate_limits"))
             if rl:
                 best_mt = mt
                 best_rl = rl
@@ -1391,21 +1386,21 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     buf = []
 
     # -- Extract data (sanitize to prevent terminal escape injection) --
-    # `or {}` pattern guards against explicit JSON `null` values (not just missing keys).
-    m = data.get("model") or {}
+    # Wrong optional object types behave like missing fields.
+    m = as_dict(data.get("model"))
     model_str = badge_context_suffix(_sanitize(m.get("display_name", "?")))
     sname = _sanitize(data.get("session_name", ""))
 
-    cw = data.get("context_window") or {}
+    cw = as_dict(data.get("context_window"))
     ctx_pct = round(max(0.0, min(100.0, _num(cw.get("used_percentage")))), 1)  # F-25 / CORRECTNESS-005: clamp [0,100]
     ctx_total = _num(cw.get("context_window_size"), 0)
-    usage = cw.get("current_usage") or {}
+    usage = as_dict(cw.get("current_usage"))
 
     # rate_limits override: the event loop passes the account-wide freshest value
     # (see cached_freshest_rate_limits). None → fall back to this session's own
     # snapshot field, preserving behaviour for direct/test callers.
-    rl = rate_limits if rate_limits is not None else data.get("rate_limits")
-    cost_d = data.get("cost") or {}
+    rl = as_dict(rate_limits if rate_limits is not None else data.get("rate_limits"))
+    cost_d = as_dict(data.get("cost"))
     usd = _num(cost_d.get("total_cost_usd"))
     dur = _num(cost_d.get("total_duration_ms"))
     api_dur = _num(cost_d.get("total_api_duration_ms"))
@@ -1532,7 +1527,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             if fable_state == "stale":
                 fable_tag = f"  {C_DIM}(stale {int(_num(fable.get('age_s'))) // 60}m){R}"
         shown = [
-            _render_rate_limit(src.get(key), label, window, fable_tag if key == "fable" else "")
+            _render_rate_limit(as_dict(src.get(key)), label, window, fable_tag if key == "fable" else "")
             for key, label, window, _legend in _RL_ROWS
         ]
         if not any(shown):
@@ -1749,7 +1744,7 @@ def _model_base(model_id):
     suffix and a trailing -YYYYMMDD date snapshot. Statusline sends bare IDs
     (claude-opus-4-8), transcripts send dated ones (claude-haiku-4-5-20251001) —
     both must resolve to the same key."""
-    base = (model_id or "").split("[")[0]
+    base = (model_id if isinstance(model_id, str) else "").split("[")[0]
     return re.sub(r"-\d{8}$", "", base)
 
 
@@ -1884,10 +1879,7 @@ def _scan_ai_title(transcript_path):
         for line in text.splitlines():
             if not line:
                 continue
-            try:
-                obj = json.loads(line)
-            except (json.JSONDecodeError, ValueError, RecursionError):
-                continue
+            obj = json_object(line)
             if isinstance(obj, dict) and obj.get("type") == "ai-title":
                 t = obj.get("aiTitle")
                 if isinstance(t, str) and t.strip():
@@ -1911,7 +1903,8 @@ def _aggregate_session_cost(data):
     within TTL returns cached None immediately instead of re-scanning.  The
     cache-hit branch already returns cached[1] (which may be None) correctly.
     """
-    sid = (data.get("session_id") or "").strip()
+    sid = data.get("session_id")
+    sid = sid.strip() if isinstance(sid, str) else ""
     if not sid or not _SID_RE.match(sid):
         # Invalid sid — cannot key the cache; plain return.
         return None
@@ -1977,11 +1970,8 @@ def _aggregate_session_cost(data):
                 line = line.strip()
                 if not line or not line.startswith("{"):
                     continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError, RecursionError):
-                    continue
-                if rec.get("type") != "assistant":
+                rec = json_object(line)
+                if rec is None or rec.get("type") != "assistant":
                     continue
                 # Same crash class as the stats-modal aggregator: a string
                 # "message" would turn the .get() calls into AttributeError.
@@ -2043,7 +2033,7 @@ def _cost_thirds(hist):
     costs = []
     for entry in hist:
         t = _num(entry.get("t", 0))
-        c = _num((entry.get("cost") or {}).get("total_cost_usd", 0))
+        c = _num(as_dict(entry.get("cost")).get("total_cost_usd", 0))
         if t > 0:
             costs.append((t, c))
     if len(costs) < 2:
@@ -2077,12 +2067,12 @@ def render_cost_breakdown(data, hist, cols, rows):
     buf.append(f"{BG_BAR}{C_WHT}{B}COST BREAKDOWN{R}{BG_BAR}{' ' * cb_pad}{R}")
     buf.append(sep(SW))
 
-    cost_d = data.get("cost") or {}
+    cost_d = as_dict(data.get("cost"))
     usd = _num(cost_d.get("total_cost_usd"))
     dur = _num(cost_d.get("total_duration_ms"))
-    cw = data.get("context_window") or {}
-    usage = cw.get("current_usage") or {}
-    model_id = (data.get("model") or {}).get("id", "")
+    cw = as_dict(data.get("context_window"))
+    usage = as_dict(cw.get("current_usage"))
+    model_id = as_dict(data.get("model")).get("id", "")
     # Statusline current_usage carries no `speed` field, so per-request CST cannot
     # detect fast mode — standard rates only. Session breakdown (transcript) does.
     pricing = _get_pricing(model_id)
@@ -2095,7 +2085,7 @@ def render_cost_breakdown(data, hist, cols, rows):
     total_in = _num(cw.get("total_input_tokens", 0))
     total_out = _num(cw.get("total_output_tokens", 0))
 
-    model_name = _sanitize((data.get("model") or {}).get("display_name", "?"))
+    model_name = _sanitize(as_dict(data.get("model")).get("display_name", "?"))
     # Strip verbose context suffix: "Opus 4.6 (1M context)" → "Opus 4.6 1M"
     model_short = compact_context_suffix(model_name)
     buf.append(f"{C_ORN}{B}CST{R} {C_ORN}{B}{f_cost(usd)}{R} {C_DIM}{f_dur(dur)} - {model_short}{R}")
@@ -2470,6 +2460,8 @@ def _git_cmd(args, timeout=15):
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except FileNotFoundError:
         return -1, "", "git not found"
+    except OSError:
+        return -1, "", "git unavailable"
     except subprocess.TimeoutExpired:
         return -2, "", "timeout"
 
@@ -2478,19 +2470,28 @@ def _update_checks():
     """Return list of warning strings for update safety."""
     warns = []
     rc, out, _ = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"])
-    if rc == 0 and out != "main":
+    if rc != 0:
+        warns.append("Could not verify current branch")
+    elif out != "main":
         warns.append(f"Not on main branch (current: {out})")
     rc, out, _ = _git_cmd(["status", "--porcelain", "-uno"])
-    if rc == 0 and out:
+    if rc != 0:
+        warns.append("Could not verify working tree")
+    elif out:
         warns.append("Uncommitted changes in working tree")
     rc, out, _ = _git_cmd(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
     if rc == 0:
         try:
             ahead, behind = parse_ahead_behind(out)
         except ValueError:
-            ahead = behind = 0
-        if ahead > 0 and behind > 0:
-            warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+            warns.append("Invalid commit comparison")
+        else:
+            if ahead > 0 and behind > 0:
+                warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+            elif ahead > 0:
+                warns.append(f"Local has {ahead} commits ahead of origin/main")
+    else:
+        warns.append("Could not compare commits")
     # SEC: pin self-update to the canonical repo (same guard as update.py CLI).
     remote_problem = verify_origin_remote(_REPO_ROOT)
     if remote_problem:
@@ -2621,29 +2622,27 @@ def _apply_update_worker():
     syntax check. Sets _update_result. The checks mirror the update.py CLI
     guards (branch / clean tree / divergence / pinned origin) — the modal
     render is advisory only, so the worker must enforce them itself."""
+    recovery = None
     try:
         warns = _update_checks()
         if warns:
-            _set_update_result(
-                "Update blocked: " + "; ".join(_sanitize(w) for w in warns)
-            )
+            _set_update_result("Update blocked: " + "; ".join(_sanitize(w) for w in warns))
             return
+        rc, out, _ = _git_cmd(["rev-parse", "--verify", "HEAD"])
+        if rc != 0:
+            raise RuntimeError("Could not read recovery commit")
+        recovery = parse_commit_id(out)
         rc, out, err = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
-        if rc == 0:
-            # Drop modal git cache so post-pull state (no commits ahead, etc.)
-            # is reflected immediately on the next render.
-            _invalidate_update_modal_cache()
-            # Syntax check via compile() — avoids interpreter version mismatch.
-            # Shared with update.py CLI so both paths cover identical file set.
-            bad = check_syntax_after_pull(_REPO_ROOT)
-            if bad:
-                _set_update_result(f"Updated but syntax errors in: {', '.join(bad)}")
-            else:
-                _set_update_result("Update complete. Restart monitor to apply.")
-        else:
-            _set_update_result(f"Update failed: {_sanitize(err or out or 'unknown error')}")
+        if rc != 0:
+            raise RuntimeError("git pull failed")
+        _invalidate_update_modal_cache()
+        bad = check_syntax_after_pull(_REPO_ROOT)
+        if bad:
+            raise RuntimeError(f"Runtime verification failed: {', '.join(bad)}")
+        _set_update_result("Update complete. Restart monitor to apply.")
     except Exception as e:
-        _set_update_result(f"Update error: {_sanitize(str(e))}")
+        hint = f" Recovery commit: {recovery}." if recovery else ""
+        _set_update_result(f"Update failed: {_sanitize(str(e))}.{hint}")
 
 
 def _apply_update_action():
@@ -3052,10 +3051,7 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
         too_large = raw is None
         if raw is not None:
             for line in raw.decode("utf-8", errors="replace").splitlines():
-                try:
-                    o = json.loads(line)
-                except (ValueError, TypeError, RecursionError):
-                    continue
+                o = json_object(line)
                 if not isinstance(o, dict):
                     continue  # valid JSON but not an object (e.g. bare array)
                 # Extract attributionAgent label from first matching record (F-08)
@@ -3071,7 +3067,8 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
                     tok += (_num(u.get("input_tokens"), 0) + _num(u.get("output_tokens"), 0)
                             + _num(u.get("cache_creation_input_tokens"), 0)
                             + _num(u.get("cache_read_input_tokens"), 0))
-                for c in (m.get("content") or []):
+                content = m.get("content")
+                for c in (content if isinstance(content, list) else []):
                     if isinstance(c, dict) and c.get("type") == "tool_use":
                         last_tool = c.get("name")
         is_active = (now - mt) < _SUBAGENT_ACTIVE_WINDOW

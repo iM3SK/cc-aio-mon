@@ -89,7 +89,9 @@ cannot be silently routed through an injected proxy.
 `--apply` to run `git pull --ff-only`. Guards: clean working tree, on `main`
 branch, no divergence. Creates a `pre-update-YYYYMMDD-HHMMSS` rollback tag
 before each pull. Runs `shared.check_syntax_after_pull()` on all five modules
-after the pull to catch broken updates before the user restarts. In-app update
+after the pull; missing, unreadable or invalid files fail verification. Both
+paths record the original commit for manual recovery and reject failed Git
+safety checks. In-app update
 (`monitor.py` key `u` / `a`) uses the same shared logic (`_apply_update_worker`
 daemon thread).
 
@@ -295,14 +297,9 @@ with a human-readable error pointing to the lock file. The lock file contains
 the holder's PID for diagnosis. `--list` mode is intentionally exempt because
 it is a one-shot non-interactive read.
 
-*Asymmetric lock-dir-failure behavior (by design):* if `ensure_data_dir()`
-fails (e.g. an attacker-owned `$TMPDIR/claude-aio-monitor/`), the two entry
-points diverge deliberately. `update.py --apply` prints a warning and proceeds
-without the singleton guard (best-effort — a self-update should not be blocked
-by a transient dir issue). `monitor.py` proceeds **silently** without the lock,
-because it has not yet entered the alt-screen and a stderr warning would be
-clobbered by the TUI init; the singleton guard is a convenience there, not a
-safety invariant. Neither path treats lock-dir failure as fatal.
+**Lock-dir failure:** both entry points stop if the data directory cannot be
+verified or the singleton lock cannot be acquired. The CLI updater closes its
+lock handle in `finally`, including when pull or post-pull verification fails.
 
 **Crash-log rotation.** `_install_crash_logger()` calls
 `shared.rotate_crash_log(log_path, always=True)` before each crash write.

@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.16.0 — 2026-09-26
+## v1.16.0 — 2026-09-29
 
 **Features — Fable weekly pool (FBL):**
 - **FBL indicator between 5HL and 7DL.** Claude Max plans have a separate weekly
@@ -29,7 +29,24 @@
 - Dashboard rate-limit rows and their legend lines are generated from one
   table, `monitor._RL_ROWS` (5HL · FBL · 7DL).
 
-**Tests:** 795 passing (+64).
+**Tests:** 817 passing (+64).
+
+## v1.15.4 — 2026-09-27
+
+**Fixed:**
+
+- Session JSON readers reject non-object and excessively nested input, skip bad
+  JSONL records, and treat malformed optional objects as missing without repairing
+  input files. Valid later records remain usable; IPC schema stays at 1.
+- CLI and TUI updates stop on failed Git safety checks or invalid comparison
+  results. Missing, unreadable and syntactically invalid runtime files fail
+  verification. The CLI exits with code 1, releases its lock, and only reports
+  completion after successful verification. Both paths retain the original
+  commit for manual recovery; no automatic reset is performed.
+- The pre-push hook inspects each outgoing commit once, including root and merge
+  commits, renamed files and changes removed before the branch tip. It uses the
+  supplied remote baseline, handles filenames with NUL delimiters, and blocks
+  on Git inspection errors without printing credential values.
 
 ## v1.15.3 — 2026-06-24
 
