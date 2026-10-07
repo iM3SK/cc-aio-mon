@@ -20,6 +20,7 @@ Entry points:
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import struct
@@ -28,7 +29,7 @@ import sys
 import time
 
 from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
-                    f_tok, f_cost, f_cost_value, f_cd,
+                    f_tok, f_cost, f_cost_value, f_cd, nonnegative_number,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
                     lock_file_handle, unlock_file_handle, acquire_singleton_lock,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
@@ -36,7 +37,7 @@ from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sani
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
                     char_width,
                     read_fable_weekly, fable_display_state, FABLE_REFRESH_SEC, FABLE_SETTINGS_STEM,
-                    R, B, C_RED, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
+                    R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 
 
@@ -219,6 +220,49 @@ def seg_fable(entry, now=None, ttl=None):
     return text, sum(char_width(ch) for ch in _ANSI_RE.sub("", text))
 
 
+_CACHE_SHOW_S = 50 * 60     # CCH stays hidden while more than this remains
+_CACHE_WARN_FRAC = 0.2      # yellow below this fraction of the TTL
+_CACHE_TTL_RE = re.compile(r"(\d{1,4})([mh])")
+
+
+def _cache_ttl_seconds(ttl):
+    """'5m' -> 300, '1h' -> 3600; anything else -> None (no yellow threshold)."""
+    m = _CACHE_TTL_RE.fullmatch(ttl) if isinstance(ttl, str) else None
+    if not m:
+        return None
+    return int(m.group(1)) * (60 if m.group(2) == "m" else 3600)
+
+
+def seg_cache(data, now=None):
+    """Prompt-cache countdown (CCH) from the documented `prompt_cache` object
+    (Claude Code v2.1.251+). Hidden until the object exists and caching was
+    observed, and while more than 50 min remain. Green countdown, yellow below
+    20 % of the TTL, red `cold` plus the tokens the next request re-caches once
+    the prefix has left its TTL. A warm cache without a usable expiry renders
+    nothing — no guessing."""
+    pc = as_dict(data.get("prompt_cache"))
+    if pc.get("caching_observed") is not True:
+        return None
+    t = time.time() if now is None else now
+    exp = nonnegative_number(pc.get("expires_at"))
+    warm = pc.get("warm")
+    if warm is True and exp and exp > t:
+        left = exp - t
+        if left > _CACHE_SHOW_S:
+            return None
+        ttl_s = _cache_ttl_seconds(pc.get("ttl"))
+        c = C_YEL if ttl_s and left < ttl_s * _CACHE_WARN_FRAC else C_GRN
+        cd = f_cd(exp, now=t) if left >= 60 else "<1m"
+        text = f"{c}{B}CCH{R} {c}{cd}{R}"
+    elif warm is False or (warm is True and exp):
+        tok = nonnegative_number(pc.get("recache_tokens_if_cold"))
+        tok_str = f" {f_tok(tok)}" if tok else ""
+        text = f"{C_RED}{B}CCH{R} {C_RED}cold{tok_str}{R}"
+    else:
+        return None
+    return text, sum(char_width(ch) for ch in _ANSI_RE.sub("", text))
+
+
 def seg_cost(data):
     usd = as_dict(data.get("cost")).get("total_cost_usd")
     text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost_value(usd)}{R}"
@@ -283,7 +327,9 @@ def build_line(data, cols, brn=None, fable=None):
 
     Position and drop priority are separate: FBL sits between 5HL and 7DL, but
     is dropped before 7DL (the account-wide weekly limit matters more than one
-    model's pool). Every other segment keeps the historic drop-from-the-right order.
+    model's pool). CCH sits right after CTX; on narrowing it goes after BRN and
+    CST but before FBL — it only appears when the cache is about to expire or
+    is already cold. Every other segment keeps the historic drop-from-the-right order.
     """
     sv = _SEP_VLEN
 
@@ -291,11 +337,12 @@ def build_line(data, cols, brn=None, fable=None):
     all_segs = [(rank, s) for rank, s in [
         (0, seg_model(data)),
         (1, seg_ctx(data)),
+        (5, seg_cache(data)),
         (2, seg_5hl(data)),
         (4, seg_fable(fable)),
         (3, seg_7dl(data)),
-        (5, seg_cost(data)),
-        (6, seg_brn(brn)),
+        (6, seg_cost(data)),
+        (7, seg_brn(brn)),
     ] if s is not None]
 
     while all_segs:

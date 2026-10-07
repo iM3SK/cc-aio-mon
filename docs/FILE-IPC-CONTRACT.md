@@ -1,8 +1,8 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.16.0
+# FILE-IPC CONTRACT: cc-aio-mon v1.17.0
 
 **Status**: Active  
-**Version**: 1.16.0 (`SCHEMA_VERSION` = 1)\
-**Last Updated**: 2026-09-29\
+**Version**: 1.17.0 (`SCHEMA_VERSION` = 1)\
+**Last Updated**: 2026-10-07\
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
@@ -226,6 +226,7 @@ Fields present in the Claude Code status JSON that the monitor receives but does
 | `iterations` | **ignored** | Top-level iteration counters (totals only); individual tool-use counts come from `usage` sub-fields |
 | `usage.cache_creation` | **consumed** — cost calc | Object with token counts; used in cache-cost computation in statusline pricing logic |
 | `usage.server_tool_use` | **consumed** — cost calc | Object with server-side tool-use token counts; included in cost computation |
+| `prompt_cache` | **consumed** — `statusline.seg_cache()` | Claude Code v2.1.251+; `warm`, `caching_observed`, `ttl`, `expires_at`, `recache_tokens_if_cold` drive the CCH segment. Stored verbatim like every stdin field (no schema change); the monitor does not read it |
 
 ### Rate Limits — account-wide read semantics
 
@@ -867,6 +868,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.16.0\
+**Document Version**: 1.17.0\
 **Last Verified**: 2026-09-26  
 **Status**: Production

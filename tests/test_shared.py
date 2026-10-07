@@ -1460,6 +1460,21 @@ class TestPrePushHistory(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(b"sensitive filename", result.stderr)
 
+
+class TestFCdExplicitNow(unittest.TestCase):
+    """f_cd(epoch, now=...) counts down from the given instant (v1.17.0)."""
+
+    def test_explicit_now_overrides_wall_clock(self):
+        base = 2_000_000_000.0  # years away from the real clock
+        self.assertEqual(shared.f_cd(base + 34 * 60 + 20, now=base), "34m")
+        self.assertEqual(shared.f_cd(base + 2 * 3600 + 15 * 60, now=base), "2h 15m")
+        self.assertEqual(shared.f_cd(base - 1, now=base), "now")
+
+    def test_default_still_uses_wall_clock(self):
+        with patch("shared.time.time", return_value=1_900_000_000.0):
+            self.assertEqual(shared.f_cd(1_900_000_000.0 + 600), "10m")
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

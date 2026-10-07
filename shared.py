@@ -58,7 +58,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.16.0"
+VERSION = "1.17.0"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -303,12 +303,13 @@ def f_cost_value(value):
     return "0.00 $" if amount == 0 else f_cost(amount)
 
 
-def f_cd(epoch):
-    """Countdown from now to `epoch`. Returns compact form (e.g. '2h 15m', '6d 12h')."""
+def f_cd(epoch, now=None):
+    """Countdown from `now` (default: wall clock) to `epoch`. Returns compact
+    form (e.g. '2h 15m', '6d 12h')."""
     if epoch is None:
         return "--"
     epoch = _num(epoch, 0)
-    diff = int(epoch - time.time())
+    diff = int(epoch - (time.time() if now is None else now))
     if diff <= 0:
         return "now"
     d, rem = divmod(diff, SECONDS_1D)

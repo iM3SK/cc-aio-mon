@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.17.0 — 2026-10-07
+
+**Features — prompt-cache countdown (CCH):**
+- **CCH segment right after CTX.** Claude Code v2.1.251+ passes a documented
+  `prompt_cache` object on statusline stdin. `statusline.seg_cache()` turns it
+  into a countdown to the moment the cached conversation prefix leaves its TTL:
+  hidden while more than 50 min remain, `CCH 34m` in green from 50 min down,
+  yellow below 20 % of the TTL (12 min on the 1-hour cache, 60 s on the
+  5-minute one), and red `CCH cold 82.0k` once the cache is cold — the number
+  is `recache_tokens_if_cold`, the tokens the next message writes to the cache
+  again. Nothing is shown before the first response, on older Claude Code, when
+  `caching_observed` is not `true`, or when a warm cache has no usable
+  `expires_at`. Malformed values never raise.
+  - Claude Code re-runs the statusline when a warm cache reaches `expires_at`,
+    so `cold` appears without configuration. A countdown that moves while idle
+    needs `refreshInterval` in the `statusLine` settings; see the README for the
+    side effect on idle snapshots.
+  - On narrow terminals CCH is dropped after BRN and CST, before FBL.
+  - `shared.f_cd()` accepts an optional `now`, so the countdown label and its
+    colour come from the same instant.
+  - No IPC schema change: `prompt_cache` already reached the snapshot verbatim;
+    the dashboard does not read it.
+
+**Tests:** 869 passing (+19).
+
 ## v1.16.0 — 2026-09-29
 
 **Features — Fable weekly pool (FBL):**
