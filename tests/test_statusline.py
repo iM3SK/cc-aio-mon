@@ -1293,7 +1293,8 @@ class TestSegCache(unittest.TestCase):
                 self.assertIsNone(self._seg(_pc(left_s=600, expires_at=exp)))
 
     def test_unknown_ttl_still_counts_down_without_yellow(self):
-        for ttl in (None, "", "2d", "1h ", 60, "m"):
+        for ttl in (None, "", "2d", "1h ", "10m", "2h", "0005m", "9999h",
+                    60, "m"):
             with self.subTest(ttl=ttl):
                 text, _ = self._seg(_pc(left_s=60, ttl=ttl))
                 self.assertEqual(_ANSI_RE.sub("", text), "CCH 1m")

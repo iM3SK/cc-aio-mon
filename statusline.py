@@ -20,7 +20,6 @@ Entry points:
 import json
 import os
 import pathlib
-import re
 import shutil
 import signal
 import struct
@@ -222,15 +221,12 @@ def seg_fable(entry, now=None, ttl=None):
 
 _CACHE_SHOW_S = 50 * 60     # CCH stays hidden while more than this remains
 _CACHE_WARN_FRAC = 0.2      # yellow below this fraction of the TTL
-_CACHE_TTL_RE = re.compile(r"(\d{1,4})([mh])")
+_CACHE_TTL_SECONDS = {"5m": 5 * 60, "1h": 60 * 60}
 
 
 def _cache_ttl_seconds(ttl):
     """'5m' -> 300, '1h' -> 3600; anything else -> None (no yellow threshold)."""
-    m = _CACHE_TTL_RE.fullmatch(ttl) if isinstance(ttl, str) else None
-    if not m:
-        return None
-    return int(m.group(1)) * (60 if m.group(2) == "m" else 3600)
+    return _CACHE_TTL_SECONDS.get(ttl) if isinstance(ttl, str) else None
 
 
 def seg_cache(data, now=None):

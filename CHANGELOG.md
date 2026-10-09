@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.17.0 — 2026-10-07
+## v1.17.0 — 2026-10-09
 
 **Features — prompt-cache countdown (CCH):**
 - **CCH segment right after CTX.** Claude Code v2.1.251+ passes a documented
