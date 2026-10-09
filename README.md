@@ -1,6 +1,16 @@
 # CC AIO MON — Claude Code Terminal Monitor
 
-![Python 3.8+](https://img.shields.io/badge/requires_python-3.8%2B-blue) ![License MIT](https://img.shields.io/badge/license-MIT-green) ![Dependencies](https://img.shields.io/badge/dependencies-stdlib_only-brightgreen) ![Tests](https://github.com/iM3SK/cc-aio-mon/workflows/Tests/badge.svg) ![CodeQL](https://github.com/iM3SK/cc-aio-mon/actions/workflows/github-code-scanning/codeql/badge.svg) ![Scorecard](https://github.com/iM3SK/cc-aio-mon/workflows/Scorecard%20supply-chain%20security/badge.svg) ![Bandit](https://github.com/iM3SK/cc-aio-mon/workflows/Bandit%20Security%20Scan/badge.svg)
+[![Release](https://img.shields.io/github/v/release/iM3SK/cc-aio-mon)](https://github.com/iM3SK/cc-aio-mon/releases/latest)
+[![Python 3.8+](https://img.shields.io/badge/requires_python-3.8%2B-blue)](#requirements)
+[![License](https://img.shields.io/github/license/iM3SK/cc-aio-mon)](LICENSE.md)
+[![Runtime dependencies: stdlib only](https://img.shields.io/badge/runtime%20deps-stdlib%20only-blue)](#requirements)
+[![Tests](https://github.com/iM3SK/cc-aio-mon/actions/workflows/tests.yml/badge.svg?branch=main&event=push)](https://github.com/iM3SK/cc-aio-mon/actions/workflows/tests.yml)
+[![CodeQL](https://github.com/iM3SK/cc-aio-mon/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/iM3SK/cc-aio-mon/actions/workflows/github-code-scanning/codeql)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/iM3SK/cc-aio-mon/badge)](https://scorecard.dev/viewer/?uri=github.com/iM3SK/cc-aio-mon)
+[![Bandit scan](https://github.com/iM3SK/cc-aio-mon/actions/workflows/bandit.yml/badge.svg?branch=main&event=push)](https://github.com/iM3SK/cc-aio-mon/actions/workflows/bandit.yml)
+
+The Bandit badge tracks report publication; findings are reviewed in
+[code scanning](https://github.com/iM3SK/cc-aio-mon/security/code-scanning).
 
 **Real-time terminal monitor for Claude Code CLI.** Track context window usage, API rate limits, session costs, burn rate, and cache performance — all in one compact TUI dashboard. Stdlib only (Python 3.8+), cross-platform.
 
