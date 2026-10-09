@@ -130,6 +130,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **DUR** | Session duration (sub-stat of APR) | — | dashboard |
 | **CHR** | Cache read tokens / total cache | 0-100% | dashboard |
 | **CTX** | Context window usage | 0-100% | statusline + dashboard |
+| **CCH** | Prompt-cache countdown — time until the cached conversation goes cold (shown from 50 min down), then `cold` + the tokens the next message re-caches; Claude Code v2.1.251+ (see below) | — | statusline |
 | **5HL** | 5-hour rate limit usage + reset countdown (`→ 2h 15m`) | 0-100% | statusline + dashboard |
 | **FBL** | Fable weekly pool usage + reset countdown — shown only on plans that have the pool; read from Claude Code's cached `/usage` data (see below) | 0-100% | statusline + dashboard |
 | **7DL** | 7-day rate limit usage + reset countdown (`→ 6d 12h`) | 0-100% | statusline + dashboard |
@@ -156,9 +157,23 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 
 ### Statusline
 
-Runs automatically on each Claude Code status update via stdin JSON. Outputs a single ANSI-colored line: Model │ CTX │ 5HL → countdown │ FBL → countdown │ 7DL → countdown │ CST │ BRN. Trailing segments drop when terminal is narrow (FBL drops before 7DL). No background padding — CC notifications share the right side of the row. APR and CHR live only in the dashboard where the horizontal space isn't constrained.
+Runs automatically on each Claude Code status update via stdin JSON. Outputs a single ANSI-colored line: Model │ CTX │ CCH │ 5HL → countdown │ FBL → countdown │ 7DL → countdown │ CST │ BRN. Trailing segments drop when terminal is narrow (FBL drops before 7DL; CCH drops after BRN and CST, before FBL). No background padding — CC notifications share the right side of the row. APR and CHR live only in the dashboard where the horizontal space isn't constrained.
 
 **FBL — Fable weekly pool.** The [Claude Code statusline protocol](https://code.claude.com/docs/en/statusline) supplies only the 5-hour and 7-day limits, so FBL is read from Claude Code's own usage cache (`cachedUsageUtilization` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`) — the data `/usage` shows. OAuth credentials are never read. The segment appears only when that cache holds a valid Fable bucket for the logged-in account; a copy older than twice the refresh interval is shown dimmed with `~`, and one older than a day or past its reset is hidden. The internal, version-dependent refresher is best effort: it sends a `get_usage` control request without a prompt to a detached `claude -p`, with hooks disabled and session persistence disabled. It starts only from an existing valid Fable cache. If the cache is missing or you switch accounts, run `/usage` once to bootstrap it. Set `CC_AIO_MON_FABLE_REFRESH_SEC=0` to keep FBL read-only — see [CONFIGURATION.md](docs/CONFIGURATION.md).
+
+**CCH — prompt-cache countdown.** Read from the documented `prompt_cache` object ([prompt cache fields](https://code.claude.com/docs/en/statusline#prompt-cache-fields), Claude Code v2.1.251+). After an idle gap longer than the cache TTL (1 h or 5 min), the next message writes the whole conversation prefix to the cache again; CCH shows how close that is. It stays hidden while more than 50 min remain, counts down in green (`CCH 34m`), turns yellow below 20 % of the TTL (12 min on `1h`, 60 s on `5m`) and red once the cache is cold: `CCH cold 82.0k`, where the number is `recache_tokens_if_cold`. No segment before the first response, on older Claude Code, or when the provider reports no prompt caching (`caching_observed` false).
+
+Claude Code re-runs the statusline when a warm cache reaches `expires_at`, so `cold` appears on its own. Between events the countdown stands still; to make it move while you are idle, add `refreshInterval` (seconds) to the `statusLine` block in `settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "...",
+  "refreshInterval": 60
+}
+```
+
+Trade-off: every refresh is a full statusline run, including the IPC write. An idle session's snapshot therefore stays fresh, so the dashboard does not switch to "Session Inactive" while Claude Code is open, and the session history gains one entry per refresh (BRN averages over that idle time). Leave `refreshInterval` unset if you rely on the inactive marker.
 
 Token statistics label Fable 5 and 5.1, including dated and context-suffixed IDs, as `FBL`; the short `fable` alias is also recognized. Major-only IDs such as `claude-opus-5` retain their family label. This changes labels only, not pricing.
 
@@ -214,7 +229,7 @@ Both scripts import shared.py for shared BRN/CTR calculation.
 ```
 
 1. **Claude Code** emits JSON telemetry to `statusline.py` via stdin after each assistant message, permission mode change, or vim mode toggle (300ms debounce).
-2. **statusline.py** parses JSON, renders single-line ANSI status bar (model, context, rate limits with reset countdown, cost, burn rate), writes atomic snapshot (`.json`) + appends to history (`.jsonl`).
+2. **statusline.py** parses JSON, renders single-line ANSI status bar (model, context, prompt-cache countdown, rate limits with reset countdown, cost, burn rate), writes atomic snapshot (`.json`) + appends to history (`.jsonl`).
 3. **monitor.py** polls temp directory (data files refresh every 500 ms; UI tick 50 ms for keyboard responsiveness), reads snapshots + history, renders fullscreen TUI with progress bars and computed metrics.
 4. **shared.py** provides `calc_rates()` — computes BRN ($/min) and CTR (%/min) from JSONL history timestamps.
 
@@ -226,7 +241,7 @@ Both scripts import shared.py for shared BRN/CTR calculation.
 | 50-79% | Yellow | Approaching limits |
 | >= 80% | Red | Critical |
 
-Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visually distinguish rate limits from performance metrics.
+Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visually distinguish rate limits from performance metrics. CCH uses its own time-based scale: green countdown, yellow below 20 % of the cache TTL, red once the cache is cold.
 
 ## Configuration
 

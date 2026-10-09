@@ -47,6 +47,7 @@ from statusline import (
     cpc_base,
     _last_known_rate_limits,
     seg_fable,
+    seg_cache,
 )
 import statusline
 
@@ -1206,6 +1207,161 @@ class TestMalformedJsonInput(unittest.TestCase):
         for key in ("five_hour", "seven_day"):
             self.assertEqual(statusline.build_line({"rate_limits": {key: [1]}}, 200),
                              statusline.build_line({}, 200))
+
+
+# ---------------------------------------------------------------------------
+# Prompt-cache countdown segment CCH (v1.17.0)
+# ---------------------------------------------------------------------------
+def _pc(left_s=None, warm=True, ttl="1h", recache=82000, observed=True, **extra):
+    """`prompt_cache` payload whose expiry lies `left_s` seconds after _NOW."""
+    pc = {"warm": warm, "caching_observed": observed, "ttl": ttl,
+          "expires_at": None if left_s is None else int(_NOW + left_s),
+          "recache_tokens_if_cold": recache}
+    pc.update(extra)
+    return {"prompt_cache": pc}
+
+
+class TestSegCache(unittest.TestCase):
+
+    def _seg(self, data):
+        with patch("statusline.time.time", return_value=_NOW):
+            return seg_cache(data, now=_NOW)
+
+    def _plain(self, data):
+        seg = self._seg(data)
+        self.assertIsNotNone(seg)
+        return _ANSI_RE.sub("", seg[0])
+
+    def test_hidden_while_more_than_50_min_left(self):
+        self.assertIsNone(self._seg(_pc(left_s=3600)))
+        self.assertIsNone(self._seg(_pc(left_s=50 * 60 + 1)))
+
+    def test_shown_at_50_min_or_less_in_green(self):
+        text, vl = self._seg(_pc(left_s=34 * 60 + 20))
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH 34m")
+        self.assertIn(C_GRN, text)
+        self.assertNotIn(C_YEL, text)
+        self.assertEqual(vl, _vlen(text))
+        self.assertEqual(self._plain(_pc(left_s=50 * 60)), "CCH 50m")
+
+    def test_yellow_below_20_percent_of_1h_ttl(self):
+        text, _ = self._seg(_pc(left_s=12 * 60 + 30))
+        self.assertIn(C_GRN, text)
+        text, _ = self._seg(_pc(left_s=11 * 60))
+        self.assertIn(C_YEL, text)
+        self.assertNotIn(C_GRN, text)
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH 11m")
+
+    def test_yellow_below_20_percent_of_5m_ttl(self):
+        text, _ = self._seg(_pc(left_s=4 * 60, ttl="5m"))
+        self.assertIn(C_GRN, text)
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH 4m")
+        text, _ = self._seg(_pc(left_s=45, ttl="5m"))
+        self.assertIn(C_YEL, text)
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH <1m")
+
+    def test_cold_shows_recache_tokens_in_red(self):
+        text, vl = self._seg(_pc(left_s=None, warm=False, recache=82000))
+        self.assertIn(C_RED, text)
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH cold 82.0k")
+        self.assertEqual(vl, _vlen(text))
+        self.assertEqual(self._plain(_pc(left_s=None, warm=False, recache=387438)),
+                         "CCH cold 387k")
+
+    def test_warm_but_expired_counts_as_cold(self):
+        self.assertEqual(self._plain(_pc(left_s=-5)), "CCH cold 82.0k")
+        self.assertEqual(self._plain(_pc(left_s=0)), "CCH cold 82.0k")
+
+    def test_cold_without_usable_token_count(self):
+        for recache in (None, 0, -3, "82000x", True, float("nan"), float("inf")):
+            with self.subTest(recache=recache):
+                self.assertEqual(self._plain(_pc(left_s=None, warm=False, recache=recache)),
+                                 "CCH cold")
+
+    def test_no_object_or_caching_not_observed_means_no_segment(self):
+        self.assertIsNone(self._seg({}))
+        self.assertIsNone(self._seg({"prompt_cache": None}))
+        self.assertIsNone(self._seg({"prompt_cache": [1]}))
+        self.assertIsNone(self._seg({"prompt_cache": {}}))
+        self.assertIsNone(self._seg(_pc(left_s=600, observed=False)))
+        self.assertIsNone(self._seg(_pc(left_s=None, warm=False, observed=False)))
+        self.assertIsNone(self._seg(_pc(left_s=600, observed="true")))
+
+    def test_warm_without_valid_expiry_means_no_segment(self):
+        for exp in (None, "soon", True, float("nan"), float("inf"), -1, 0, [1]):
+            with self.subTest(exp=exp):
+                self.assertIsNone(self._seg(_pc(left_s=600, expires_at=exp)))
+
+    def test_unknown_ttl_still_counts_down_without_yellow(self):
+        for ttl in (None, "", "2d", "1h ", "10m", "2h", "0005m", "9999h",
+                    60, "m"):
+            with self.subTest(ttl=ttl):
+                text, _ = self._seg(_pc(left_s=60, ttl=ttl))
+                self.assertEqual(_ANSI_RE.sub("", text), "CCH 1m")
+                self.assertIn(C_GRN, text)
+
+    def test_countdown_uses_given_now_not_wall_clock(self):
+        # _NOW lies years away from the real clock: label and colour must
+        # both come from the same `now`.
+        text, _ = seg_cache(_pc(left_s=10 * 60 + 5), now=_NOW)
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH 10m")
+        text, _ = seg_cache(_pc(left_s=30 * 60), now=_NOW)
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH 30m")
+
+    def test_now_defaults_to_wall_clock(self):
+        with patch("statusline.time.time", return_value=_NOW):
+            text, _ = seg_cache(_pc(left_s=600))
+        self.assertEqual(_ANSI_RE.sub("", text), "CCH 10m")
+
+
+class TestBuildLineCache(unittest.TestCase):
+
+    def _line(self, cols, **pc):
+        data = {**_full_data(), **_pc(**pc)}
+        with patch("statusline.time.time", return_value=_NOW):
+            return build_line(data, cols)
+
+    def test_position_right_after_ctx(self):
+        plain = _ANSI_RE.sub("", self._line(300, left_s=600))
+        self.assertLess(plain.index("CTX"), plain.index("CCH"))
+        self.assertLess(plain.index("CCH"), plain.index("5HL"))
+
+    def test_hidden_segment_leaves_line_unchanged(self):
+        with patch("statusline.time.time", return_value=_NOW):
+            base = build_line(_full_data(), 300)
+        self.assertEqual(self._line(300, left_s=3600), base)
+
+    def test_cost_and_burn_drop_before_cch(self):
+        plain = _ANSI_RE.sub("", self._line(300, left_s=None, warm=False))
+        cols = len(plain.split(" │ CST")[0])
+        narrow = _ANSI_RE.sub("", self._line(cols, left_s=None, warm=False))
+        self.assertIn("CCH cold", narrow)
+        self.assertNotIn("CST", narrow)
+
+    def test_line_fits_cols(self):
+        for cols in (20, 40, 60, 90, 120, 300):
+            with self.subTest(cols=cols):
+                self.assertLessEqual(_vlen(self._line(cols, left_s=None, warm=False)), cols)
+
+    def test_main_renders_cch_from_stdin(self):
+        import io
+        payload = {"session_id": "cache-fixture", "model": {"display_name": "Opus 5"},
+                   **_pc(left_s=None, warm=False, recache=82000)}
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["statusline.py"]), \
+             patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(payload).encode()))), \
+             patch.object(sys, "stdout", output), \
+             patch("statusline.ensure_utf8_stdout"), \
+             patch("statusline._get_terminal_width", return_value=300), \
+             patch("statusline._load_history_for_rates", return_value=[]), \
+             patch("statusline.read_fable_weekly", return_value=None), \
+             patch("statusline.write_shared_state") as write, \
+             patch("statusline._maybe_refresh_fable"), \
+             patch("statusline.time.time", return_value=_NOW):
+            statusline.main()
+        self.assertIn("CCH cold 82.0k", _ANSI_RE.sub("", output.getvalue()))
+        write.assert_called_once_with(payload)
+
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
