@@ -14,9 +14,12 @@
   instead of its threshold colour. Its age comes from the history row's `t` or
   the snapshot's mtime (`statusline._last_known_rate_limits_at()`); an unknown
   age never dims. 7DL is unchanged.
+- **An idle session no longer shows an old 5HL when a fresher one exists.**
+  The limits are per account: when this session's own last value is older than
+  30 minutes, a fresher snapshot of another session wins.
 - Display only: snapshots and history keep exactly what Claude Code sent.
 
-**Tests:** 878 passing (+9).
+**Tests:** 881 passing (+12).
 
 ## v1.17.0 — 2026-10-09
 

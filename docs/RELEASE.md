@@ -62,7 +62,7 @@ Work through these in order before creating any tag.
   python3 tests.py     # macOS / Linux
   ```
   `tests.py` is a thin wrapper that runs `unittest discover tests/`
-  (`tests.py:main()`). Current baseline: **878 tests** (v1.17.1; platform
+  (`tests.py:main()`). Current baseline: **881 tests** (v1.17.1; platform
   skips vary). The new release's count must be >= this number unless tests were
   intentionally removed (document the removal in CHANGELOG).
 

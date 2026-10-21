@@ -461,11 +461,15 @@ class TestLastKnownRateLimits(unittest.TestCase):
                 self.assertIsNone(_last_known_rate_limits(hist))
 
     def test_at_returns_history_row_time(self):
-        hist = [{"rate_limits": {"five_hour": {"used_percentage": 9}}, "t": 1_700_000_000.5}]
-        self.assertEqual(
-            _last_known_rate_limits_at(hist),
-            ({"five_hour": {"used_percentage": 9}}, 1_700_000_000.5),
-        )
+        import tempfile, pathlib, statusline
+        t = time.time() - 10
+        hist = [{"rate_limits": {"five_hour": {"used_percentage": 9}}, "t": t}]
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
+                self.assertEqual(
+                    _last_known_rate_limits_at(hist),
+                    ({"five_hour": {"used_percentage": 9}}, t),
+                )
 
     def test_at_unknown_time_is_none_not_epoch(self):
         # A row without a usable "t" must not read as 50 years old.
@@ -485,6 +489,34 @@ class TestLastKnownRateLimits(unittest.TestCase):
                 rl, t = _last_known_rate_limits_at([])
         self.assertEqual(rl, {"seven_day": {"used_percentage": 5}})
         self.assertEqual(t, 1_700_000_100)
+
+    def _hist_and_snapshot(self, hist_age, snap_age):
+        import json, tempfile, pathlib, statusline
+        now = time.time()
+        hist = [{"rate_limits": {"five_hour": {"used_percentage": 3}}, "t": now - hist_age}]
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        d = pathlib.Path(td.name)
+        f = d / "othersession.json"
+        f.write_text(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 9}}}),
+                     encoding="utf-8")
+        os.utime(f, (now - snap_age, now - snap_age))
+        with patch.object(statusline, "DATA_DIR", d):
+            return _last_known_rate_limits_at(hist)
+
+    def test_at_stale_own_history_yields_to_fresher_snapshot(self):
+        # Limits are per account: an idle session must not dim 5HL while another
+        # session already wrote a fresh value.
+        rl, _ = self._hist_and_snapshot(hist_age=STALE_DIM_SEC + 600, snap_age=60)
+        self.assertEqual(rl["five_hour"]["used_percentage"], 9)
+
+    def test_at_fresh_own_history_wins_without_scan(self):
+        rl, _ = self._hist_and_snapshot(hist_age=60, snap_age=5)
+        self.assertEqual(rl["five_hour"]["used_percentage"], 3)
+
+    def test_at_stale_own_history_kept_when_snapshots_older(self):
+        rl, _ = self._hist_and_snapshot(hist_age=STALE_DIM_SEC + 600, snap_age=STALE_DIM_SEC + 900)
+        self.assertEqual(rl["five_hour"]["used_percentage"], 3)
 
     def test_at_nothing_available(self):
         import tempfile, pathlib, statusline

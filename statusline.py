@@ -293,15 +293,23 @@ def _last_known_rate_limits(hist):
 def _last_known_rate_limits_at(hist):
     """(rate_limits, observed_at) — same lookup as _last_known_rate_limits.
     observed_at is the history row's `t` or the snapshot's mtime; None when the
-    row carries no usable time (unknown age never dims)."""
+    row carries no usable time (unknown age never dims). A history row older
+    than STALE_DIM_SEC yields to a fresher snapshot of another session — the
+    limits are per account, so an idle session must not dim a value that a
+    busy one has already refreshed."""
+    best_mt, best_rl = -1.0, None
     for entry in reversed(hist or []):
         if isinstance(entry, dict) and as_dict(entry.get("rate_limits")):
             sv = entry.get("_schema_version")
             if isinstance(sv, int) and sv > SCHEMA_VERSION:
                 continue  # written by a newer build — skip, same gate as snapshot branch
             t = _num(entry.get("t"), 0)
-            return entry["rate_limits"], (t if t > 0 else None)
-    best_mt, best_rl = -1.0, None
+            if t <= 0:
+                return entry["rate_limits"], None
+            if time.time() - t <= STALE_DIM_SEC:
+                return entry["rate_limits"], t
+            best_mt, best_rl = t, entry["rate_limits"]  # stale: a snapshot must beat it
+            break
     try:
         if is_safe_dir(DATA_DIR):
             for f in DATA_DIR.glob("*.json"):
