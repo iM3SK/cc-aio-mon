@@ -80,8 +80,9 @@ If you add a new env var, add it here in the same commit.
   the data dir allows one refresh at a time across all sessions. The helper
   starts only when an existing valid Fable bucket is stale, so accounts without
   the pool never trigger it. Run `/usage` once if the cache is missing or after
-  switching accounts. FBL turns dim with `~` once the cache is older than twice
-  this value (twice the default when `0`).
+  switching accounts. FBL turns dim with `~` once the cache is older than 30
+  minutes, or than twice this value when that is longer (twice the default
+  when `0`).
 - **When to set:** `0` when no background `claude` process should ever be
   started by the statusline (FBL then updates only when you run `/usage`);
   a larger value to refresh less often.

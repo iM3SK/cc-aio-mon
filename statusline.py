@@ -36,6 +36,7 @@ from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sani
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
                     char_width,
                     read_fable_weekly, fable_display_state, FABLE_REFRESH_SEC, FABLE_SETTINGS_STEM,
+                    STALE_DIM_SEC,
                     R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 
 
@@ -164,7 +165,10 @@ def seg_ctx(data):
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
-def seg_5hl(data):
+def seg_5hl(data, age_s=None):
+    """`age_s` = age of a last-known value shown in place of a missing one
+    (None = live or unknown). Older than STALE_DIM_SEC renders dim with `~`,
+    the same rule as FBL."""
     rl = as_dict(data.get("rate_limits"))
     if not rl:
         return None
@@ -176,9 +180,12 @@ def seg_5hl(data):
     now = time.time()
     if resets > 0 and resets < now:
         pct = 0
-    c = cpc_base(pct, C_YEL)
+    if age_s is not None and age_s > STALE_DIM_SEC:
+        c, approx = C_DIM, "~"
+    else:
+        c, approx = cpc_base(pct, C_YEL), ""
     reset_str = f" {c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
-    text = f"{c}{B}5HL{R} {c}{pct}%{R}{reset_str}"
+    text = f"{c}{B}5HL{R} {c}{approx}{pct}%{R}{reset_str}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
@@ -280,12 +287,20 @@ def _last_known_rate_limits(hist):
     (1) this session's own history (already in memory — no extra IO);
     (2) the freshest *.json snapshot across all sessions (account-wide, since
     5H/7D limits are per-account). Returns None when nothing usable is found."""
+    return _last_known_rate_limits_at(hist)[0]
+
+
+def _last_known_rate_limits_at(hist):
+    """(rate_limits, observed_at) — same lookup as _last_known_rate_limits.
+    observed_at is the history row's `t` or the snapshot's mtime; None when the
+    row carries no usable time (unknown age never dims)."""
     for entry in reversed(hist or []):
         if isinstance(entry, dict) and as_dict(entry.get("rate_limits")):
             sv = entry.get("_schema_version")
             if isinstance(sv, int) and sv > SCHEMA_VERSION:
                 continue  # written by a newer build — skip, same gate as snapshot branch
-            return entry["rate_limits"]
+            t = _num(entry.get("t"), 0)
+            return entry["rate_limits"], (t if t > 0 else None)
     best_mt, best_rl = -1.0, None
     try:
         if is_safe_dir(DATA_DIR):
@@ -312,13 +327,13 @@ def _last_known_rate_limits(hist):
                     best_mt, best_rl = mt, rl
     except OSError:
         pass
-    return best_rl
+    return best_rl, (best_mt if best_rl is not None else None)
 
 
 # ---------------------------------------------------------------------------
 # Layout assembly — single line (CC notifications share the row on the right)
 # ---------------------------------------------------------------------------
-def build_line(data, cols, brn=None, fable=None):
+def build_line(data, cols, brn=None, fable=None, rl_age=None):
     """Build single status line. Drops the lowest-priority segment when too wide.
 
     Position and drop priority are separate: FBL sits between 5HL and 7DL, but
@@ -334,7 +349,7 @@ def build_line(data, cols, brn=None, fable=None):
         (0, seg_model(data)),
         (1, seg_ctx(data)),
         (5, seg_cache(data)),
-        (2, seg_5hl(data)),
+        (2, seg_5hl(data, rl_age)),
         (4, seg_fable(fable)),
         (3, seg_7dl(data)),
         (6, seg_cost(data)),
@@ -535,15 +550,16 @@ def main():
     # the last known value (the dashboard does the same) so the 5HL/7DL segments
     # don't blink out between updates. Display-only — the snapshot/history written
     # below keep just what CC actually sent (no synthetic rate_limits leak into IPC).
-    display = data
+    display, rl_age = data, None
     if not as_dict(data.get("rate_limits")):
-        rl = _last_known_rate_limits(hist)
+        rl, seen_at = _last_known_rate_limits_at(hist)
         if rl:
             display = {**data, "rate_limits": rl}
+            rl_age = max(0.0, time.time() - seen_at) if seen_at is not None else None
 
     fable = read_fable_weekly()
     cols = _get_terminal_width(fallback=120)
-    line = build_line(display, cols, brn=brn, fable=fable)
+    line = build_line(display, cols, brn=brn, fable=fable, rl_age=rl_age)
     if line:
         # Claude Code reads this line from the statusline subprocess's stdout.
         # If it closed the pipe early (e.g. the event was superseded), print()

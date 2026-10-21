@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.17.0 · Target reader: new contributor who just cloned the repo.
+> v1.17.1 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).

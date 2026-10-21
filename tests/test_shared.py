@@ -1186,14 +1186,25 @@ class TestFableDisplayState(unittest.TestCase):
         now, e = self._entry(30)
         self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "fresh")
 
-    def test_stale_after_two_ttl(self):
-        now, e = self._entry(601)
+    def test_stale_after_stale_dim_threshold(self):
+        # Default TTL: 2×TTL (600 s) is below STALE_DIM_SEC, so 30 min governs.
+        self.assertEqual(shared.STALE_DIM_SEC, 1800)
+        now, e = self._entry(1800)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "fresh")
+        now, e = self._entry(1801)
         self.assertEqual(shared.fable_display_state(e, now=now, ttl=300), "stale")
 
+    def test_long_ttl_keeps_two_ttl_threshold(self):
+        # A refresh that is not due yet must not dim: 2×TTL wins above 30 min.
+        now, e = self._entry(7000)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=3600), "fresh")
+        now, e = self._entry(7201)
+        self.assertEqual(shared.fable_display_state(e, now=now, ttl=3600), "stale")
+
     def test_read_only_uses_default_ttl_for_staleness(self):
-        now, e = self._entry(500)
+        now, e = self._entry(1800)
         self.assertEqual(shared.fable_display_state(e, now=now, ttl=0), "fresh")
-        now, e = self._entry(700)
+        now, e = self._entry(1801)
         self.assertEqual(shared.fable_display_state(e, now=now, ttl=0), "stale")
 
     def test_hidden_after_a_day(self):

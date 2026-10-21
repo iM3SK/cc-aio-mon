@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.17.1 — 2026-10-21
+
+**Fixes — one stale rule for 5HL and FBL:**
+- **FBL no longer greys out after 10 minutes.** The statusline is redrawn only
+  on Claude Code events, so after any pause the first redraw showed FBL dim
+  even though the refresher had already fetched a fresh value; the colour
+  flipped back only on the next event. FBL now dims only once its value is
+  older than `shared.STALE_DIM_SEC` (30 minutes), or twice the refresh interval
+  when that is longer, so a refresh that is not due yet never dims.
+- **5HL follows the same rule.** When the current event carries no rate limits
+  and the last known value is older than 30 minutes, 5HL renders dim with `~`
+  instead of its threshold colour. Its age comes from the history row's `t` or
+  the snapshot's mtime (`statusline._last_known_rate_limits_at()`); an unknown
+  age never dims. 7DL is unchanged.
+- Display only: snapshots and history keep exactly what Claude Code sent.
+
+**Tests:** 878 passing (+9).
+
 ## v1.17.0 — 2026-10-09
 
 **Features — prompt-cache countdown (CCH):**

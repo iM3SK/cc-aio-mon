@@ -58,7 +58,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -108,6 +108,10 @@ def _env_pct(name, default):
 # Percentage thresholds shared by statusline + monitor (SSoT, previously parsed twice).
 WARN_PCT = _env_pct("CLAUDE_STATUS_WARN", 50.0)
 CRIT_PCT = _env_pct("CLAUDE_STATUS_CRIT", 80.0)
+
+# Statusline 5HL/FBL: a value older than this renders dim with `~` instead of its
+# threshold color, so an old number never passes for a live one (one rule for both).
+STALE_DIM_SEC = 30 * 60
 
 # Python files that ship with the app — used by syntax-check paths in update flow
 # (monitor.py:_apply_update_worker + update.py:apply_update). Must stay in sync.
@@ -829,8 +833,9 @@ def read_fable_weekly(path=None, now=None) -> Optional[dict]:
 def fable_display_state(entry, now=None, ttl=None) -> str:
     """'hidden' | 'fresh' | 'stale' — one rule for statusline and dashboard.
     Hidden when absent, older than FABLE_MAX_AGE, or past its reset (the cached
-    percentage belongs to a window that no longer exists). Stale past 2×TTL
-    (read-only mode judges staleness against the default TTL)."""
+    percentage belongs to a window that no longer exists). Stale past
+    STALE_DIM_SEC, or past 2×TTL when that is longer (a refresh not due yet
+    never dims; read-only mode judges against the default TTL)."""
     if not isinstance(entry, dict) or not entry:
         return "hidden"
     t = time.time() if now is None else now
@@ -839,7 +844,8 @@ def fable_display_state(entry, now=None, ttl=None) -> str:
     if age > FABLE_MAX_AGE or (resets > 0 and resets <= t):
         return "hidden"
     ttl = FABLE_REFRESH_SEC if ttl is None else ttl
-    return "stale" if age > 2 * (ttl if ttl > 0 else FABLE_REFRESH_DEFAULT) else "fresh"
+    limit = max(STALE_DIM_SEC, 2 * (ttl if ttl > 0 else FABLE_REFRESH_DEFAULT))
+    return "stale" if age > limit else "fresh"
 
 
 def calc_rates(hist: List[dict]) -> Tuple[Optional[float], Optional[float]]:
