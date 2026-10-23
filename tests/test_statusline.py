@@ -32,6 +32,7 @@ from shared import (
     C_ORN,
     C_CYN,
     C_DIM,
+    STALE_DIM_SEC,
 )
 
 from statusline import (
@@ -46,6 +47,7 @@ from statusline import (
     build_line,
     cpc_base,
     _last_known_rate_limits,
+    _last_known_rate_limits_at,
     seg_fable,
     seg_cache,
 )
@@ -198,6 +200,25 @@ class TestSeg5hl(unittest.TestCase):
         self.assertIn("\u2192", plain)
         self.assertIn("2h", plain)
         self.assertEqual(vl, _vlen(text))
+
+    def test_stale_fallback_is_dim_with_tilde(self):
+        # A last-known value older than STALE_DIM_SEC follows the FBL rule.
+        d = _full_data()
+        d["rate_limits"]["five_hour"]["used_percentage"] = 20
+        text, vl = seg_5hl(d, age_s=STALE_DIM_SEC + 1)
+        plain = _ANSI_RE.sub("", text)
+        self.assertIn("~20%", plain)
+        self.assertTrue(text.startswith(C_DIM))
+        self.assertNotIn(C_YEL, text)
+        self.assertEqual(vl, _vlen(text))
+
+    def test_recent_fallback_keeps_color(self):
+        d = _full_data()
+        d["rate_limits"]["five_hour"]["used_percentage"] = 20
+        for age in (None, 0, STALE_DIM_SEC):
+            text, _ = seg_5hl(d, age_s=age)
+            self.assertTrue(text.startswith(C_YEL), age)
+            self.assertNotIn("~", _ANSI_RE.sub("", text))
 
     def test_absent_resets_at_no_arrow(self):
         d = _full_data()
@@ -438,6 +459,70 @@ class TestLastKnownRateLimits(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
                 self.assertIsNone(_last_known_rate_limits(hist))
+
+    def test_at_returns_history_row_time(self):
+        import tempfile, pathlib, statusline
+        t = time.time() - 10
+        hist = [{"rate_limits": {"five_hour": {"used_percentage": 9}}, "t": t}]
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
+                self.assertEqual(
+                    _last_known_rate_limits_at(hist),
+                    ({"five_hour": {"used_percentage": 9}}, t),
+                )
+
+    def test_at_unknown_time_is_none_not_epoch(self):
+        # A row without a usable "t" must not read as 50 years old.
+        for row in ({}, {"t": "x"}, {"t": -1}):
+            hist = [{"rate_limits": {"five_hour": {"used_percentage": 9}}, **row}]
+            self.assertIsNone(_last_known_rate_limits_at(hist)[1], row)
+
+    def test_at_snapshot_uses_file_mtime(self):
+        import json, tempfile, pathlib, statusline
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            f = d / "snaptest.json"
+            f.write_text(json.dumps({"rate_limits": {"seven_day": {"used_percentage": 5}}}),
+                         encoding="utf-8")
+            os.utime(f, (1_700_000_100, 1_700_000_100))
+            with patch.object(statusline, "DATA_DIR", d):
+                rl, t = _last_known_rate_limits_at([])
+        self.assertEqual(rl, {"seven_day": {"used_percentage": 5}})
+        self.assertEqual(t, 1_700_000_100)
+
+    def _hist_and_snapshot(self, hist_age, snap_age):
+        import json, tempfile, pathlib, statusline
+        now = time.time()
+        hist = [{"rate_limits": {"five_hour": {"used_percentage": 3}}, "t": now - hist_age}]
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        d = pathlib.Path(td.name)
+        f = d / "othersession.json"
+        f.write_text(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 9}}}),
+                     encoding="utf-8")
+        os.utime(f, (now - snap_age, now - snap_age))
+        with patch.object(statusline, "DATA_DIR", d):
+            return _last_known_rate_limits_at(hist)
+
+    def test_at_stale_own_history_yields_to_fresher_snapshot(self):
+        # Limits are per account: an idle session must not dim 5HL while another
+        # session already wrote a fresh value.
+        rl, _ = self._hist_and_snapshot(hist_age=STALE_DIM_SEC + 600, snap_age=60)
+        self.assertEqual(rl["five_hour"]["used_percentage"], 9)
+
+    def test_at_fresh_own_history_wins_without_scan(self):
+        rl, _ = self._hist_and_snapshot(hist_age=60, snap_age=5)
+        self.assertEqual(rl["five_hour"]["used_percentage"], 3)
+
+    def test_at_stale_own_history_kept_when_snapshots_older(self):
+        rl, _ = self._hist_and_snapshot(hist_age=STALE_DIM_SEC + 600, snap_age=STALE_DIM_SEC + 900)
+        self.assertEqual(rl["five_hour"]["used_percentage"], 3)
+
+    def test_at_nothing_available(self):
+        import tempfile, pathlib, statusline
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
+                self.assertEqual(_last_known_rate_limits_at([]), (None, None))
 
 
 # ---------------------------------------------------------------------------
@@ -928,12 +1013,18 @@ class TestSegFable(unittest.TestCase):
         self.assertIsNone(seg_fable(_fbl(resets_in=-5), now=_NOW, ttl=300))
 
     def test_stale_is_dim_with_tilde(self):
-        text, vl = seg_fable(_fbl(age_s=1200), now=_NOW, ttl=300)
+        text, vl = seg_fable(_fbl(age_s=STALE_DIM_SEC + 1), now=_NOW, ttl=300)
         plain = _ANSI_RE.sub("", text)
         self.assertIn("~7%", plain)
         self.assertTrue(text.startswith(C_DIM))
         self.assertNotIn(C_YEL, text)
         self.assertEqual(vl, _vlen(text))
+
+    def test_keeps_color_until_stale_dim_threshold(self):
+        # Same threshold as 5HL: 20 min old is still a live-looking number.
+        text, _ = seg_fable(_fbl(age_s=1200), now=_NOW, ttl=300)
+        self.assertTrue(text.startswith(C_YEL))
+        self.assertNotIn("~", _ANSI_RE.sub("", text))
 
     def test_threshold_colors(self):
         text, _ = seg_fable(_fbl(pct=85), now=_NOW, ttl=300)
@@ -954,6 +1045,14 @@ class TestBuildLineFable(unittest.TestCase):
     def test_absent_bucket_leaves_line_unchanged(self):
         with patch("statusline.time.time", return_value=_NOW):
             self.assertEqual(build_line(_full_data(), 300, fable=None), build_line(_full_data(), 300))
+
+    def test_rl_age_dims_5hl_only(self):
+        # rl_age reaches 5HL; 7DL keeps its color (only 5HL and FBL follow the rule).
+        with patch("statusline.time.time", return_value=_NOW):
+            line = build_line(_full_data(), 300, rl_age=STALE_DIM_SEC + 1)
+        plain = _ANSI_RE.sub("", line)
+        self.assertRegex(plain, r"5HL ~\d+%")
+        self.assertNotRegex(plain, r"7DL ~")
 
     def test_7dl_survives_narrowing_before_fable(self):
         full = self._plain(300, _fbl())
