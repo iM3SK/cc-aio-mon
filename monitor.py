@@ -1710,12 +1710,13 @@ _MODELS = {
     # Project Glasswing only — same tier as Fable 5. Rare in transcripts.
     "claude-mythos-5": {"name": "Mythos 5", "code": ("MY", "5"),
                         "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
-    # Opus 5.5: $4 / $20, cache reads 0.05x ($0.20). Fast mode not priced yet
-    # (falls back to the standard rates below).
+    # Standard and fast-mode rates: https://platform.claude.com/docs/en/about-claude/pricing
     "claude-opus-5-5": {"name": "Opus 5.5", "code": ("OP", "5.5"),
-                        "pricing": {"input": 4.0,  "output": 20.0, "cache_read": 0.20, "cache_write": 5.00}},
+                        "pricing": {"input": 4.0,  "output": 20.0, "cache_read": 0.20, "cache_write": 5.00},
+                        "pricing_fast": {"input": 8.0, "output": 40.0, "cache_read": 0.40, "cache_write": 10.00}},
     "claude-opus-5": {"name": "Opus 5", "code": ("OP", "5"),
-                      "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+                      "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
+                      "pricing_fast": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     "claude-opus-4-8": {"name": "Opus 4.8", "code": ("OP", "4.8"),
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
                         # fast-mode premium (Anthropic pricing page, 2026-06): Opus 4.8 is $10/$50,
@@ -1732,7 +1733,7 @@ _MODELS = {
     "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"),
                         "pricing": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}},
     "claude-sonnet-5-5": {"name": "Sonnet 5.5", "code": ("SO", "5.5"),
-                          "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.20, "cache_write": 2.50}},
+                          "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.10, "cache_write": 2.50}},
     "claude-sonnet-4-6": {"name": "Sonnet 4.6", "code": ("SO", "4.6"),
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
     "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"),

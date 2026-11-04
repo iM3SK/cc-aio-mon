@@ -3008,8 +3008,8 @@ class TestGetPricing(unittest.TestCase):
         self.assertEqual((p["input"], p["output"]), (10.0, 50.0))
 
     # --- 5.x generation must not fall back to _DEFAULT_PRICING (Sonnet tier) ---
-    def _rates(self, model_id):
-        p = _get_pricing(model_id)
+    def _rates(self, model_id, speed=None):
+        p = _get_pricing(model_id, speed)
         return (p["input"], p["output"], p["cache_read"], p["cache_write"])
 
     def test_opus_55(self):
@@ -3031,7 +3031,7 @@ class TestGetPricing(unittest.TestCase):
                          (10.0, 50.0, 0.25, 12.50))
 
     def test_sonnet_55(self):
-        self.assertEqual(self._rates("claude-sonnet-5-5"), (2.0, 10.0, 0.20, 2.50))
+        self.assertEqual(self._rates("claude-sonnet-5-5"), (2.0, 10.0, 0.10, 2.50))
 
     def test_5x_labels_and_codes(self):
         self.assertEqual(monitor._model_code("claude-opus-5-5"), ("OP", "5.5"))
@@ -3054,6 +3054,16 @@ class TestGetPricing(unittest.TestCase):
         self.assertEqual((p["input"], p["output"]), (5.0, 25.0))
 
     # --- Fast mode (speed="fast") selects premium rates where defined ---
+    def test_fast_opus_55(self):
+        for model_id in ("claude-opus-5-5", "claude-opus-5-5-20261001[1m]"):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(self._rates(model_id, "fast"), (8.0, 40.0, 0.40, 10.0))
+
+    def test_fast_opus_5(self):
+        for model_id in ("claude-opus-5", "claude-opus-5-20260801[1m]"):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(self._rates(model_id, "fast"), (10.0, 50.0, 1.0, 12.5))
+
     def test_fast_opus_48(self):
         # F-12 resolved (Anthropic pricing page, 2026-06): Opus 4.8 fast = $10/$50,
         # distinct from Opus 4.7/4.6 fast ($30/$150).
