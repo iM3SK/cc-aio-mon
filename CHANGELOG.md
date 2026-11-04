@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.17.2 — 2026-11-04
+
+**Fixes — pricing of the 5.x models:**
+- **Opus 5.5, Opus 5, Fable 5.1 and Sonnet 5.5 are priced at their own rates.**
+  They were missing from `monitor._MODELS`, so `_get_pricing()` fell back to
+  `_DEFAULT_PRICING` (Sonnet 4.x tier, $3 / $15) and the cost modal mis-stated
+  every session that ran on them (Opus 5.5 by input $3 instead of $4, cache read
+  $0.30 instead of $0.20). Rates per 1M tokens (input / output / cache read /
+  5-minute cache write): Opus 5.5 4 / 20 / 0.20 / 5.00, Opus 5 5 / 25 / 0.50 /
+  6.25, Fable 5.1 10 / 50 / 0.25 / 12.50, Sonnet 5.5 2 / 10 / 0.10 / 2.50.
+- Labels and token-stats codes were already right (`_MODEL_ID_RE`, v1.16.0);
+  the new tests pin them for these IDs.
+- **Fast-mode requests use premium rates.** Opus 5.5 uses 8 / 40 / 0.40 / 10.00
+  and Opus 5 uses 10 / 50 / 1.00 / 12.50 per 1M tokens (input / output /
+  cache read / 5-minute cache write), following [Anthropic's pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
+**Tests:** 890 passing (+9).
+
 ## v1.17.1 — 2026-10-21
 
 **Fixes — one stale rule for 5HL and FBL:**

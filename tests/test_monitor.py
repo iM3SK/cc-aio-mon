@@ -3007,6 +3007,38 @@ class TestGetPricing(unittest.TestCase):
         p = _get_pricing("claude-mythos-5")
         self.assertEqual((p["input"], p["output"]), (10.0, 50.0))
 
+    # --- 5.x generation must not fall back to _DEFAULT_PRICING (Sonnet tier) ---
+    def _rates(self, model_id, speed=None):
+        p = _get_pricing(model_id, speed)
+        return (p["input"], p["output"], p["cache_read"], p["cache_write"])
+
+    def test_opus_55(self):
+        # $4 / $20, cache read $0.20 (0.05x), 5m cache write 1.25x
+        self.assertEqual(self._rates("claude-opus-5-5"), (4.0, 20.0, 0.20, 5.00))
+
+    def test_opus_55_context_suffix(self):
+        self.assertEqual(self._rates("claude-opus-5-5[1m]"), (4.0, 20.0, 0.20, 5.00))
+
+    def test_opus_5(self):
+        self.assertEqual(self._rates("claude-opus-5"), (5.0, 25.0, 0.50, 6.25))
+
+    def test_fable_51(self):
+        # same per-token price as Fable 5, cache read $0.25 (0.025x)
+        self.assertEqual(self._rates("claude-fable-5-1"), (10.0, 50.0, 0.25, 12.50))
+
+    def test_fable_51_dated_suffix(self):
+        self.assertEqual(self._rates("claude-fable-5-1-20260901[1m]"),
+                         (10.0, 50.0, 0.25, 12.50))
+
+    def test_sonnet_55(self):
+        self.assertEqual(self._rates("claude-sonnet-5-5"), (2.0, 10.0, 0.10, 2.50))
+
+    def test_5x_labels_and_codes(self):
+        self.assertEqual(monitor._model_code("claude-opus-5-5"), ("OP", "5.5"))
+        self.assertEqual(monitor._model_label("claude-opus-5"), "Opus 5")
+        self.assertEqual(monitor._model_code("claude-fable-5-1"), ("FBL", "5.1"))
+        self.assertEqual(monitor._model_label("claude-sonnet-5-5"), "Sonnet 5.5")
+
     # --- Short-ID fallbacks must not fall back to _DEFAULT_PRICING (F-11) ---
     def test_short_id_haiku_has_real_pricing(self):
         p = _get_pricing("haiku")
@@ -3022,6 +3054,16 @@ class TestGetPricing(unittest.TestCase):
         self.assertEqual((p["input"], p["output"]), (5.0, 25.0))
 
     # --- Fast mode (speed="fast") selects premium rates where defined ---
+    def test_fast_opus_55(self):
+        for model_id in ("claude-opus-5-5", "claude-opus-5-5-20261001[1m]"):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(self._rates(model_id, "fast"), (8.0, 40.0, 0.40, 10.0))
+
+    def test_fast_opus_5(self):
+        for model_id in ("claude-opus-5", "claude-opus-5-20260801[1m]"):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(self._rates(model_id, "fast"), (10.0, 50.0, 1.0, 12.5))
+
     def test_fast_opus_48(self):
         # F-12 resolved (Anthropic pricing page, 2026-06): Opus 4.8 fast = $10/$50,
         # distinct from Opus 4.7/4.6 fast ($30/$150).
