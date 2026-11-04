@@ -10,10 +10,11 @@ permissions: read-all
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
+    # Preserve required-check names while pinning the Linux runner for Python 3.8.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-24.04, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.8", "3.10", "3.11", "3.12"]
         exclude:
           - os: windows-latest
