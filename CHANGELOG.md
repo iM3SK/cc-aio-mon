@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+**New — desktop app sessions:**
+- **Sessions from the Claude desktop app appear in the monitor.** The app runs
+  Claude Code without its terminal interface, so the statusline never runs for
+  them. `monitor.list_desktop_sessions()` finds transcript-only sessions in
+  `~/.claude/projects/<project>/<sid>.jsonl` touched in the last 48 hours, and
+  `monitor.load_desktop_state()` builds a snapshot-shaped dict from the
+  transcript, parsing only appended bytes on each poll.
+- The dashboard marks them `desktop app, estimated`. CST and BRN come from
+  per-model token prices with each request counted once (Claude Code repeats a
+  request's usage on every content-block record). CTX uses the last request's
+  input tokens; `CC_MON_DESKTOP_CTX` overrides the inferred window. APR and LNS
+  show `n/a`; 5HL / 7DL come only from a CLI session.
+
+**Changed — session picker:**
+- Two sections: **CLI SESSIONS** and **DESKTOP APP SESSIONS**, the latter with
+  an entrypoint tag per row (`desk` for the desktop app).
+- Cursor navigation replaces digit selection: arrows, `j` / `k`, Page keys,
+  `Home` / `End` and the mouse wheel move the cursor, `Enter` opens the session.
+  `1`–`9` no longer select sessions, and the 9-session cap and `+N more` line
+  are gone; the list scrolls to keep the cursor visible.
+- Legend: `[1-3] Token Stats Period`, `[enter] Open Session`, and a
+  `DESKTOP APP` section.
+
+**Tests:** 911 passing (+21).
+
 ## v1.17.2 — 2026-11-04
 
 **Fixes — pricing of the 5.x models:**

@@ -110,6 +110,15 @@ If you add a new env var, add it here in the same commit.
 - **Effect:** ceiling of the `CST` (session cost) bar. Raise for
   long-running API sessions.
 
+### `CC_MON_DESKTOP_CTX`
+
+- **Type:** integer (tokens)
+- **Default:** `0` — infer: 1 000 000 when the requested model carries `[1m]`
+  or the context already exceeds 200 000 tokens, otherwise 200 000
+- **Read by:** `monitor.py` (`_env_float` → `DESKTOP_CTX_SIZE`)
+- **Effect:** context-window size used for `CTX` of desktop app sessions,
+  which are read from the transcript and carry no window size.
+
 ---
 
 ## Threshold variables (legacy `CLAUDE_*` prefix)

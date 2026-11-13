@@ -20,7 +20,9 @@ TUI navigable while preserving the five-runtime-file stdlib layout:
     3.  ANSI / characters / format — colours, char_width, formatting helpers
     4.  Bars & warnings            — mkbar, collect_warnings
     5.  Cost aggregation & RLS     — cross-session cost, release check worker
-    6.  Layout & data loading      — sep, list_sessions, load_state/_history
+    6.  Layout & data loading      — sep, list_sessions, load_state/_history,
+                                     desktop app sessions (list_desktop_sessions,
+                                     load_desktop_state)
     7.  Spinners                   — session / RLS spinners
     8.  Render — main dashboard    — render_frame (+ _window_buf scroll engine)
     9.  Legend overlay             — render_legend
@@ -30,7 +32,7 @@ TUI navigable while preserving the five-runtime-file stdlib layout:
     13. Update modal               — render_update_modal + apply worker
     14. Token stats modal          — render_stats
     15. Agents modal               — render_agents + scan_subagents fan-out
-    16. Session picker             — render_picker (+ _picker_order SSoT)
+    16. Session picker             — render_picker (+ _picker_rows SSoT)
     17. Screen flush               — flush (synchronized-output frame writer)
     18. Main                       — event loop, key handling, lifecycle
 """
@@ -59,7 +61,7 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
                     SECONDS_1H, SECONDS_5H, SECONDS_1D, SECONDS_7D,
-                    HISTORY_RATE_SAMPLES,
+                    HISTORY_RATE_SAMPLES, MIN_EPOCH,
                     WARN_PCT, CRIT_PCT,
                     DATA_DIR, VERSION_RE, VERSION, SCHEMA_VERSION,
                     PY_FILES,  # noqa: F401 — pinned by TestPyFilesSingleSourceOfTruth (SSoT regression guard)
@@ -1218,6 +1220,388 @@ def load_history(sid, n=HISTORY_RATE_SAMPLES):
 
 
 # ---------------------------------------------------------------------------
+# Desktop app sessions — transcript-only sessions
+# ---------------------------------------------------------------------------
+# The Claude desktop app runs Claude Code headless (stream-json), so the
+# statusLine command never fires and no snapshot reaches DATA_DIR. The session
+# transcript (~/.claude/projects/<project>/<sid>.jsonl) is still written live.
+# The helpers below derive a snapshot-shaped dict from it, so render_frame can
+# draw the session. Values are estimates: cost from _MODELS pricing, context %
+# from the last request's input tokens. The transcript carries no API time, no
+# line counts and no rate limits.
+#
+# Claude Code writes one assistant record per content block and repeats the
+# request's usage on each of them, so usage is counted once per message.id.
+DESKTOP_SESSION_TTL = DEAD_SESSION_TTL  # list transcripts touched in the last 48 h
+DESKTOP_CTX_DEFAULT = 200_000
+DESKTOP_CTX_1M = 1_000_000
+# Context-window size for desktop sessions; 0 = infer (1M when the requested
+# model carries [1m] or the context already exceeds 200k, else 200k).
+DESKTOP_CTX_SIZE = int(max(0.0, _env_float("CC_MON_DESKTOP_CTX", 0.0)))
+_TRANSCRIPT_HEAD_BYTES = 64 * 1024
+_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+_DESKTOP_SCAN_CAP = 512               # max project transcripts examined per scan
+_ENTRYPOINT_TAGS = {"claude-desktop": "desk"}
+_ENTRYPOINT_TAG_MAX = 8
+_desktop_meta_cache = OrderedDict()   # {path_str: (mtime, size, meta)}
+_DESKTOP_META_CACHE_MAX = 256
+_desktop_sessions_cache = {"t": 0.0, "key": None, "sessions": None}
+_desktop_state = OrderedDict()        # {sid: incremental parser state}
+_DESKTOP_STATE_MAX = 8
+
+
+def _origin_tag(entrypoint):
+    """Short picker tag for the transcript's entrypoint ('claude-desktop' → 'desk')."""
+    if not isinstance(entrypoint, str) or not entrypoint.strip():
+        return "?"
+    ep = entrypoint.strip()
+    return _ENTRYPOINT_TAGS.get(ep) or _sanitize(ep)[:_ENTRYPOINT_TAG_MAX] or "?"
+
+
+def _open_checked(path, st):
+    """Open `path` for binary reading only if it is still the file `st`
+    described (same inode/device — TOCTOU guard shared with _scan_ai_title).
+    Returns an open file object or None."""
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return None
+    try:
+        fst = os.fstat(fh.fileno())
+    except OSError:
+        fh.close()
+        return None
+    if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+        fh.close()
+        return None
+    return fh
+
+
+def _complete_lines(raw, *, drop_first=False):
+    """Decode a byte window into whole JSONL lines. A window cut mid-file drops
+    its partial first line (drop_first) and always its partial last line."""
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if drop_first and lines:
+        lines = lines[1:]
+    if lines and not text.endswith("\n"):
+        lines = lines[:-1]
+    return lines
+
+
+def _transcript_meta(path, st):
+    """Picker metadata from the transcript head and tail: entrypoint, title,
+    cwd and the most recent assistant model. Cached per (mtime, size)."""
+    key = str(path)
+    cached = _desktop_meta_cache.get(key)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        _desktop_meta_cache.move_to_end(key)
+        return cached[2]
+    meta = {"entrypoint": "", "title": "", "cwd": "", "model": ""}
+    fh = _open_checked(path, st)
+    if fh is None:
+        return None
+    try:
+        with fh:
+            head = fh.read(_TRANSCRIPT_HEAD_BYTES)
+            tail_start = max(len(head), st.st_size - _TRANSCRIPT_TAIL_BYTES)
+            tail = b""
+            if tail_start < st.st_size:
+                fh.seek(tail_start)
+                tail = fh.read(_TRANSCRIPT_TAIL_BYTES)
+    except OSError:
+        return None
+    if tail_start == len(head):
+        lines = _complete_lines(head + tail)  # head and tail are contiguous
+    else:
+        lines = _complete_lines(head) + _complete_lines(tail, drop_first=True)
+    ai_title = ""
+    for line in lines:
+        if not line.startswith("{"):
+            continue
+        rec = json_object(line)
+        if rec is None:
+            continue
+        rtype = rec.get("type")
+        if not meta["entrypoint"] and isinstance(rec.get("entrypoint"), str):
+            meta["entrypoint"] = rec["entrypoint"]
+        if isinstance(rec.get("cwd"), str) and rec["cwd"]:
+            meta["cwd"] = _sanitize(rec["cwd"])
+        if rtype == "custom-title" and isinstance(rec.get("customTitle"), str):
+            meta["title"] = _sanitize(rec["customTitle"].strip())
+        elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str):
+            ai_title = _sanitize(rec["aiTitle"].strip())
+        elif rtype == "assistant" and not rec.get("isSidechain"):
+            mid = as_dict(rec.get("message")).get("model")
+            if isinstance(mid, str) and mid and not mid.startswith("<"):
+                meta["model"] = mid
+    meta["title"] = meta["title"] or ai_title
+    _desktop_meta_cache[key] = (st.st_mtime, st.st_size, meta)
+    while len(_desktop_meta_cache) > _DESKTOP_META_CACHE_MAX:
+        _desktop_meta_cache.popitem(last=False)
+    return meta
+
+
+def list_desktop_sessions(exclude=()):
+    """Transcript-only sessions touched within DESKTOP_SESSION_TTL.
+
+    Scans ~/.claude/projects/<project>/<sid>.jsonl (subagent transcripts live
+    one level deeper and are not sessions). Session IDs in `exclude` — those
+    that already have a statusline snapshot — are skipped, so a CLI session
+    appears once, in the CLI section. Each entry has the list_sessions() keys
+    plus source="desktop", origin (entrypoint tag) and path. Newest first."""
+    root = _safe_claude_projects_root()
+    if root is None:
+        return []
+    exclude = set(exclude)
+    now = time.time()
+    found = {}
+    seen = 0
+    try:
+        projects = list(root.iterdir())
+    except OSError:
+        return []
+    for proj in projects:
+        if seen >= _DESKTOP_SCAN_CAP:
+            break
+        try:
+            pst = proj.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+            continue
+        try:
+            files = list(proj.glob("*.jsonl"))
+        except OSError:
+            continue
+        for jl in files:
+            seen += 1
+            if seen > _DESKTOP_SCAN_CAP:
+                break
+            sid = jl.stem
+            if sid in exclude or sid in RESERVED_SIDS or not _SID_RE.match(sid):
+                continue
+            try:
+                st = jl.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                continue
+            age = now - st.st_mtime
+            if age > DESKTOP_SESSION_TTL or st.st_size > TRANSCRIPT_MAX_BYTES:
+                continue
+            prev = found.get(sid)
+            if prev and prev["mtime"] >= st.st_mtime:
+                continue
+            path = _safe_transcript_path(str(jl))
+            if path is None:
+                continue
+            meta = _transcript_meta(path, st)
+            if not meta or not meta["model"]:
+                continue  # no assistant reply yet — nothing to show
+            found[sid] = {
+                "id": sid, "mtime": st.st_mtime, "age": age,
+                "stale": age > STALE_THRESHOLD,
+                "model": _sanitize(_model_label(meta["model"])),
+                "session_name": meta["title"],
+                "ai_title": "",
+                "cwd": meta["cwd"],
+                "source": "desktop",
+                "origin": _origin_tag(meta["entrypoint"]),
+                "path": str(path),
+            }
+    sessions = list(found.values())
+    sessions.sort(key=lambda s: s["mtime"], reverse=True)
+    return sessions
+
+
+def cached_desktop_sessions(exclude=(), ttl=2.0):
+    """list_desktop_sessions() behind a short TTL for the 20 Hz picker loop."""
+    now = time.monotonic()
+    key = frozenset(exclude)
+    c = _desktop_sessions_cache
+    if c["sessions"] is not None and c["key"] == key and now - c["t"] < ttl:
+        return c["sessions"]
+    sessions = list_desktop_sessions(exclude)
+    c.update({"t": now, "key": key, "sessions": sessions})
+    return sessions
+
+
+def _new_desktop_state(path, st):
+    return {
+        "path": str(path), "ident": (st.st_ino, st.st_dev), "offset": 0,
+        "msgs": OrderedDict(), "first_t": 0.0, "last_t": 0.0,
+        "title": "", "ai_title": "", "cwd": "", "entrypoint": "",
+        "requested": "", "built_at": -1, "built": None,
+    }
+
+
+def _ingest_desktop_record(state, rec):
+    ts = _parse_ts(rec.get("timestamp"))
+    if ts >= MIN_EPOCH:
+        if not state["first_t"] or ts < state["first_t"]:
+            state["first_t"] = ts
+        state["last_t"] = max(state["last_t"], ts)
+    rtype = rec.get("type")
+    if not state["entrypoint"] and isinstance(rec.get("entrypoint"), str):
+        state["entrypoint"] = rec["entrypoint"]
+    if isinstance(rec.get("cwd"), str) and rec["cwd"]:
+        state["cwd"] = rec["cwd"]
+    if isinstance(rec.get("requestedModel"), str):
+        state["requested"] = rec["requestedModel"]
+    if rtype == "custom-title" and isinstance(rec.get("customTitle"), str):
+        state["title"] = rec["customTitle"].strip()
+    elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str):
+        state["ai_title"] = rec["aiTitle"].strip()
+    elif rtype == "assistant" and not rec.get("isSidechain"):
+        msg = as_dict(rec.get("message"))
+        model = msg.get("model")
+        if not isinstance(model, str) or not model or model.startswith("<"):
+            return  # synthetic / local placeholder message — no API usage
+        u = as_dict(msg.get("usage"))
+        mid = msg.get("id") or rec.get("requestId") or rec.get("uuid")
+        if not isinstance(mid, str) or not mid:
+            return
+        prev = state["msgs"].get(mid)
+        state["msgs"][mid] = {
+            "t": prev["t"] if prev else (ts if ts >= MIN_EPOCH else 0.0),
+            "model": model,
+            "speed": u.get("speed") if isinstance(u.get("speed"), str) else None,
+            "in": _num(u.get("input_tokens")),
+            "out": _num(u.get("output_tokens")),
+            "cr": _num(u.get("cache_read_input_tokens")),
+            "cw": _num(u.get("cache_creation_input_tokens")),
+        }
+
+
+def _desktop_ctx_size(state, peak_tokens):
+    if DESKTOP_CTX_SIZE > 0:
+        return DESKTOP_CTX_SIZE
+    if "[1m]" in state["requested"].lower() or peak_tokens > DESKTOP_CTX_DEFAULT:
+        return DESKTOP_CTX_1M
+    return DESKTOP_CTX_DEFAULT
+
+
+def _build_desktop_snapshot(sid, state, mtime):
+    """Snapshot-shaped dict + rate history from the parsed transcript state."""
+    msgs = list(state["msgs"].values())
+    if not msgs:
+        return None
+    peak = max(m["in"] + m["cr"] + m["cw"] for m in msgs)
+    window = _desktop_ctx_size(state, peak)
+    cost = 0.0
+    tot_in = tot_out = 0.0
+    hist = []
+    for m in msgs:
+        p = _get_pricing(m["model"], m["speed"])
+        cost += (m["in"] * p["input"] + m["out"] * p["output"]
+                 + m["cr"] * p["cache_read"] + m["cw"] * p["cache_write"]) / 1_000_000
+        tot_in += m["in"] + m["cr"] + m["cw"]
+        tot_out += m["out"]
+        if m["t"] >= MIN_EPOCH:
+            pct = (m["in"] + m["cr"] + m["cw"]) / window * 100
+            hist.append({"t": m["t"], "cost": {"total_cost_usd": cost},
+                         "context_window": {"used_percentage": pct}})
+    last = msgs[-1]
+    ctx_tokens = last["in"] + last["cr"] + last["cw"]
+    dur_ms = max(0.0, (state["last_t"] - state["first_t"]) * 1000) if state["first_t"] else 0.0
+    data = {
+        "session_id": sid,
+        "transcript_path": state["path"],
+        "cwd": _sanitize(state["cwd"]),
+        "session_name": _sanitize(state["title"] or state["ai_title"]),
+        "model": {"id": _sanitize(last["model"]),
+                  "display_name": _sanitize(_model_label(last["model"]))},
+        "context_window": {
+            "context_window_size": window,
+            "used_percentage": min(100.0, ctx_tokens / window * 100),
+            "total_input_tokens": int(tot_in),
+            "total_output_tokens": int(tot_out),
+            "current_usage": {
+                "input_tokens": int(last["in"]),
+                "output_tokens": int(last["out"]),
+                "cache_read_input_tokens": int(last["cr"]),
+                "cache_creation_input_tokens": int(last["cw"]),
+            },
+        },
+        "cost": {"total_cost_usd": cost, "total_duration_ms": dur_ms},
+        "_source": "desktop",
+        "_origin": _origin_tag(state["entrypoint"]),
+        "_mtime": mtime,
+    }
+    return data, hist[-HISTORY_RATE_SAMPLES:]
+
+
+def load_desktop_state(sid, path):
+    """Return (snapshot, history) for a desktop session, or None.
+
+    Parses the transcript incrementally: only bytes appended since the last
+    call are read, so polling a multi-megabyte transcript stays cheap. A
+    replaced or truncated file restarts the parse."""
+    if not isinstance(sid, str) or not _SID_RE.match(sid):
+        return None
+    safe = _safe_transcript_path(path)
+    if safe is None:
+        return None
+    try:
+        st = safe.stat()
+    except OSError:
+        return None
+    if st.st_size > TRANSCRIPT_MAX_BYTES:
+        return None
+    state = _desktop_state.get(sid)
+    if (state is None or state["path"] != str(safe)
+            or state["ident"] != (st.st_ino, st.st_dev) or st.st_size < state["offset"]):
+        state = _new_desktop_state(safe, st)
+    _desktop_state[sid] = state
+    _desktop_state.move_to_end(sid)
+    while len(_desktop_state) > _DESKTOP_STATE_MAX:
+        _desktop_state.popitem(last=False)
+    if st.st_size > state["offset"]:
+        fh = _open_checked(safe, st)
+        if fh is None:
+            return None
+        try:
+            with fh:
+                fh.seek(state["offset"])
+                raw = fh.read(st.st_size - state["offset"])
+        except OSError:
+            return None
+        end = raw.rfind(b"\n")
+        if end >= 0:
+            chunk = raw[:end + 1]
+            state["offset"] += len(chunk)
+            for line in chunk.decode("utf-8", errors="replace").split("\n"):
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                rec = json_object(line)
+                if rec is not None:
+                    _ingest_desktop_record(state, rec)
+    if state["built_at"] != state["offset"] or state["built"] is None:
+        state["built"] = _build_desktop_snapshot(sid, state, st.st_mtime)
+        state["built_at"] = state["offset"]
+    elif state["built"] is not None:
+        state["built"][0]["_mtime"] = st.st_mtime
+    return state["built"]
+
+
+def _snapshot_mtime(data):
+    """Last-update time of the session behind `data`: the transcript mtime for
+    desktop sessions, the statusline snapshot mtime otherwise. None if unknown."""
+    if data.get("_source") == "desktop":
+        mt = data.get("_mtime")
+        return float(mt) if isinstance(mt, (int, float)) and not isinstance(mt, bool) else None
+    sid = str(data.get("session_id") or "default")
+    if not _SID_RE.match(sid):
+        return None
+    try:
+        return (DATA_DIR / f"{sid}.json").stat().st_mtime
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Spinners
 # ---------------------------------------------------------------------------
 # Session spinner — braille dots, 10 frames, 80ms
@@ -1432,19 +1816,19 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     buf.append(f"{BG_BAR}{hp_text}{' ' * hp_pad}{R}")
 
     # ── Session status line (always visible) ────────────────
+    # Desktop app sessions are read from the transcript: tag them so every
+    # number below is understood as an estimate.
+    is_desktop = data.get("_source") == "desktop"
+    src_tag = f"  {C_DIM}desktop app, estimated{R}" if is_desktop else ""
+    upd_mt = _snapshot_mtime(data)
     if stale:
         _stale_age = ""
-        _sid_safe = str(data.get("session_id") or "default")
-        if _SID_RE.match(_sid_safe):
-            try:
-                _mt = (DATA_DIR / f"{_sid_safe}.json").stat().st_mtime
-                _idle = int(time.time() - _mt)
-                _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
-            except OSError:
-                pass
-        buf.append(f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
+        if upd_mt is not None:
+            _idle = int(time.time() - upd_mt)
+            _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
+        buf.append(f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  {c(C_FG)}{session_label}{R}{src_tag}")
     else:
-        buf.append(f"{C_GRN}{B}{spin_session()} Session Active{R} {C_FG}{session_label}{R}")
+        buf.append(f"{C_GRN}{B}{spin_session()} Session Active{R} {C_FG}{session_label}{R}{src_tag}")
 
     buf.append(sep(SW))
 
@@ -1462,7 +1846,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     cwt = _num(usage.get("cache_creation_input_tokens", 0))
 
     # ── APR — API Ratio ──
-    if dur > 0:
+    if is_desktop:
+        # The transcript records no API time, so the ratio is unknown.
+        buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"    {C_DIM}DUR:{R} {c(C_WHT)}{f_dur(dur) if dur > 0 else '--'}{R} {C_DIM}API: n/a{R}")
+    elif dur > 0:
         apr_pct = min(100.0, round(api_dur / dur * 100, 1))
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
         buf.append(f"    {C_DIM}DUR:{R} {c(C_WHT)}{f_dur(dur)}{R} {C_DIM}API:{R} {c(C_GRN)}{f_dur(api_dur)}{R}")
@@ -1531,7 +1919,12 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             _render_rate_limit(as_dict(src.get(key)), label, window, fable_tag if key == "fable" else "")
             for key, label, window, _legend in _RL_ROWS
         ]
-        if not any(shown):
+        if not any(shown) and is_desktop:
+            # Limits arrive only through the statusline; a CLI session (any
+            # one — they are per account) supplies them via
+            # cached_freshest_rate_limits.
+            buf.append(f"{C_DIM}Rate limits: n/a, the desktop app does not report them{R}")
+        elif not any(shown):
             buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
@@ -1542,13 +1935,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     brn_val = f"{cpm:.4f} $/min" if cpm and cpm > 0.0001 else "collecting..."
     ctr_val = f"{xpm:.2f} %/min" if xpm and xpm > 0.001 else "--"
     now = datetime.now().strftime("%H:%M:%S")
-    if _SID_RE.match(sid_str):
-        try:
-            mt = (DATA_DIR / f"{sid_str}.json").stat().st_mtime
-            age = int(time.time() - mt)
-            age_s = f"{age}s" if age < 120 else f"{age // 60}m"
-        except OSError:
-            age_s = "?"
+    if upd_mt is not None:
+        age = int(time.time() - upd_mt)
+        age_s = f"{age}s" if age < 120 else f"{age // 60}m"
     else:
         age_s = "?"
     # ── BRN — burn rate bar (scales to BRN_MAX $/min) ──────
@@ -1563,7 +1952,8 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     cst_pct = min(100, usd / CST_MAX * 100) if usd > 0 else 0
     buf.append(f"{c(C_ORN)}{B}CST{R} {mkbar(cst_pct, c(C_ORN))}")
     reported_cost = f_cost_value(as_dict(data.get("cost")).get("total_cost_usd"))
-    buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{reported_cost}{R}")
+    est_tag = f" {C_DIM}est.{R}" if is_desktop else ""
+    buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{reported_cost}{R}{est_tag}")
     # ── Cross-session cost (TDY / WEK) ─────────────────────
     tdy, wek = cached_cross_session_costs()
     tdy_s = f_cost(tdy) if tdy > 0 else "--"
@@ -1626,9 +2016,10 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}1-3{R}{C_DIM}]{R} {C_DIM}Token Stats Period{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal{R} {C_DIM}PgUp/Dn Home/End{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal / move picker{R} {C_DIM}PgUp/Dn Home/End{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}enter{R}{C_DIM}]{R} {C_DIM}Open Session (picker){R}")
     # ── Dashboard metrics ──
     buf.append(sep(SW))
     dp = max(0, SW - 9)  # "DASHBOARD" = 9 chars
@@ -1651,6 +2042,16 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}LNS{R} {C_DIM}Lines Changed{R} {C_GRN}+{R}{C_DIM}added{R} {C_RED}-{R}{C_DIM}removed{R}")
     buf.append(f"{C_WHT}NOW{R} {C_DIM}Current Time{R} {C_WHT}UPD{R} {C_DIM}Last Update{R}")
     buf.append(f"{C_WHT}RLS{R} {C_DIM}Release Status{R}")
+    # ── Desktop app sessions ──
+    buf.append(sep(SW))
+    dk = max(0, SW - 11)  # "DESKTOP APP" = 11 chars
+    buf.append(f"{BG_BAR}{C_WHT}{B}DESKTOP APP{R}{BG_BAR}{' ' * dk}{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}Read from the session transcript; marked {R}{C_WHT}desktop app, estimated{R}")
+    buf.append(f"{C_ORN}CST{R} {C_DIM}Estimated from token prices{R} {C_CYN}CTX{R} {C_DIM}From the last request{R}")
+    buf.append(f"{C_DIM} APR and LNS: n/a, not in the transcript{R}")
+    buf.append(f"{C_DIM} 5HL / 7DL: shown only while a CLI session reports them{R}")
+    buf.append(f"{C_DIM} desk  Desktop app; other tags name the Claude Code entrypoint{R}")
     # ── Token Stats ──
     buf.append(sep(SW))
     tp = max(0, SW - 11)
@@ -3313,48 +3714,138 @@ def render_agents(data, cols, rows, active_only=False):
 # ---------------------------------------------------------------------------
 # Session picker
 # ---------------------------------------------------------------------------
+_picker_scroll = 0  # first visible body line of the picker (kept around the cursor)
+
+
 def _picker_order(sessions):
-    """Single source of truth for picker ordering: active sessions first, then
-    stale, capped at 9 (the keyboard 1-9 limit). render_picker and main()'s
-    digit-selection MUST share this so position N on screen maps to the Nth
-    session a keypress selects — two hand-synced copies risked an index->sid
-    desync where [3] picked a different session than the one shown at slot 3."""
-    return sorted(sessions, key=lambda s: s["stale"])[:9]
+    """Active sessions first, then stale; stable, so newest-first input stays
+    newest-first within each group. No cap — the picker scrolls."""
+    return sorted(sessions, key=lambda s: s["stale"])
 
 
-def render_picker(sessions, cols, rows):
-    W = cols
-    buf = []
-    buf.append(sep(W))
-    hp = max(0, W - len(f"CC AIO MON {VERSION}"))
-    buf.append(f"{BG_BAR}{C_WHT}{B}CC AIO MON {VERSION}{R}{BG_BAR}{' ' * hp}{R}")
-    buf.append(sep(W))
+def _picker_rows(sessions, desktop=None):
+    """Single source of truth for the picker's row order: CLI sessions, then
+    desktop app sessions, each in _picker_order. render_picker draws exactly
+    this list and main() moves its cursor over it, so the highlighted row is
+    always the session Enter opens."""
+    return _picker_order(sessions) + _picker_order(desktop or [])
 
-    if not sessions:
-        buf.append(f"{C_DIM}Waiting for Claude Code session...{R}")
-        buf.append(f"{C_DIM}Start a session, then come back here.{R}")
+
+def _picker_cursor(rows_list, selected):
+    """Index of the session `selected` (an id) in rows_list; 0 when absent."""
+    for i, s in enumerate(rows_list):
+        if s.get("id") == selected:
+            return i
+    return 0
+
+
+def _picker_move(idx, k, n, page):
+    """New cursor index for a navigation key; clamped to [0, n-1]."""
+    if n <= 0:
+        return 0
+    if k in ("<UP>", "k"):
+        idx -= 1
+    elif k in ("<DOWN>", "j"):
+        idx += 1
+    elif k == "<PGUP>":
+        idx -= page
+    elif k == "<PGDN>":
+        idx += page
+    elif k == "<HOME>":
+        idx = 0
+    elif k == "<END>":
+        idx = n - 1
+    return max(0, min(n - 1, idx))
+
+
+def _picker_line(s, is_cursor, W):
+    tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
+    nm = _sanitize(s.get("session_name") or s.get("ai_title") or s["id"][:8])
+    # Short model: "Opus 4.6 (1M context)" → "OP 4.6" via single source of truth
+    code, ver = _model_code_from_label(s.get("model", ""))
+    model_short = f"{code} {ver}".strip() if ver else code
+    origin = f" {C_DIM}{s['origin']}{R}" if s.get("source") == "desktop" else ""
+    if is_cursor:
+        line = f"{C_CYN}{B}▸{R} {C_WHT}{B}{nm}{R} {C_DIM}{model_short}{R}{origin} {tag}"
     else:
-        buf.append(f"{C_WHT}{B}SESSIONS{R}")
-        buf.append(sep(W))
-        # Sort: active first, then stale. Limit to 9 (keyboard limit).
-        shown = _picker_order(sessions)
-        for i, s in enumerate(shown):
-            tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
-            nm = s["session_name"] or s.get("ai_title") or s["id"][:8]
-            # Short model: "Opus 4.6 (1M context)" → "OP 4.6" via single source of truth
-            code, ver = _model_code_from_label(s["model"])
-            model_short = f"{code} {ver}".strip() if ver else code
-            line = f"{C_WHT}[{i + 1}]{R} {B}{nm}{R} {C_DIM}{model_short}{R} {tag}"
-            buf.append(truncate(line, W))
-        if len(sessions) > 9:
-            buf.append(f"{C_DIM}+{len(sessions) - 9} more{R}")
+        line = f"  {C_FG}{nm}{R} {C_DIM}{model_short}{R}{origin} {tag}"
+    return truncate(line, W)
 
-    buf.append(sep(W))
-    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}] select{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}")
 
-    _window_buf(buf, rows)
-    return buf
+def render_picker(sessions, cols, rows, desktop=None, selected=None):
+    """Session picker: CLI sessions (statusline snapshots) above desktop app
+    sessions (transcripts). The cursor sits on `selected` (a session id) and
+    the list scrolls to keep it visible; header and key hints stay pinned."""
+    global _picker_scroll
+    W = cols
+    desktop = desktop or []
+    head = [sep(W)]
+    hp = max(0, W - len(f"CC AIO MON {VERSION}"))
+    head.append(f"{BG_BAR}{C_WHT}{B}CC AIO MON {VERSION}{R}{BG_BAR}{' ' * hp}{R}")
+    head.append(sep(W))
+
+    if not sessions and not desktop:
+        buf = head + [
+            f"{C_DIM}Waiting for Claude Code session...{R}",
+            f"{C_DIM}Start a session, then come back here.{R}",
+            sep(W),
+            f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}",
+        ]
+        _picker_scroll = 0
+        return buf[:max(1, rows)]
+
+    order = _picker_rows(sessions, desktop)
+    cur = _picker_cursor(order, selected)
+    body = []
+    cursor_line = 0
+    idx = 0
+    sections = (
+        ("CLI SESSIONS", "", _picker_order(sessions),
+         "No CLI session. Run claude in a terminal."),
+        ("DESKTOP APP SESSIONS", "estimated from transcripts", _picker_order(desktop),
+         "No desktop app session in the last 48 h."),
+    )
+    for n, (title, note, group, empty) in enumerate(sections):
+        if n:
+            body.append(sep(W))
+        note_s = f"  {C_DIM}{note}{R}" if note else ""
+        body.append(truncate(f"{C_WHT}{B}{title}{R}{note_s}", W))
+        body.append(sep(W))
+        if not group:
+            body.append(f"  {C_DIM}{empty}{R}")
+        for s in group:
+            if idx == cur:
+                cursor_line = len(body)
+            body.append(_picker_line(s, idx == cur, W))
+            idx += 1
+
+    foot = [
+        sep(W),
+        f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}] move   [{R}{C_WHT}enter{R}{C_DIM}] open   "
+        f"[{R}{C_WHT}q{R}{C_DIM}] quit{R}",
+    ]
+    try:
+        rows = max(1, int(rows))
+    except (TypeError, ValueError):
+        rows = 24
+    room = rows - len(head) - len(foot)
+    if len(body) <= room:
+        _picker_scroll = 0
+        return head + body + foot
+    visible = max(1, room - 1)  # one line for the position hint
+    off = max(0, min(_picker_scroll, len(body) - visible))
+    if cursor_line < off:
+        # Scrolling up onto a section's first row also reveals its title.
+        off = max(0, cursor_line - 2 if cursor_line >= 2 and body[cursor_line - 1] == sep(W) else cursor_line)
+    elif cursor_line >= off + visible:
+        off = cursor_line - visible + 1
+    _picker_scroll = off
+    win = body[off:off + visible]
+    up = "↑" if off > 0 else " "
+    dn = "↓" if off + visible < len(body) else " "
+    hint = f"{C_DIM}{up}{dn} {cur + 1}/{len(order)}{R}"
+    buf = head + win + [hint] + foot
+    return buf[:rows]
 
 
 # ---------------------------------------------------------------------------
@@ -3445,10 +3936,15 @@ def main():
 
     if args.list:
         try:
-            for s in list_sessions():
+            cli = list_sessions()
+            for s in cli:
                 tag = "(stale)" if s["stale"] else "(live)"
                 nm = s["session_name"] or s.get("ai_title") or "--"
                 print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag}")
+            for s in list_desktop_sessions(exclude={x["id"] for x in cli}):
+                tag = "(stale)" if s["stale"] else "(live)"
+                nm = s["session_name"] or "--"
+                print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag} [{s['origin']}]")
         finally:
             # Undo the console-wide CP65001 change so the parent shell is left
             # as found (Windows); no-op if no CP was saved / on non-Windows.
@@ -3508,6 +4004,8 @@ def main():
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
 
     sid = args.session
+    sid_path = None     # transcript path when `sid` is a desktop app session
+    picker_sel = None   # session id under the picker cursor
     if sid and not _SID_RE.match(sid):
         # sid failed regex — could contain ANSI escapes / control chars.
         # Sanitize + length-cap before echoing to terminal.
@@ -3603,7 +4101,9 @@ def main():
                     last_mt = 0
                     last_seen = time.monotonic()
                 elif k == "s":
+                    picker_sel = sid
                     sid = None
+                    sid_path = None
                     force_picker = True
                     last_data = None
                     last_mt = 0
@@ -3639,7 +4139,9 @@ def main():
                 last_mt = 0
                 last_seen = time.monotonic()
             elif k == "s":
+                picker_sel = sid
                 sid = None
+                sid_path = None
                 force_picker = True
                 last_data = None
                 last_mt = 0
@@ -3748,24 +4250,47 @@ def main():
             # doesn't rescan DATA_DIR every tick (audit P1-3)
             if sid is None:
                 sessions = cached_list_sessions()
-                active = [s for s in sessions if not s["stale"]]
-                if len(active) == 1 and len(sessions) == 1 and not force_picker:
-                    sid = active[0]["id"]
-                elif not sessions:
+                desktop = cached_desktop_sessions(exclude=[s["id"] for s in sessions])
+                order = _picker_rows(sessions, desktop)
+                if (len(order) == 1 and not order[0]["stale"]
+                        and not force_picker):
+                    sid = order[0]["id"]
+                    sid_path = order[0].get("path")
+                    last_seen = time.monotonic()
+                elif not order:
                     flush(render_picker([], cols, rows), cols)
                     time.sleep(tick)
                     continue
                 else:
-                    sorted_s = _picker_order(sessions)
-                    flush(render_picker(sessions, cols, rows), cols)
-                    if k and k.isdigit():
-                        idx = int(k) - 1
-                        if 0 <= idx < len(sorted_s):
-                            sid = sorted_s[idx]["id"]
-                            force_picker = False
-                            last_seen = time.monotonic()
-                    time.sleep(tick)
-                    continue
+                    cur = _picker_cursor(order, picker_sel)
+                    page = max(1, rows - 8)
+                    if k in _SCROLL_KEYS:
+                        cur = _picker_move(cur, k, len(order), page)
+                        # Coalesce a wheel / key-repeat burst into this frame
+                        # (same reason as the modal scroll drain above).
+                        drain_deadline = time.monotonic() + 0.05
+                        drained = 0
+                        while drained < 512 and time.monotonic() < drain_deadline:
+                            k2 = poll_key()
+                            if k2 in _SCROLL_KEYS:
+                                cur = _picker_move(cur, k2, len(order), page)
+                                drained += 1
+                                drain_deadline = time.monotonic() + 0.02
+                            elif k2 is None:
+                                time.sleep(0.001)
+                            else:
+                                _key_pushback[0] = k2
+                                break
+                    picker_sel = order[cur]["id"]
+                    if k in ("\r", "\n"):
+                        sid = order[cur]["id"]
+                        sid_path = order[cur].get("path")
+                        force_picker = False
+                        last_seen = time.monotonic()
+                    else:
+                        flush(render_picker(sessions, cols, rows, desktop, picker_sel), cols)
+                        time.sleep(tick)
+                        continue
 
             # Load state (only on data interval, not resize)
             if since_data >= data_interval:
@@ -3776,8 +4301,18 @@ def main():
                     mt = jp.stat().st_mtime
                 except OSError:
                     mt = 0
+                if sid_path is None and mt == 0:
+                    # --session with a desktop app session id: find its transcript.
+                    for s in cached_desktop_sessions(exclude=[]):
+                        if s["id"] == sid:
+                            sid_path = s["path"]
+                            break
 
-                if mt != last_mt or last_data is None:
+                if sid_path is not None:
+                    res = load_desktop_state(sid, sid_path)
+                    if res:
+                        last_data, last_hist = res
+                elif mt != last_mt or last_data is None:
                     d = load_state(sid)
                     if d:
                         last_data = d
@@ -3791,16 +4326,21 @@ def main():
                 time.sleep(tick)
                 continue
 
-            # Only reload history when file has changed
-            try:
-                hmt = (DATA_DIR / f"{sid}.jsonl").stat().st_mtime
-            except OSError:
-                hmt = 0
-            if hmt != last_hist_mt:
-                # Always replace (even []) so BRN/CTR don't stay stale when jsonl is cleared/truncated
-                last_hist = load_history(sid)
-                last_hist_mt = hmt
-            is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
+            if sid_path is not None:
+                # Desktop session: staleness follows the transcript's mtime.
+                upd = _snapshot_mtime(last_data)
+                is_stale = upd is not None and (time.time() - upd) > STALE_THRESHOLD
+            else:
+                # Only reload history when file has changed
+                try:
+                    hmt = (DATA_DIR / f"{sid}.jsonl").stat().st_mtime
+                except OSError:
+                    hmt = 0
+                if hmt != last_hist_mt:
+                    # Always replace (even []) so BRN/CTR don't stay stale when jsonl is cleared/truncated
+                    last_hist = load_history(sid)
+                    last_hist_mt = hmt
+                is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
             # A-P2-1: release-check trigger lives in the event loop, not in
             # render_frame. _rls_maybe_check is rate-limited internally
             # (_RLS_TTL) so per-tick invocation here is cheap.

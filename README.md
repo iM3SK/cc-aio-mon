@@ -103,7 +103,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12), macOS (Python 3.12).
 - **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
-- **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. On the dashboard, an auto-generated ai-title label is capped at 24 characters; the picker shows the full title.
+- **Multi-session** — auto-detects CLI sessions via temp files and desktop app sessions via their transcripts. Scrolling two-section picker (CLI / desktop app) for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. On the dashboard, an auto-generated ai-title label is capped at 24 characters; the picker shows the full title.
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
 - **Auto-purge** — dead session files older than 48 hours are automatically cleaned up from the temp directory.
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
@@ -213,14 +213,31 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 | `a` | Apply update (fetches + runs `git pull --ff-only`) | inside update modal only |
 | `p` | Anthropic Pulse (backend stability modal) | dashboard |
 | `l` | Toggle legend overlay | dashboard |
-| `1`–`9` | Select session from picker | session picker only |
 | `1` / `2` / `3` | Switch period (all / 7d / 30d) | inside token-stats modal only |
 | `f` | Toggle active-only filter (hide idle agents) | inside agents modal only |
 | `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `Home` `End` / mouse wheel | Scroll the open modal (content taller than the terminal) | inside any modal |
+| `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `Home` `End` / mouse wheel | Move the cursor | session picker only |
+| `Enter` | Open the session under the cursor | session picker only |
 
 ### Session Picker
 
-Shown on launch when multiple session files exist. Press `1-9` to select. Active sessions sorted first, max 9 shown. Auto-connects only when exactly one session exists (no stale sessions). Press `s` to force picker from dashboard or menu. Each row shows the session label (full `ai-title` if Claude Code generated one, otherwise UUID prefix), the model code, and a `live` / `stale` tag.
+Shown on launch when more than one session exists. It has two sections:
+
+- **CLI SESSIONS** — sessions with a statusline snapshot (Claude Code in a terminal). All metrics.
+- **DESKTOP APP SESSIONS** — sessions found only as a transcript in `~/.claude/projects/`, touched in the last 48 hours. See [Desktop app sessions](#desktop-app-sessions).
+
+Every session is listed; the list scrolls to keep the cursor visible, with the header and key hints pinned. Active sessions come first in each section. Move with the arrows, `j` / `k`, Page keys or the mouse wheel and open with `Enter`. Auto-connects only when exactly one session exists and it is active. Press `s` to return to the picker from dashboard or menu; the cursor starts on the session you left. Each row shows the session label (full `ai-title` or desktop title, otherwise UUID prefix), the model code and a `live` / `stale` tag; desktop rows also show the entrypoint tag (`desk` for the desktop app).
+
+### Desktop app sessions
+
+The Claude desktop app runs Claude Code without its terminal interface, so the `statusLine` command never runs and no snapshot reaches the temp directory. The monitor reads these sessions from their transcript instead and marks them `desktop app, estimated`:
+
+- **CST, BRN** — estimated from per-model token prices, counting each request once. TDY / WEK still sum CLI sessions only.
+- **CTX** — from the last request's input tokens. The window is 200k, or 1M when the requested model carries `[1m]` or the context already exceeds 200k; set `CC_MON_DESKTOP_CTX` to override.
+- **APR, LNS** — `n/a`; the transcript records no API time or line counts.
+- **5HL / 7DL** — shown only while a CLI session reports them (the limits are per account); otherwise `n/a`.
+
+`python3 monitor.py --list` prints desktop sessions after CLI sessions with their entrypoint tag.
 
 ## How It Works
 
@@ -263,6 +280,7 @@ Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visua
 | `CC_MON_BRN_MAX` | `10.0` | dashboard | Burn rate bar ceiling ($/min). Set higher if your bar pins (24/7 Opus API). |
 | `CC_MON_CST_MAX` | `1000.0` | dashboard | Cost bar ceiling ($ per session). Raise for long-running API sessions. |
 | `CC_MON_CTR_MAX` | `10.0` | dashboard | Context change rate ceiling (%/min). |
+| `CC_MON_DESKTOP_CTX` | `0` (infer) | dashboard | Context-window size (tokens) for desktop app sessions. |
 | `CC_AIO_MON_NO_UPDATE_CHECK` | *(unset)* | dashboard | Set to `1` to disable background release check |
 | `CC_AIO_MON_NO_PULSE` | *(unset)* | dashboard | Set to `1` to disable background Anthropic Pulse worker (no outbound network) |
 

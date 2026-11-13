@@ -1485,8 +1485,14 @@ class TestRenderLegend(unittest.TestCase):
     def test_contains_keys(self):
         buf = render_legend(80, 60)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        for key in ["q", "r", "s", "u", "l", "1-9"]:
+        for key in ["q", "r", "s", "u", "l", "1-3", "enter"]:
             self.assertIn(key, plain)
+
+    def test_session_digits_removed(self):
+        # The picker is cursor-driven; digit selection is gone from the legend.
+        plain = _ANSI_RE.sub("", "\n".join(render_legend(80, 200)))
+        self.assertNotIn("1-9", plain)
+        self.assertIn("DESKTOP APP", plain)
 
 
 # ---------------------------------------------------------------------------
@@ -3157,19 +3163,29 @@ class TestRenderPickerLimit(unittest.TestCase):
             for i in range(1, n + 1)
         ]
 
-    def test_only_9_shown(self):
+    def test_all_sessions_shown_without_digits(self):
         sessions = self._make_sessions(15)
         buf = render_picker(sessions, 80, 40)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        for i in range(1, 10):
-            self.assertIn(f"[{i}]", plain)
-        self.assertNotIn("[10]", plain)
+        for i in range(1, 16):
+            self.assertIn(f"Session {i}", plain)
+        self.assertNotIn("[1]", plain)
+        self.assertNotIn("more", plain)
 
-    def test_more_indicator_shown(self):
+    def test_short_terminal_scrolls_to_cursor(self):
         sessions = self._make_sessions(15)
-        buf = render_picker(sessions, 80, 40)
+        monitor._picker_scroll = 0
+        buf = render_picker(sessions, 80, 14, selected="sess015")
+        self.assertLessEqual(len(buf), 14)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        self.assertIn("+6 more", plain)
+        self.assertIn("▸ Session 15", plain)   # cursor row visible
+        self.assertNotIn("Session 1 ", plain)       # top scrolled away
+        self.assertIn("15/15", plain)               # position hint
+
+    def test_tiny_terminal_never_overflows(self):
+        sessions = self._make_sessions(15)
+        for rows in range(1, 9):
+            self.assertLessEqual(len(render_picker(sessions, 80, rows, selected="sess008")), rows)
 
 
 # ---------------------------------------------------------------------------
@@ -3661,9 +3677,13 @@ class TestAuditRegressionV1105(unittest.TestCase):
         # ~140 net lines of functional code (sentinel caching, last-good RL,
         # async update-checks worker, F-08/F-09/F-13/F-28 guards). The 3800
         # baseline reflected pre-audit state; 4000 re-establishes the guard.
+        # Raised 4000 → 4500: desktop app sessions add ~370 lines (incremental
+        # transcript parser, transcript-only session discovery, scrolling
+        # two-section picker). The five-runtime-file constraint keeps them in
+        # monitor.py, their only consumer.
         self.assertLess(
-            loc, 4000,
-            f"monitor.py is {loc} LOC, past the 4000-line maintainability trigger. "
+            loc, 4500,
+            f"monitor.py is {loc} LOC, past the 4500-line maintainability trigger. "
             f"Reduce the file or raise this trigger with a technical rationale."
         )
 
@@ -4844,14 +4864,14 @@ class TestAuditFixesV1130(unittest.TestCase):
         self.assertNotIn("\x1b", monitor._tool_abbr("mcp__x__\x1b[31mtool"))
 
     # ---- #6: _picker_order is the single source of truth ----
-    def test_picker_order_active_first_and_capped(self):
+    def test_picker_order_active_first_uncapped(self):
         sessions = [{"id": str(i), "stale": (i % 2 == 0)} for i in range(20)]
         order = monitor._picker_order(sessions)
-        self.assertEqual(len(order), 9)            # keyboard 1-9 cap
+        self.assertEqual(len(order), 20)           # no cap — the picker scrolls
         self.assertFalse(order[0]["stale"])        # active (stale=False) first
-        # Matches a plain stable sort+slice — what render_picker and main share.
+        # Matches a plain stable sort — what render_picker and main share.
         self.assertEqual([s["id"] for s in order],
-                         [s["id"] for s in sorted(sessions, key=lambda s: s["stale"])[:9]])
+                         [s["id"] for s in sorted(sessions, key=lambda s: s["stale"])])
 
     # ---- L7: _window_buf never overflows a short terminal ----
     def test_window_buf_never_exceeds_rows(self):
@@ -5077,6 +5097,220 @@ class TestJsonReadersRejectInvalidShapes(unittest.TestCase):
             (root / "session.jsonl").write_text("\n".join(rows), encoding="utf-8")
             with patch.object(monitor, "DATA_DIR", root):
                 self.assertEqual(monitor.calc_cross_session_costs(), (2.0, 2.0))
+
+
+# ---------------------------------------------------------------------------
+# Desktop app sessions — transcript-only sessions + two-section picker
+# ---------------------------------------------------------------------------
+def _desk_rec(rtype, ts="2026-11-13T20:00:00.000Z", **extra):
+    rec = {"type": rtype, "timestamp": ts, "sessionId": "x"}
+    rec.update(extra)
+    return json.dumps(rec)
+
+
+def _desk_assistant(mid, ts, model="claude-opus-5-5", block="text", **usage):
+    return _desk_rec("assistant", ts=ts, entrypoint="claude-desktop", cwd="C:\\work",
+                     message={"id": mid, "model": model, "usage": usage,
+                              "content": [{"type": block}]})
+
+
+class TestDesktopSessions(unittest.TestCase):
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._td.name)
+        self.proj = self.root / "C--work"
+        self.proj.mkdir()
+        monitor._desktop_state.clear()
+        monitor._desktop_meta_cache.clear()
+        monitor._desktop_sessions_cache.update({"t": 0.0, "key": None, "sessions": None})
+        self._patch = patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        monitor._desktop_state.clear()
+        self._td.cleanup()
+
+    def _write(self, sid, lines, mode="w"):
+        p = self.proj / f"{sid}.jsonl"
+        with open(p, mode, encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return p
+
+    def _basic(self, sid="desk-1"):
+        return self._write(sid, [
+            _desk_rec("custom-title", customTitle="Desk work"),
+            # One request, written as two content-block records with the same usage.
+            _desk_assistant("m1", "2026-11-13T20:00:00.000Z", block="thinking",
+                            input_tokens=10, output_tokens=1000, cache_read_input_tokens=50_000,
+                            cache_creation_input_tokens=1_000),
+            _desk_assistant("m1", "2026-11-13T20:00:01.000Z", block="tool_use",
+                            input_tokens=10, output_tokens=1000, cache_read_input_tokens=50_000,
+                            cache_creation_input_tokens=1_000),
+            _desk_assistant("m2", "2026-11-13T20:05:00.000Z",
+                            input_tokens=5, output_tokens=500, cache_read_input_tokens=80_000,
+                            cache_creation_input_tokens=0),
+        ])
+
+    def test_list_finds_transcript_only_session(self):
+        self._basic()
+        s = monitor.list_desktop_sessions()
+        self.assertEqual([x["id"] for x in s], ["desk-1"])
+        self.assertEqual(s[0]["source"], "desktop")
+        self.assertEqual(s[0]["origin"], "desk")
+        self.assertEqual(s[0]["session_name"], "Desk work")
+        self.assertEqual(s[0]["model"], "Opus 5.5")
+
+    def test_list_excludes_cli_sessions_and_subagents(self):
+        self._basic("desk-1")
+        sub = self.proj / "desk-1" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-a.jsonl").write_text(
+            _desk_assistant("s1", "2026-11-13T20:00:00.000Z", input_tokens=1) + "\n", encoding="utf-8")
+        self.assertEqual(monitor.list_desktop_sessions(exclude={"desk-1"}), [])
+
+    def test_list_skips_session_without_reply(self):
+        self._write("desk-2", [_desk_rec("user", entrypoint="claude-desktop")])
+        self.assertEqual(monitor.list_desktop_sessions(), [])
+
+    def test_list_skips_old_transcripts(self):
+        p = self._basic()
+        old = time.time() - monitor.DESKTOP_SESSION_TTL - 60
+        os.utime(p, (old, old))
+        self.assertEqual(monitor.list_desktop_sessions(), [])
+
+    def test_origin_tag(self):
+        self.assertEqual(monitor._origin_tag("claude-desktop"), "desk")
+        self.assertEqual(monitor._origin_tag("sdk-py"), "sdk-py")
+        self.assertEqual(monitor._origin_tag(""), "?")
+        self.assertEqual(monitor._origin_tag(None), "?")
+        self.assertNotIn("\x1b", monitor._origin_tag("\x1b[31mevil"))
+
+    def test_state_counts_each_message_once(self):
+        p = self._basic()
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        price = monitor._get_pricing("claude-opus-5-5")
+        expected = ((10 + 5) * price["input"] + (1000 + 500) * price["output"]
+                    + 130_000 * price["cache_read"] + 1_000 * price["cache_write"]) / 1_000_000
+        self.assertAlmostEqual(data["cost"]["total_cost_usd"], expected)
+        self.assertEqual(len(hist), 2)
+        cw = data["context_window"]
+        self.assertEqual(cw["context_window_size"], monitor.DESKTOP_CTX_DEFAULT)
+        self.assertAlmostEqual(cw["used_percentage"], 80_005 / 200_000 * 100)
+        self.assertEqual(cw["current_usage"]["output_tokens"], 500)
+        self.assertEqual(data["session_name"], "Desk work")
+        self.assertEqual(data["_source"], "desktop")
+        self.assertEqual(data["cost"]["total_duration_ms"], 300_000)
+
+    def test_context_over_200k_infers_1m_window(self):
+        p = self._write("desk-3", [_desk_assistant(
+            "m1", "2026-11-13T20:00:00.000Z", input_tokens=1, cache_read_input_tokens=300_000)])
+        data, _ = monitor.load_desktop_state("desk-3", str(p))
+        self.assertEqual(data["context_window"]["context_window_size"], monitor.DESKTOP_CTX_1M)
+        self.assertAlmostEqual(data["context_window"]["used_percentage"], 30.0001)
+
+    def test_env_override_window(self):
+        p = self._basic()
+        with patch.object(monitor, "DESKTOP_CTX_SIZE", 400_000):
+            data, _ = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(data["context_window"]["context_window_size"], 400_000)
+
+    def test_incremental_append_and_partial_line(self):
+        p = self._basic()
+        monitor.load_desktop_state("desk-1", str(p))
+        full = _desk_assistant("m3", "2026-11-13T20:10:00.000Z", input_tokens=1, output_tokens=7)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(full[:20])  # half-written record: must wait for its newline
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(len(hist), 2)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(full[20:] + "\n")
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(len(hist), 3)
+        self.assertEqual(data["context_window"]["current_usage"]["output_tokens"], 7)
+
+    def test_rewritten_file_restarts_parse(self):
+        p = self._basic()
+        monitor.load_desktop_state("desk-1", str(p))
+        self._write("desk-1", [_desk_assistant("z1", "2026-11-13T21:00:00.000Z", input_tokens=3)])
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(len(hist), 1)
+
+    def test_rejects_path_outside_projects(self):
+        with tempfile.TemporaryDirectory() as other:
+            p = pathlib.Path(other) / "desk-9.jsonl"
+            p.write_text(_desk_assistant("m1", "2026-11-13T20:00:00.000Z", input_tokens=1) + "\n",
+                         encoding="utf-8")
+            self.assertIsNone(monitor.load_desktop_state("desk-9", str(p)))
+        self.assertIsNone(monitor.load_desktop_state("../bad", str(self.proj / "x.jsonl")))
+
+    def test_snapshot_mtime_uses_transcript(self):
+        self.assertEqual(monitor._snapshot_mtime({"_source": "desktop", "_mtime": 123.0}), 123.0)
+        self.assertIsNone(monitor._snapshot_mtime({"_source": "desktop"}))
+
+    def test_render_frame_marks_estimates(self):
+        p = self._basic()
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            plain = _ANSI_RE.sub("", "\n".join(render_frame(data, hist, 100, 60)))
+        self.assertIn("desktop app, estimated", plain)
+        self.assertIn("API: n/a", plain)
+        self.assertIn("est.", plain)
+        self.assertIn("desktop app does not report them", plain)
+
+    def test_render_frame_cli_unchanged(self):
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            plain = _ANSI_RE.sub("", "\n".join(render_frame(_full_data(), [], 100, 60)))
+        self.assertNotIn("desktop app", plain)
+        self.assertNotIn("est.", plain)
+
+
+class TestTwoSectionPicker(unittest.TestCase):
+
+    def _s(self, sid, stale=False, source=None):
+        d = {"id": sid, "session_name": f"name-{sid}", "model": "Opus 5.5", "cwd": "", "stale": stale}
+        if source:
+            d.update({"source": source, "origin": "desk", "path": "p"})
+        return d
+
+    def setUp(self):
+        monitor._picker_scroll = 0
+
+    def test_sections_and_order(self):
+        cli = [self._s("c1", stale=True), self._s("c2")]
+        desk = [self._s("d1", source="desktop")]
+        order = monitor._picker_rows(cli, desk)
+        self.assertEqual([s["id"] for s in order], ["c2", "c1", "d1"])
+        plain = _ANSI_RE.sub("", "\n".join(render_picker(cli, 80, 40, desk, "d1")))
+        self.assertLess(plain.index("CLI SESSIONS"), plain.index("DESKTOP APP SESSIONS"))
+        self.assertIn("\u25b8 name-d1", plain)
+        self.assertIn("desk", plain)
+        self.assertIn("enter", plain)
+
+    def test_empty_sections_explain(self):
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([], 80, 40, [self._s("d1", source="desktop")])))
+        self.assertIn("No CLI session", plain)
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([self._s("c1")], 80, 40, [])))
+        self.assertIn("No desktop app session", plain)
+
+    def test_cursor_defaults_to_first_row(self):
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([self._s("c1")], 80, 40, [], "missing")))
+        self.assertIn("\u25b8 name-c1", plain)
+
+    def test_picker_move_clamps(self):
+        self.assertEqual(monitor._picker_move(0, "<UP>", 5, 3), 0)
+        self.assertEqual(monitor._picker_move(0, "j", 5, 3), 1)
+        self.assertEqual(monitor._picker_move(4, "<DOWN>", 5, 3), 4)
+        self.assertEqual(monitor._picker_move(1, "<PGDN>", 5, 3), 4)
+        self.assertEqual(monitor._picker_move(4, "<PGUP>", 5, 3), 1)
+        self.assertEqual(monitor._picker_move(2, "<HOME>", 5, 3), 0)
+        self.assertEqual(monitor._picker_move(0, "<END>", 5, 3), 4)
+        self.assertEqual(monitor._picker_move(0, "<DOWN>", 0, 3), 0)
+
+    def test_main_has_no_digit_session_selection(self):
+        src = pathlib.Path(monitor.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("k.isdigit()", src)
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
