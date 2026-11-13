@@ -1,8 +1,8 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.17.2
+# FILE-IPC CONTRACT: cc-aio-mon v1.18.0
 
 **Status**: Active  
-**Version**: 1.17.2 (`SCHEMA_VERSION` = 1)\
-**Last Updated**: 2026-10-07\
+**Version**: 1.18.0 (`SCHEMA_VERSION` = 1)\
+**Last Updated**: 2026-11-13\
 **Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
@@ -93,8 +93,7 @@ RESERVED_SIDS = frozenset({"rls", "stats", "pulse", FABLE_SETTINGS_STEM})
 ```
 
 These are reserved for internal use:
-- `rls`: release/update checking state (monitor only)
-- `stats`: aggregated cost statistics (monitor only)
+- `rls`, `stats`: names of monitor-internal state (release check, token stats). Both live in memory only; the stems stay reserved so no session can claim them.
 - `pulse`: Anthropic status monitor snapshots (pulse.py only)
 - `fable-refresh-settings`: the `--settings` file of the FBL refresher (statusline only). Reserved so `monitor.list_sessions()` never purges it as a model-less dead snapshot.
 
@@ -104,7 +103,7 @@ These are reserved for internal use:
 
 | Function | Invalid SID Behavior |
 |---|---|
-| `statusline.write_shared_state()` | Silently returns (no IPC file written) |
+| `statusline.write_shared_state()` | Replaces the SID with `"default"` and writes `default.json` / `default.jsonl`; a reserved SID writes nothing |
 | `monitor.load_state()` | Returns `None` |
 | `monitor.list_sessions()` | Skips entry entirely (not included in returned list) |
 | `shared.load_history()` | Returns `[]` (empty history) |
@@ -196,11 +195,17 @@ def load_state(sid):
 | `context_window` | dict | CC | `{context_window_size: int, used_percentage: 0–100, ...}` |
 | `context_window.context_window_size` | int | CC | Total context tokens available (e.g., 200000) |
 | `context_window.used_percentage` | float | CC | 0–100; monitor displays as "CTX NN%" |
-| `context_window.current_usage` | dict | CC | Sub-object with aggregate token counts for the current context window |
-| `context_window.current_usage.total_input_tokens` | int | CC | Total input tokens in the current window; read by `render_frame`/`render_cost_breakdown` as `CIN:` |
-| `context_window.current_usage.total_output_tokens` | int | CC | Total output tokens in the current window; read by `render_frame`/`render_cost_breakdown` as `COUT:` |
+| `context_window.total_input_tokens` | int | CC | Input tokens of the current context; `render_cost_breakdown` shows it as `CIN:` |
+| `context_window.total_output_tokens` | int | CC | Output tokens of the current context; shown as `COUT:` |
+| `context_window.current_usage` | dict | CC | Last request: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` (dashboard INP/OUT/CRD/CWR, cost modal LAST REQUEST) |
 | `cost` | dict | CC | `{total_cost_usd: float, ...}` |
 | `cost.total_cost_usd` | float | CC | USD spent in this session (cumulative) |
+| `cost.total_duration_ms` / `cost.total_api_duration_ms` | float | CC | Wall-clock and API time; dashboard DUR and APR |
+| `cost.total_lines_added` / `cost.total_lines_removed` | int | CC | Dashboard LNS |
+| `session_name` | str | CC | Explicit session name; picker and header label |
+| `transcript_path` | str | CC | Session transcript; read for the title, cost breakdown and agents |
+| `cwd` | str | CC | Working directory; `--list` output |
+| `prompt_cache` | dict | CC | `warm`, `caching_observed`, `ttl`, `expires_at`, `recache_tokens_if_cold`; statusline CCH segment only |
 | `rate_limits` | dict | CC | Rate limit buckets: `{five_hour: {...}, seven_day: {...}}` |
 | `rate_limits.five_hour` | dict | CC | 5-hour rolling rate limit: `{used_percentage: 0–100, resets_at: epoch}` |
 | `rate_limits.five_hour.used_percentage` | float | CC | 0–100 |
@@ -208,25 +213,39 @@ def load_state(sid):
 | `rate_limits.seven_day` | dict | CC | 7-day rolling rate limit (same schema as five_hour) |
 | `rate_limits.seven_day.used_percentage` | float | CC | 0–100 |
 | `rate_limits.seven_day.resets_at` | float | CC | Unix epoch (seconds) when limit resets |
+| `rate_limits.spend_limit` | dict | CC | Spend limit bucket; stored, not displayed |
 | `t` | **not present in snapshot** | — | History only; added when appending to JSONL |
 
 **Forward Compatibility**: Monitor uses `dict.get()` (never KeyError) so unknown fields in future snapshots are silently ignored.
 
-### Known-but-ignored / consumed fields
+Every other statusline field is stored verbatim and not read.
 
-Fields present in the Claude Code status JSON that the monitor receives but does not display as top-level data. Listed here so future contributors do not re-investigate them.
+### Transcript fields read by the monitor
+
+Not part of the snapshot: these come from the session transcript (`~/.claude/projects/<project>/<sid>.jsonl`, assistant records' `message.usage`), read by the cost breakdown, token stats, agents and desktop sessions. Claude Code writes one assistant record per content block and repeats the request's usage on each, so usage is counted once per `message.id` / `requestId`.
 
 | Field | Disposition | Notes |
 |---|---|---|
-| `diagnostics` | **ignored** | Diagnostic metadata; not read by monitor or statusline |
-| `inference_geo` | **ignored** | Inference geography tag; not used |
-| `service_tier` | **ignored** | Service tier string; not used |
-| `context_management` | **ignored** | Context management metadata block; not used |
-| `speed` | **consumed** — `_get_pricing()` | Top-level string tag (e.g. `"fast"`); used in `monitor._get_pricing()` to select the fast-mode pricing row |
-| `iterations` | **ignored** | Top-level iteration counters (totals only); individual tool-use counts come from `usage` sub-fields |
-| `usage.cache_creation` | **consumed** — cost calc | Object with token counts; used in cache-cost computation in statusline pricing logic |
-| `usage.server_tool_use` | **consumed** — cost calc | Object with server-side tool-use token counts; included in cost computation |
-| `prompt_cache` | **consumed** — `statusline.seg_cache()` | Claude Code v2.1.251+; `warm`, `caching_observed`, `ttl`, `expires_at`, `recache_tokens_if_cold` drive the CCH segment. Stored verbatim like every stdin field (no schema change); the monitor does not read it |
+| `message.id`, `requestId` | **consumed** — dedup key | One request = one key (`monitor._usage_key`) |
+| `message.model` | **consumed** — pricing | `<synthetic>` placeholders are skipped |
+| `usage.input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` | **consumed** — tokens and cost | |
+| `usage.cache_creation.ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens` | **consumed** — cost | 1-hour writes are priced at 2× input, 5-minute writes at the model's cache-write rate |
+| `usage.speed` | **consumed** — `_get_pricing()` | `"fast"` selects the fast-mode rates |
+| `usage.server_tool_use` | **consumed** — counts | Web search / fetch request counts (WSR / WFR); not priced |
+| `custom-title.customTitle`, `ai-title.aiTitle` | **consumed** — labels | A rename (`custom-title`) wins over the generated title |
+| `entrypoint`, `cwd`, `requestedModel`, `timestamp` | **consumed** — desktop sessions | Origin tag, label, `[1m]` window hint, duration |
+| `usage.iterations`, `usage.service_tier`, `usage.inference_geo`, `usage.output_tokens_details` | **ignored** | |
+
+### Desktop app sessions (in memory only)
+
+`monitor.load_desktop_state()` builds a snapshot-shaped dict from the transcript of a session that has no statusline snapshot. It is never written to `DATA_DIR`. It uses the snapshot fields above (estimated values) plus:
+
+| Field | Type | Description |
+|---|---|---|
+| `_source` | str | `"desktop"` |
+| `_origin` | str | Entrypoint tag (`desk` for `claude-desktop`) |
+| `_mtime` | float | Transcript mtime; drives staleness and UPD |
+| `_session_cost` | dict | Cost breakdown, same shape as `monitor._aggregate_session_cost()` |
 
 ### Rate Limits — account-wide read semantics
 
@@ -260,7 +279,7 @@ config file via `shared.read_fable_weekly()`:
   `oauthAccount.accountUuid` in the same file (written under another login).
 - **Display rule** (`shared.fable_display_state`): hidden when absent, older
   than 24 h or past `resets_at`; stale (dim, `~`) when older than
-  2 × `CC_AIO_MON_FABLE_REFRESH_SEC`.
+  30 minutes or 2 × `CC_AIO_MON_FABLE_REFRESH_SEC`, whichever is longer.
 - **Validation:** malformed or non-finite percentages and fetch times (`NaN`
   or infinity) invalidate the cache entry. An unparseable reset timestamp
   suppresses the countdown; it does not crash the reader.
@@ -308,7 +327,7 @@ again after switching accounts.
 
 ### Purpose
 
-Append-only sequence of all snapshots. Used by both statusline (for BRN/CTR rate computation) and monitor (for cost trend visualization + RLS decision-making).
+Append-only sequence of all snapshots. Used by both statusline (for BRN/CTR rate computation) and monitor (BRN/CTR, cost thirds and TDY/WEK).
 
 ### Full Path
 
@@ -742,18 +761,9 @@ Monitor reads via `dict.get("_schema_version")` → defaults to `None` if absent
 - Unknown fields in snapshots are silently ignored (defensive dict.get)
 - Unknown future `_schema_version` values **are gated**: `monitor.load_state()` returns `None` for snapshots tagged with an int `_schema_version` greater than this build's `SCHEMA_VERSION` (UI shows "no data" until the monitor restarts post-update)
 
-### Forward Compatibility (Future)
+### Breaking Shape Changes
 
-When a breaking JSON shape change is needed:
-1. Bump `SCHEMA_VERSION` to 2 in `shared.py`
-2. Statusline writes `"_schema_version": 2` to new snapshots
-3. Monitor adds a version check in `load_state()`:
-   ```python
-   ver = d.get("_schema_version", 0)
-   if ver > CURRENT_SCHEMA_VERSION:
-       raise ValueError("snapshot too new for this monitor version")
-   ```
-4. Document migration path in CHANGELOG
+When a breaking JSON shape change is needed, bump `SCHEMA_VERSION` in `shared.py` (the version gate above then applies) and document the migration path in CHANGELOG.
 
 ### Deprecation Timeline
 
@@ -800,7 +810,7 @@ No deprecated fields yet. When a field is retired:
 
 | File | Purpose | Writer(s) | Reader(s) | Atomicity | Lifetime |
 |---|---|---|---|---|---|
-| `<sid>.json` | Session snapshot | statusline | monitor | Atomic replace | Until session expires (~1h idle in monitor) |
+| `<sid>.json` | Session snapshot | statusline | monitor | Atomic replace | Marked inactive after 30 min idle; purged with its history after 48 h |
 | `<sid>.jsonl` | Session history | statusline | statusline (rates), monitor (trends) | Atomic trim; non-atomic append | Trimmed to 1000 lines @ 1 MB |
 | `pulse.jsonl` | API stability log (persistence only — monitor displays from in-memory `get_pulse_snapshot()`) | pulse.py (worker) | pulse.py (startup seed), external tools | Atomic trim; non-atomic append | Trimmed to 500 lines @ 1 MB; startup cleanup drops >24h entries |
 | `monitor-crash.log` | Crash traceback | monitor (excepthook) | User (post-mortem) | None (diagnostic only) | Rotated to `.log.1` on every crash (v1.12.2+); size guard still applies for non-crash callers |
@@ -868,6 +878,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.17.2\
-**Last Verified**: 2026-09-26  
+**Document Version**: 1.18.0\
+**Last Verified**: 2026-11-13  
 **Status**: Production

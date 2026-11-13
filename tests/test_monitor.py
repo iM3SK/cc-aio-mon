@@ -1485,8 +1485,14 @@ class TestRenderLegend(unittest.TestCase):
     def test_contains_keys(self):
         buf = render_legend(80, 60)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        for key in ["q", "r", "s", "u", "l", "1-9"]:
+        for key in ["q", "r", "s", "u", "l", "1-3", "enter"]:
             self.assertIn(key, plain)
+
+    def test_session_digits_removed(self):
+        # The picker is cursor-driven; digit selection is gone from the legend.
+        plain = _ANSI_RE.sub("", "\n".join(render_legend(80, 200)))
+        self.assertNotIn("1-9", plain)
+        self.assertIn("DESKTOP APP", plain)
 
 
 # ---------------------------------------------------------------------------
@@ -3157,19 +3163,29 @@ class TestRenderPickerLimit(unittest.TestCase):
             for i in range(1, n + 1)
         ]
 
-    def test_only_9_shown(self):
+    def test_all_sessions_shown_without_digits(self):
         sessions = self._make_sessions(15)
         buf = render_picker(sessions, 80, 40)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        for i in range(1, 10):
-            self.assertIn(f"[{i}]", plain)
-        self.assertNotIn("[10]", plain)
+        for i in range(1, 16):
+            self.assertIn(f"Session {i}", plain)
+        self.assertNotIn("[1]", plain)
+        self.assertNotIn("more", plain)
 
-    def test_more_indicator_shown(self):
+    def test_short_terminal_scrolls_to_cursor(self):
         sessions = self._make_sessions(15)
-        buf = render_picker(sessions, 80, 40)
+        monitor._picker_scroll = 0
+        buf = render_picker(sessions, 80, 14, selected="sess015")
+        self.assertLessEqual(len(buf), 14)
         plain = _ANSI_RE.sub("", "\n".join(buf))
-        self.assertIn("+6 more", plain)
+        self.assertIn("▸ Session 15", plain)   # cursor row visible
+        self.assertNotIn("Session 1 ", plain)       # top scrolled away
+        self.assertIn("15/15", plain)               # position hint
+
+    def test_tiny_terminal_never_overflows(self):
+        sessions = self._make_sessions(15)
+        for rows in range(1, 9):
+            self.assertLessEqual(len(render_picker(sessions, 80, rows, selected="sess008")), rows)
 
 
 # ---------------------------------------------------------------------------
@@ -3661,9 +3677,16 @@ class TestAuditRegressionV1105(unittest.TestCase):
         # ~140 net lines of functional code (sentinel caching, last-good RL,
         # async update-checks worker, F-08/F-09/F-13/F-28 guards). The 3800
         # baseline reflected pre-audit state; 4000 re-establishes the guard.
+        # Raised 4000 → 4500: desktop app sessions add ~370 lines (incremental
+        # transcript parser, transcript-only session discovery, scrolling
+        # two-section picker). The five-runtime-file constraint keeps them in
+        # monitor.py, their only consumer.
+        # Raised 4500 → 4700: the 2026-11 audit fixes add per-request usage
+        # dedup, current-model pricing tiers, the two-pass desktop scan and
+        # narrow-terminal fitting (~60 lines) to the same single consumer.
         self.assertLess(
-            loc, 4000,
-            f"monitor.py is {loc} LOC, past the 4000-line maintainability trigger. "
+            loc, 4700,
+            f"monitor.py is {loc} LOC, past the 4700-line maintainability trigger. "
             f"Reduce the file or raise this trigger with a technical rationale."
         )
 
@@ -3965,9 +3988,27 @@ class TestScanAiTitle(unittest.TestCase):
             encoding="utf-8",
         )
         with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root), \
-             patch.object(self._monitor, "TRANSCRIPT_MAX_BYTES", 10):
+             patch.object(self._monitor, "DESKTOP_TRANSCRIPT_MAX_BYTES", 10):
             result = self._monitor._scan_ai_title(str(jl))
         self.assertIsNone(result)
+
+    def test_custom_title_wins_and_tail_is_read(self):
+        # The generated title sits past the head window; a rename wins over it.
+        filler = [json.dumps({"type": "user", "content": "x" * 1000}) for _ in range(120)]
+        jl = self._write("session10", filler + [
+            json.dumps({"type": "ai-title", "aiTitle": "Generated"}),
+            json.dumps({"type": "custom-title", "customTitle": "Renamed"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            self.assertEqual(self._monitor._scan_ai_title(str(jl)), "Renamed")
+
+    def test_ai_title_past_head_found(self):
+        filler = [json.dumps({"type": "user", "content": "x" * 1000}) for _ in range(120)]
+        jl = self._write("session11", filler + [
+            json.dumps({"type": "ai-title", "aiTitle": "Late title"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            self.assertEqual(self._monitor._scan_ai_title(str(jl)), "Late title")
 
     def test_empty_string_title_ignored(self):
         jl = self._write("session7", [
@@ -4844,14 +4885,14 @@ class TestAuditFixesV1130(unittest.TestCase):
         self.assertNotIn("\x1b", monitor._tool_abbr("mcp__x__\x1b[31mtool"))
 
     # ---- #6: _picker_order is the single source of truth ----
-    def test_picker_order_active_first_and_capped(self):
+    def test_picker_order_active_first_uncapped(self):
         sessions = [{"id": str(i), "stale": (i % 2 == 0)} for i in range(20)]
         order = monitor._picker_order(sessions)
-        self.assertEqual(len(order), 9)            # keyboard 1-9 cap
+        self.assertEqual(len(order), 20)           # no cap — the picker scrolls
         self.assertFalse(order[0]["stale"])        # active (stale=False) first
-        # Matches a plain stable sort+slice — what render_picker and main share.
+        # Matches a plain stable sort — what render_picker and main share.
         self.assertEqual([s["id"] for s in order],
-                         [s["id"] for s in sorted(sessions, key=lambda s: s["stale"])[:9]])
+                         [s["id"] for s in sorted(sessions, key=lambda s: s["stale"])])
 
     # ---- L7: _window_buf never overflows a short terminal ----
     def test_window_buf_never_exceeds_rows(self):
@@ -5077,6 +5118,411 @@ class TestJsonReadersRejectInvalidShapes(unittest.TestCase):
             (root / "session.jsonl").write_text("\n".join(rows), encoding="utf-8")
             with patch.object(monitor, "DATA_DIR", root):
                 self.assertEqual(monitor.calc_cross_session_costs(), (2.0, 2.0))
+
+
+# ---------------------------------------------------------------------------
+# Desktop app sessions — transcript-only sessions + two-section picker
+# ---------------------------------------------------------------------------
+def _desk_rec(rtype, ts="2026-11-13T20:00:00.000Z", **extra):
+    rec = {"type": rtype, "timestamp": ts, "sessionId": "x"}
+    rec.update(extra)
+    return json.dumps(rec)
+
+
+def _desk_assistant(mid, ts, model="claude-opus-5-5", block="text", **usage):
+    return _desk_rec("assistant", ts=ts, entrypoint="claude-desktop", cwd="C:\\work",
+                     message={"id": mid, "model": model, "usage": usage,
+                              "content": [{"type": block}]})
+
+
+class TestDesktopSessions(unittest.TestCase):
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._td.name)
+        self.proj = self.root / "C--work"
+        self.proj.mkdir()
+        monitor._desktop_state.clear()
+        monitor._desktop_meta_cache.clear()
+        monitor._desktop_sessions_cache.update({"t": 0.0, "key": None, "sessions": None})
+        self._patch = patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        monitor._desktop_state.clear()
+        self._td.cleanup()
+
+    def _write(self, sid, lines, mode="w"):
+        p = self.proj / f"{sid}.jsonl"
+        with open(p, mode, encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return p
+
+    def _basic(self, sid="desk-1"):
+        return self._write(sid, [
+            _desk_rec("custom-title", customTitle="Desk work"),
+            # One request, written as two content-block records with the same usage.
+            _desk_assistant("m1", "2026-11-13T20:00:00.000Z", block="thinking",
+                            input_tokens=10, output_tokens=1000, cache_read_input_tokens=50_000,
+                            cache_creation_input_tokens=1_000),
+            _desk_assistant("m1", "2026-11-13T20:00:01.000Z", block="tool_use",
+                            input_tokens=10, output_tokens=1000, cache_read_input_tokens=50_000,
+                            cache_creation_input_tokens=1_000),
+            _desk_assistant("m2", "2026-11-13T20:05:00.000Z",
+                            input_tokens=5, output_tokens=500, cache_read_input_tokens=80_000,
+                            cache_creation_input_tokens=0),
+        ])
+
+    def test_list_finds_transcript_only_session(self):
+        self._basic()
+        s = monitor.list_desktop_sessions()
+        self.assertEqual([x["id"] for x in s], ["desk-1"])
+        self.assertEqual(s[0]["source"], "desktop")
+        self.assertEqual(s[0]["origin"], "desk")
+        self.assertEqual(s[0]["session_name"], "Desk work")
+        self.assertEqual(s[0]["model"], "Opus 5.5")
+
+    def test_list_excludes_cli_sessions_and_subagents(self):
+        self._basic("desk-1")
+        sub = self.proj / "desk-1" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-a.jsonl").write_text(
+            _desk_assistant("s1", "2026-11-13T20:00:00.000Z", input_tokens=1) + "\n", encoding="utf-8")
+        self.assertEqual(monitor.list_desktop_sessions(exclude={"desk-1"}), [])
+
+    def test_list_skips_session_without_reply(self):
+        self._write("desk-2", [_desk_rec("user", entrypoint="claude-desktop")])
+        self.assertEqual(monitor.list_desktop_sessions(), [])
+
+    def test_old_transcripts_do_not_crowd_out_fresh_one(self):
+        old = time.time() - monitor.DESKTOP_SESSION_TTL - 60
+        for i in range(30):
+            p = self.proj / f"aaa-old-{i:03d}.jsonl"   # sorts before the fresh file
+            p.write_text("{}\n", encoding="utf-8")
+            os.utime(p, (old, old))
+        self._basic("zzz-fresh")
+        with patch.object(monitor, "_DESKTOP_SCAN_CAP", 5):
+            ids = [s["id"] for s in monitor.list_desktop_sessions()]
+        self.assertEqual(ids, ["zzz-fresh"])
+
+    def test_infinite_ctx_env_does_not_crash_import(self):
+        env = dict(os.environ, CC_MON_DESKTOP_CTX="inf")
+        r = subprocess.run([sys.executable, "-c", "import monitor; print(monitor.DESKTOP_CTX_SIZE)"],
+                           cwd=str(pathlib.Path(monitor.__file__).parent), env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "0")
+
+    def test_loading_screen(self):
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([], 80, 24, loading=True)))
+        self.assertIn("Loading session transcript", plain)
+        self.assertNotIn("Waiting", plain)
+
+    def test_list_skips_old_transcripts(self):
+        p = self._basic()
+        old = time.time() - monitor.DESKTOP_SESSION_TTL - 60
+        os.utime(p, (old, old))
+        self.assertEqual(monitor.list_desktop_sessions(), [])
+
+    def test_origin_tag(self):
+        self.assertEqual(monitor._origin_tag("claude-desktop"), "desk")
+        self.assertEqual(monitor._origin_tag("sdk-py"), "sdk-py")
+        self.assertEqual(monitor._origin_tag(""), "?")
+        self.assertEqual(monitor._origin_tag(None), "?")
+        self.assertNotIn("\x1b", monitor._origin_tag("\x1b[31mevil"))
+
+    def test_state_counts_each_message_once(self):
+        p = self._basic()
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        price = monitor._get_pricing("claude-opus-5-5")
+        expected = ((10 + 5) * price["input"] + (1000 + 500) * price["output"]
+                    + 130_000 * price["cache_read"] + 1_000 * price["cache_write"]) / 1_000_000
+        self.assertAlmostEqual(data["cost"]["total_cost_usd"], expected)
+        self.assertEqual(len(hist), 2)
+        cw = data["context_window"]
+        self.assertEqual(cw["context_window_size"], 1_000_000)  # Opus 5.5
+        self.assertAlmostEqual(cw["used_percentage"], 80_005 / 1_000_000 * 100)
+        self.assertEqual(cw["current_usage"]["output_tokens"], 500)
+        # total_* follow the statusline meaning: current context, not session sums
+        self.assertEqual(cw["total_input_tokens"], 80_005)
+        self.assertEqual(cw["total_output_tokens"], 500)
+        self.assertEqual(data["session_name"], "Desk work")
+        self.assertEqual(data["_source"], "desktop")
+        self.assertEqual(data["cost"]["total_duration_ms"], 300_000)
+        sc = data["_session_cost"]
+        self.assertAlmostEqual(sc["cost_total"], expected)
+        self.assertEqual(sc["output"], 1500)
+
+    def test_window_follows_model(self):
+        p = self._write("desk-3", [_desk_assistant(
+            "m1", "2026-11-13T20:00:00.000Z", model="claude-haiku-4-5-20251001",
+            input_tokens=1, cache_read_input_tokens=150_000)])
+        data, _ = monitor.load_desktop_state("desk-3", str(p))
+        self.assertEqual(data["context_window"]["context_window_size"], 200_000)
+        self.assertAlmostEqual(data["context_window"]["used_percentage"], 75.0005)
+
+    def test_one_hour_cache_write_priced_double_input(self):
+        p = self._write("desk-4", [_desk_assistant(
+            "m1", "2026-11-13T20:00:00.000Z", cache_creation_input_tokens=1_000_000,
+            cache_creation={"ephemeral_1h_input_tokens": 600_000, "ephemeral_5m_input_tokens": 400_000})])
+        data, _ = monitor.load_desktop_state("desk-4", str(p))
+        # Opus 5.5: input $4 → 1h write $8/M; 5m write $5/M
+        self.assertAlmostEqual(data["cost"]["total_cost_usd"], 0.6 * 8.0 + 0.4 * 5.0)
+        self.assertEqual(data["_session_cost"]["cache_1h"], 600_000)
+
+    def test_large_transcript_read_in_chunks(self):
+        lines = [_desk_assistant(f"m{i}", "2026-11-13T20:00:00.000Z", input_tokens=1, output_tokens=1)
+                 for i in range(40)]
+        p = self._write("desk-5", lines)
+        size = p.stat().st_size
+        with patch.object(monitor, "_DESKTOP_READ_BUDGET", size // 3):
+            results = [monitor.load_desktop_state("desk-5", str(p)) for _ in range(5)]
+        self.assertIsNone(results[0])          # still catching up
+        data, hist = results[-1]
+        self.assertEqual(len(hist), 40)        # every request ingested once
+
+    def test_cost_breakdown_uses_desktop_breakdown(self):
+        p = self._basic()
+        data, _ = monitor.load_desktop_state("desk-1", str(p))
+        self.assertIs(monitor._aggregate_session_cost(data), data["_session_cost"])
+
+    def test_env_override_window(self):
+        p = self._basic()
+        with patch.object(monitor, "DESKTOP_CTX_SIZE", 400_000):
+            data, _ = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(data["context_window"]["context_window_size"], 400_000)
+
+    def test_incremental_append_and_partial_line(self):
+        p = self._basic()
+        monitor.load_desktop_state("desk-1", str(p))
+        full = _desk_assistant("m3", "2026-11-13T20:10:00.000Z", input_tokens=1, output_tokens=7)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(full[:20])  # half-written record: must wait for its newline
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(len(hist), 2)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(full[20:] + "\n")
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(len(hist), 3)
+        self.assertEqual(data["context_window"]["current_usage"]["output_tokens"], 7)
+
+    def test_rewritten_file_restarts_parse(self):
+        p = self._basic()
+        monitor.load_desktop_state("desk-1", str(p))
+        self._write("desk-1", [_desk_assistant("z1", "2026-11-13T21:00:00.000Z", input_tokens=3)])
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        self.assertEqual(len(hist), 1)
+
+    def test_rejects_path_outside_projects(self):
+        with tempfile.TemporaryDirectory() as other:
+            p = pathlib.Path(other) / "desk-9.jsonl"
+            p.write_text(_desk_assistant("m1", "2026-11-13T20:00:00.000Z", input_tokens=1) + "\n",
+                         encoding="utf-8")
+            self.assertIsNone(monitor.load_desktop_state("desk-9", str(p)))
+        self.assertIsNone(monitor.load_desktop_state("../bad", str(self.proj / "x.jsonl")))
+
+    def test_snapshot_mtime_uses_transcript(self):
+        self.assertEqual(monitor._snapshot_mtime({"_source": "desktop", "_mtime": 123.0}), 123.0)
+        self.assertIsNone(monitor._snapshot_mtime({"_source": "desktop"}))
+
+    def test_render_frame_marks_estimates(self):
+        p = self._basic()
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            plain = _ANSI_RE.sub("", "\n".join(render_frame(data, hist, 100, 60)))
+        self.assertIn("desktop app, estimated", plain)
+        self.assertIn("API: n/a", plain)
+        self.assertIn("est.", plain)
+        self.assertIn("Rate limits: n/a (desktop app)", plain)
+
+    def test_render_frame_narrow_keeps_line_ends(self):
+        p = self._basic()
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        data["session_name"] = "A very long desktop session name ľščťž"
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            lines = _strip_ansi(render_frame(data, hist, 40, 60))
+        status = next(ln for ln in lines if "Session" in ln)
+        self.assertTrue(status.endswith("est."), status)   # short tag kept
+        self.assertIn("…", status)                          # name cut instead
+        self.assertLessEqual(monitor._vis_width(status), 40)
+        self.assertIn("Rate limits: n/a (desktop app)", lines)
+
+    def test_render_frame_cli_unchanged(self):
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            plain = _ANSI_RE.sub("", "\n".join(render_frame(_full_data(), [], 100, 60)))
+        self.assertNotIn("desktop app", plain)
+        self.assertNotIn("est.", plain)
+
+
+class TestTwoSectionPicker(unittest.TestCase):
+
+    def _s(self, sid, stale=False, source=None):
+        d = {"id": sid, "session_name": f"name-{sid}", "model": "Opus 5.5", "cwd": "", "stale": stale}
+        if source:
+            d.update({"source": source, "origin": "desk", "path": "p"})
+        return d
+
+    def setUp(self):
+        monitor._picker_scroll = 0
+
+    def test_sections_and_order(self):
+        cli = [self._s("c1", stale=True), self._s("c2")]
+        desk = [self._s("d1", source="desktop")]
+        order = monitor._picker_rows(cli, desk)
+        self.assertEqual([s["id"] for s in order], ["c2", "c1", "d1"])
+        plain = _ANSI_RE.sub("", "\n".join(render_picker(cli, 80, 40, desk, "d1")))
+        self.assertLess(plain.index("CLI SESSIONS"), plain.index("DESKTOP APP SESSIONS"))
+        self.assertIn("\u25b8 name-d1", plain)
+        self.assertIn("desk", plain)
+        self.assertIn("enter", plain)
+
+    def test_empty_sections_explain(self):
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([], 80, 40, [self._s("d1", source="desktop")])))
+        self.assertIn("No CLI session", plain)
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([self._s("c1")], 80, 40, [])))
+        self.assertIn("No desktop app session", plain)
+
+    def test_narrow_picker_cuts_name_not_tags(self):
+        s = self._s("d1", source="desktop")
+        s["session_name"] = "Nezávislá kontrola opráv cc-aio-mon a ďalšie"
+        lines = _strip_ansi(render_picker([], 36, 40, [s], "d1"))
+        row = next(ln for ln in lines if "Nezávislá" in ln)
+        self.assertTrue(row.endswith("desk live"), row)
+        self.assertIn("…", row)
+        self.assertLessEqual(monitor._vis_width(row), 36)
+        self.assertIn("DESKTOP APP SESSIONS", lines)  # note dropped, title intact
+
+    def test_ellipsize(self):
+        self.assertEqual(monitor._ellipsize("abcdef", 10), "abcdef")
+        self.assertEqual(monitor._ellipsize("abcdef", 4), "abc…")
+        self.assertEqual(monitor._ellipsize("abcdef", 0), "")
+
+    def test_cursor_defaults_to_first_row(self):
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([self._s("c1")], 80, 40, [], "missing")))
+        self.assertIn("\u25b8 name-c1", plain)
+
+    def test_picker_move_clamps(self):
+        self.assertEqual(monitor._picker_move(0, "<UP>", 5, 3), 0)
+        self.assertEqual(monitor._picker_move(0, "j", 5, 3), 1)
+        self.assertEqual(monitor._picker_move(4, "<DOWN>", 5, 3), 4)
+        self.assertEqual(monitor._picker_move(1, "<PGDN>", 5, 3), 4)
+        self.assertEqual(monitor._picker_move(4, "<PGUP>", 5, 3), 1)
+        self.assertEqual(monitor._picker_move(2, "<HOME>", 5, 3), 0)
+        self.assertEqual(monitor._picker_move(0, "<END>", 5, 3), 4)
+        self.assertEqual(monitor._picker_move(0, "<DOWN>", 0, 3), 0)
+
+    def test_main_has_no_digit_session_selection(self):
+        src = pathlib.Path(monitor.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("k.isdigit()", src)
+
+
+# ---------------------------------------------------------------------------
+# Usage counted once per request; current model prices
+# ---------------------------------------------------------------------------
+def _block_records(mid, model="claude-opus-5-5", blocks=3, **usage):
+    """One API request as Claude Code writes it: one record per content block,
+    each repeating the request's usage."""
+    return [json.dumps({"type": "assistant", "timestamp": "2026-11-13T20:00:00.000Z",
+                        "requestId": f"req_{mid}",
+                        "message": {"id": mid, "model": model, "usage": usage,
+                                    "content": [{"type": "text"}]}})
+            for _ in range(blocks)]
+
+
+class TestUsageCountedOncePerRequest(unittest.TestCase):
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._td.name)
+        self.proj = self.root / "proj"
+        self.proj.mkdir()
+        monitor._SESSION_COST_CACHE.clear()
+        monitor._subagents_cache.clear()
+        monitor._usage_cache.clear()
+
+    def tearDown(self):
+        monitor._SESSION_COST_CACHE.clear()
+        monitor._subagents_cache.clear()
+        monitor._usage_cache.clear()
+        self._td.cleanup()
+
+    def _lines(self):
+        return (_block_records("m1", input_tokens=10, output_tokens=100)
+                + _block_records("m2", blocks=2, input_tokens=20, output_tokens=200))
+
+    def test_session_cost_dedups(self):
+        jl = _write_transcript(self.proj, "sess-a", self._lines())
+        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
+            res = monitor._aggregate_session_cost({"session_id": "sess-a", "transcript_path": str(jl)})
+        self.assertEqual(res["input"], 30)
+        self.assertEqual(res["output"], 300)
+
+    def test_token_stats_dedup(self):
+        _write_transcript(self.proj, "sess-b", self._lines())
+        with patch.object(monitor, "_CLAUDE_DIR", self.root):
+            models, overview = monitor.scan_transcript_stats("all", ttl=0)
+        m = models["claude-opus-5-5"]
+        self.assertEqual((m["input"], m["output"], m["calls"]), (30, 300, 2))
+        self.assertEqual(sum(overview["daily_tokens"].values()), 330)
+
+    def test_records_without_id_still_counted_each(self):
+        lines = [json.dumps({"type": "assistant", "message": {
+            "model": "claude-opus-5-5", "usage": {"input_tokens": 5}}})] * 2
+        jl = _write_transcript(self.proj, "sess-c", lines)
+        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
+            res = monitor._aggregate_session_cost({"session_id": "sess-c", "transcript_path": str(jl)})
+        self.assertEqual(res["input"], 10)
+
+    def test_subagent_tokens_dedup(self):
+        (self.proj / "sess-d.jsonl").write_text('{"type":"user"}\n', encoding="utf-8")
+        sub = self.proj / "sess-d" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-x.jsonl").write_text(
+            "\n".join(_block_records("s1", input_tokens=7, output_tokens=3)) + "\n", encoding="utf-8")
+        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
+            info = monitor.scan_subagents(str(self.proj / "sess-d.jsonl"), ttl=0)
+        self.assertEqual(info["total_tokens"], 10)
+
+
+class TestCurrentModelPricing(unittest.TestCase):
+
+    def test_new_models_have_own_prices(self):
+        cases = {
+            "claude-fable-5-2": (8.0, 40.0, 0.20),
+            "claude-mythos-5-2": (8.0, 40.0, 0.20),
+            "claude-mythos-5-1": (10.0, 50.0, 0.25),
+            "claude-sonnet-5": (2.0, 10.0, 0.20),
+            "claude-haiku-5-5": (0.10, 0.50, 0.01),
+        }
+        for mid, (i, o, cr) in cases.items():
+            p = _get_pricing(mid)
+            self.assertEqual((p["input"], p["output"], p["cache_read"]), (i, o, cr), mid)
+
+    def test_fable_5_2_fast(self):
+        p = _get_pricing("claude-fable-5-2", "fast")
+        self.assertEqual((p["input"], p["output"]), (16.0, 80.0))
+
+    def test_haiku_5_5_long_prompt_tier(self):
+        self.assertEqual(_get_pricing("claude-haiku-5-5", prompt_tokens=100_000)["input"], 0.10)
+        self.assertEqual(_get_pricing("claude-haiku-5-5", prompt_tokens=100_001)["input"], 0.50)
+        c = monitor._usage_cost("claude-haiku-5-5", None, 150_000, 1_000, 0, 0)
+        self.assertAlmostEqual(c["input"], 150_000 * 0.50 / 1e6)
+
+    def test_one_hour_write_rate(self):
+        c = monitor._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 1_000_000)
+        self.assertAlmostEqual(c["cache_write"], 8.0)  # 2x the $4 input
+        c = monitor._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 0)
+        self.assertAlmostEqual(c["cache_write"], 5.0)
+
+    def test_context_windows(self):
+        self.assertEqual(monitor._model_context_window("claude-opus-5-5"), 1_000_000)
+        self.assertEqual(monitor._model_context_window("claude-haiku-4-5-20251001"), 200_000)
+        self.assertEqual(monitor._model_context_window("claude-future-9"), monitor.DEFAULT_CTX_WINDOW)
+
+    def test_aliases(self):
+        self.assertEqual(_get_pricing("fable")["input"], 8.0)
+        self.assertEqual(_model_code("mythos"), ("MY", ""))
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)

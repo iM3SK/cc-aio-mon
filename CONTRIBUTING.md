@@ -25,7 +25,7 @@
    `unittest discover tests/`, so the `py tests.py` invocation continues to work
    unchanged.
 
-   **Baseline: 890 tests (skip count is platform-dependent — 0 on a standard Linux/macOS box with git; a few skip on Windows or where git/symlinks/SIGPIPE are unavailable).**
+   **Baseline: 936 tests (skip count is platform-dependent — 0 on a standard Linux/macOS box with git; a few skip on Windows or where git/symlinks/SIGPIPE are unavailable).**
    Contributions must not reduce the test count without explanation. If you add
    tests, put them in the file that matches the module under test — helpers go in
    `test_shared.py`, TUI logic in `test_monitor.py`, and so on.
@@ -56,7 +56,7 @@
 - **`shared.py` is the single source of truth** — all cross-file constants, helpers, ANSI palette, and regexes live there. Never duplicate a literal or a helper in `statusline.py` / `monitor.py` / `pulse.py` / `update.py`. The shared surface includes:
   - **Constants:** `VERSION`, `PY_FILES`, `_SID_RE`, `_ANSI_RE`, `MIN_EPOCH`, `MAX_FILE_SIZE`, `HISTORY_READ_MAX`, `HISTORY_AGGREGATE_MAX`, `HISTORY_RATE_SAMPLES`, `TRANSCRIPT_MAX_BYTES`, `DATA_DIR`, `DATA_DIR_NAME`, `VERSION_RE`, `RESERVED_SIDS`, `WARN_PCT`, `CRIT_PCT`.
   - **ANSI palette:** `E`, `R`, `B`, `C_RED`, `C_GRN`, `C_YEL`, `C_ORN`, `C_CYN`, `C_WHT`, `C_DIM`.
-  - **Helpers:** `as_dict`, `json_object`, `parse_commit_id`, `_num`, `_sanitize`, `safe_read`, `f_tok`, `f_cost`, `f_dur`, `f_cd`, `char_width`, `is_safe_dir`, `ensure_data_dir`, `ensure_utf8_stdout`, `load_history`, `strip_context_suffix`, `compact_context_suffix`, `badge_context_suffix`, `extract_changelog_entry`, `run_git`, `verify_origin_remote`, `calc_rates`, `atomic_write_text`, `acquire_singleton_lock`, `lock_file_handle`, `unlock_file_handle`, `check_syntax_after_pull`, `parse_ahead_behind`, `rotate_crash_log`.
+  - **Helpers:** `as_dict`, `json_object`, `parse_commit_id`, `_num`, `_sanitize`, `safe_read`, `f_tok`, `f_cost`, `f_dur`, `f_cd`, `char_width`, `is_safe_dir`, `ensure_data_dir`, `ensure_utf8_stdout`, `load_history`, `strip_context_suffix`, `compact_context_suffix`, `badge_context_suffix`, `claude_json_path`, `claude_projects_dir`, `extract_changelog_entry`, `run_git`, `verify_origin_remote`, `calc_rates`, `atomic_write_text`, `acquire_singleton_lock`, `lock_file_handle`, `unlock_file_handle`, `check_syntax_after_pull`, `parse_ahead_behind`, `rotate_crash_log`.
   - If you add a helper or constant that is (or could be) used by more than one module, put it in `shared.py` from day one.
   - **No parallel implementations** — a regression-guard test (`tests/test_shared.py::TestPyFilesSingleSourceOfTruth`) fails if the post-pull syntax-check loop reappears inline in `monitor.py` or `update.py` instead of delegating to `shared.check_syntax_after_pull`. Apply the same discipline to any future helper: extract to `shared.py`, have both consumers delegate.
   - **Documented SSoT exception — `update.py` ANSI palette.** `update.py` defines its own basic 16-color palette (`GRN`, `YEL`, `RED`, `CYN`, `DIM`, `R`) instead of importing the Nord 24-bit truecolor `C_*` set from `shared.py`. Reason: `update.py` runs *before* any TUI / VT enablement and must remain readable on minimal terminals without 24-bit truecolor support (legacy Windows console, recovery shells). Truecolor escapes would render as garbled sequences there. If you change either palette, keep them independently consistent and update the comment block above `GRN = YEL = RED = ...` in `update.py`.
@@ -83,7 +83,7 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 ## See also
 
 - [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~3 830 LOC)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~4 500 LOC)
 - [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md) — canonical field schema for the statusline→monitor JSON contract and JSONL history entries
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting

@@ -16,7 +16,7 @@ The Bandit badge tracks report publication; findings are reviewed in
 
 > _Independent community project. Not affiliated with or endorsed by Anthropic. See [NOTICE](NOTICE.md) for provenance & trademark attribution._
 
-> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** after each assistant message, permission mode change, or vim mode toggle (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Five runtime Python files, stdlib only, no build step.**
+> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** on session start or resume, after each assistant message, a completed `/compact`, a permission mode change or vim mode toggle, when a rate-limit reset or prompt-cache expiry passes, and every `refreshInterval` seconds if set (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard; sessions in the Claude desktop app, which never run the statusline, are read from their transcripts instead. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Five runtime Python files, stdlib only, no build step.**
 
 | | |
 |---|---|
@@ -45,7 +45,7 @@ The Bandit badge tracks report publication; findings are reviewed in
 | ccstatusline | Status line script | No TUI, no multi-session |
 | **CC AIO MON** | **Official stdin JSON protocol** | **Real-time, stdlib only, most complete** |
 
-Other monitors scrape log files or estimate costs from token counts. CC AIO MON reads the **official Claude Code statusline JSON** — the same data Claude Code uses internally. No estimation, no guessing, no stale logs.
+Other monitors scrape log files or estimate costs from token counts. For Claude Code in a terminal, CC AIO MON reads the **official Claude Code statusline JSON** — the cost, context and rate limits Claude Code itself reports. Claude desktop app sessions have no statusline, so for them the monitor estimates the same metrics from the session transcript and labels them as estimates.
 
 <p align="center">
   <a href="screenshots/cc-aio-mon-menu.png"><img src="screenshots/cc-aio-mon-menu.png" alt="CC AIO MON — menu modal with navigation hub, views, and system sections"></a><br>
@@ -59,7 +59,7 @@ Other monitors scrape log files or estimate costs from token counts. CC AIO MON 
 
 ## Setup
 
-Optional first step: run `check-requirements.ps1` (Windows) or `check-requirements.sh` (macOS/Linux) from the repo root to verify Python version, ANSI/truecolor support, and that the pre-push hook is wired up. The scripts then point you to the matching platform guide below.
+Optional first step: run `check-requirements.ps1` (Windows) or `check-requirements.sh` (macOS/Linux) from the repo root to verify Python 3.8+ and Git and to see whether the Claude Code CLI is on `PATH`. The scripts then point you to the matching platform guide below.
 
 | Platform | Guide |
 |----------|-------|
@@ -72,7 +72,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Compact** — every critical metric fits on one dashboard screen, no tabs, no wasted space. Detail modals (token stats, agents, legend, cost) scroll — mouse wheel or keyboard — when they outgrow the terminal, with a pinned header and a scroll-position hint.
 - **Stdlib only** — Python 3.8+. No pip install, no venv, no node_modules.
 - **Simple setup** — clone the repo, add one block to `~/.claude/settings.json`, launch the monitor. See [platform setup guide](#setup).
-- **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin. No log scraping, no file watching, no API polling. Real data, real-time.
+- **Official stdin JSON** — reads Claude Code's `statusLine` JSON protocol via stdin: the values Claude Code reports, in real time. Desktop app sessions, which have no statusline, are estimated from their transcripts.
 - **Two-tier architecture** — `statusline.py` (single-line status bar, triggered per Claude Code event) + `monitor.py` (fullscreen TUI, polls temp files independently).
 - **Temp file IPC** — atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/`. No sockets, no databases, no shared memory. Works across terminal sessions.
 - **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, FBL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/FBL/7DL segments also show a reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
@@ -100,10 +100,10 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
   <sub><b>Update manager</b> (<code>u</code>) — current vs remote version, changelog preview, and one-key apply.</sub>
 </p>
 
-- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12), macOS (Python 3.12).
+- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12, 3.13, 3.14), Windows (Python 3.12), macOS (Python 3.12).
 - **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
-- **Multi-session** — auto-detects sessions via temp files. Numbered picker for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. On the dashboard, an auto-generated ai-title label is capped at 24 characters; the picker shows the full title.
+- **Multi-session** — auto-detects CLI sessions via temp files and desktop app sessions via their transcripts. Scrolling two-section picker (CLI / desktop app) for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. On the dashboard, an auto-generated ai-title label is capped at 24 characters; the picker shows the full title.
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
 - **Auto-purge** — dead session files older than 48 hours are automatically cleaned up from the temp directory.
 - **Release check (RLS)** — background version check against GitHub once per hour. Shows green "up to date" or blinking red "update available" in the dashboard. Disable with `CC_AIO_MON_NO_UPDATE_CHECK=1`.
@@ -119,15 +119,14 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Singleton lock** — only one interactive `py monitor.py` can run at a time; a second attempt exits with a clear error pointing at `$TMPDIR/claude-aio-monitor/monitor.lock`. The `--list` mode is exempt.
 - **Crash-log rotation** — `monitor-crash.log` rotates to `.log.1` at 1 MB so repeated crashes don't fill the disk.
 - **File-IPC schema versioning** — snapshots and history entries carry `_schema_version`; `monitor.load_state()` refuses snapshots newer than it understands. See [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md).
-- **Test suite reorganization** — tests are now under `tests/`; existing `py tests.py` invocations still work via discovery.
 
 ## Session States
 
 The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes, `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with compact display, 8-char UUID, model codes, live/stale tags, max 9 sessions"></a><br>
-  <sub><b>Session picker</b> (<code>s</code>) — pick among active Claude Code sessions; live / stale tags, model codes.</sub>
+  <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker from v1.13.0: session labels, model codes and live/stale tags"></a><br>
+  <sub><b>Session picker</b> (<code>s</code>) — pick among Claude Code sessions; live / stale tags, model codes. Screenshot from v1.13.0; the current picker has CLI and DESKTOP APP sections and a cursor (see <a href="#session-picker">Session Picker</a>).</sub>
 </p>
 
 Press `r` to force a refresh (resets the stale timer if new data has arrived), or `s` to switch to a different session from the picker. If the session has truly ended and you want it out of the picker, delete its JSON/JSONL pair from `$TMPDIR/claude-aio-monitor/`.
@@ -169,7 +168,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 
 Runs automatically on each Claude Code status update via stdin JSON. Outputs a single ANSI-colored line: Model │ CTX │ CCH │ 5HL → countdown │ FBL → countdown │ 7DL → countdown │ CST │ BRN. Trailing segments drop when terminal is narrow (FBL drops before 7DL; CCH drops after BRN and CST, before FBL). No background padding — CC notifications share the right side of the row. APR and CHR live only in the dashboard where the horizontal space isn't constrained.
 
-**FBL — Fable weekly pool.** The [Claude Code statusline protocol](https://code.claude.com/docs/en/statusline) supplies only the 5-hour and 7-day limits, so FBL is read from Claude Code's own usage cache (`cachedUsageUtilization` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`) — the data `/usage` shows. OAuth credentials are never read. The segment appears only when that cache holds a valid Fable bucket for the logged-in account; a copy older than 30 minutes (or twice the refresh interval, when that is longer) is shown dimmed with `~`, and one older than a day or past its reset is hidden. The internal, version-dependent refresher is best effort: it sends a `get_usage` control request without a prompt to a detached `claude -p`, with hooks disabled and session persistence disabled. It starts only from an existing valid Fable cache. If the cache is missing or you switch accounts, run `/usage` once to bootstrap it. Set `CC_AIO_MON_FABLE_REFRESH_SEC=0` to keep FBL read-only — see [CONFIGURATION.md](docs/CONFIGURATION.md).
+**FBL — Fable weekly pool.** The [Claude Code statusline protocol](https://code.claude.com/docs/en/statusline) supplies the 5-hour and 7-day limits (plus `spend_limit`) but no per-model weekly pool, so FBL is read from Claude Code's own, undocumented usage cache (`cachedUsageUtilization` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`) — the data `/usage` shows. OAuth credentials are never read. The segment appears only when that cache holds a valid Fable bucket for the logged-in account; a copy older than 30 minutes (or twice the refresh interval, when that is longer) is shown dimmed with `~`, and one older than a day or past its reset is hidden. The internal, version-dependent refresher is best effort: it sends a `get_usage` control request without a prompt to a detached `claude -p`, with hooks disabled and session persistence disabled. It starts only from an existing valid Fable cache. If the cache is missing or you switch accounts, run `/usage` once to bootstrap it. Set `CC_AIO_MON_FABLE_REFRESH_SEC=0` to keep FBL read-only — see [CONFIGURATION.md](docs/CONFIGURATION.md).
 
 **CCH — prompt-cache countdown.** Read from the documented `prompt_cache` object ([prompt cache fields](https://code.claude.com/docs/en/statusline#prompt-cache-fields), Claude Code v2.1.251+). After an idle gap longer than the cache TTL (1 h or 5 min), the next message writes the whole conversation prefix to the cache again; CCH shows how close that is. It stays hidden while more than 50 min remain, counts down in green (`CCH 34m`), turns yellow below 20 % of the TTL (12 min on `1h`, 60 s on `5m`) and red once the cache is cold: `CCH cold 82.0k`, where the number is `recache_tokens_if_cold`. No segment before the first response, on older Claude Code, or when the provider reports no prompt caching (`caching_observed` false).
 
@@ -213,14 +212,32 @@ python3 monitor.py --refresh 1000  # custom refresh interval (ms, default 500)
 | `a` | Apply update (fetches + runs `git pull --ff-only`) | inside update modal only |
 | `p` | Anthropic Pulse (backend stability modal) | dashboard |
 | `l` | Toggle legend overlay | dashboard |
-| `1`–`9` | Select session from picker | session picker only |
 | `1` / `2` / `3` | Switch period (all / 7d / 30d) | inside token-stats modal only |
 | `f` | Toggle active-only filter (hide idle agents) | inside agents modal only |
 | `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `Home` `End` / mouse wheel | Scroll the open modal (content taller than the terminal) | inside any modal |
+| `↑` `↓` / `j` `k` / `PgUp` `PgDn` / `Home` `End` / mouse wheel | Move the cursor | session picker only |
+| `Enter` | Open the session under the cursor | session picker only |
 
 ### Session Picker
 
-Shown on launch when multiple session files exist. Press `1-9` to select. Active sessions sorted first, max 9 shown. Auto-connects only when exactly one session exists (no stale sessions). Press `s` to force picker from dashboard or menu. Each row shows the session label (full `ai-title` if Claude Code generated one, otherwise UUID prefix), the model code, and a `live` / `stale` tag.
+Shown on launch when more than one session exists. It has two sections:
+
+- **CLI SESSIONS** — sessions with a statusline snapshot (Claude Code in a terminal). All metrics.
+- **DESKTOP APP SESSIONS** — sessions found only as a transcript in `~/.claude/projects/`, touched in the last 48 hours. See [Desktop app sessions](#desktop-app-sessions).
+
+Every session is listed; the list scrolls to keep the cursor visible, with the header and key hints pinned. Active sessions come first in each section. Move with the arrows, `j` / `k`, Page keys or the mouse wheel and open with `Enter`. Auto-connects only when exactly one session exists and it is active. Press `s` to return to the picker from dashboard or menu; the cursor starts on the session you left. Each row shows the session label (full `ai-title` or desktop title, otherwise UUID prefix), the model code and a `live` / `stale` tag; desktop rows also show the entrypoint tag (`desk` for the desktop app).
+
+### Desktop app sessions
+
+The Claude desktop app runs Claude Code without its terminal interface, so the `statusLine` command never runs and no snapshot reaches the temp directory. The monitor reads these sessions from their transcript instead and marks them `desktop app, estimated` (`est.` in a narrow terminal, where a long session name is cut with `…` so the tags stay visible):
+
+- **CST, BRN** — estimated from per-model token prices, counting each request once. TDY / WEK still sum CLI sessions only.
+- **CTX** — from the last request's input tokens, against the model's context window (1M for current models, 200K for Haiku 4.5 and older); set `CC_MON_DESKTOP_CTX` to override.
+- **Cost breakdown (`c`)** — the same per-request estimate as CST. Each request is counted once (Claude Code repeats its usage on every content-block record) and 1-hour cache writes are priced at 2× input.
+- **APR, LNS** — `n/a`; the transcript records no API time or line counts.
+- **5HL / 7DL** — shown only while a CLI session reports them (the limits are per account); otherwise `n/a`.
+
+`python3 monitor.py --list` prints desktop sessions after CLI sessions with their entrypoint tag.
 
 ## How It Works
 
@@ -238,7 +255,7 @@ Claude Code ──stdin JSON──> statusline.py ──> terminal (single-line 
 Both scripts import shared.py for shared BRN/CTR calculation.
 ```
 
-1. **Claude Code** emits JSON telemetry to `statusline.py` via stdin after each assistant message, permission mode change, or vim mode toggle (300ms debounce).
+1. **Claude Code** emits JSON telemetry to `statusline.py` via stdin on session start or resume, after each assistant message, a completed `/compact`, a permission mode change or vim mode toggle, at a rate-limit reset or prompt-cache expiry, and every `refreshInterval` seconds if set (300ms debounce). The Claude desktop app runs Claude Code without a terminal and never runs the statusline; `monitor.py` reads those sessions from `~/.claude/projects/` transcripts.
 2. **statusline.py** parses JSON, renders single-line ANSI status bar (model, context, prompt-cache countdown, rate limits with reset countdown, cost, burn rate), writes atomic snapshot (`.json`) + appends to history (`.jsonl`).
 3. **monitor.py** polls temp directory (data files refresh every 500 ms; UI tick 50 ms for keyboard responsiveness), reads snapshots + history, renders fullscreen TUI with progress bars and computed metrics.
 4. **shared.py** provides `calc_rates()` — computes BRN ($/min) and CTR (%/min) from JSONL history timestamps.
@@ -263,8 +280,14 @@ Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visua
 | `CC_MON_BRN_MAX` | `10.0` | dashboard | Burn rate bar ceiling ($/min). Set higher if your bar pins (24/7 Opus API). |
 | `CC_MON_CST_MAX` | `1000.0` | dashboard | Cost bar ceiling ($ per session). Raise for long-running API sessions. |
 | `CC_MON_CTR_MAX` | `10.0` | dashboard | Context change rate ceiling (%/min). |
+| `CC_MON_DESKTOP_CTX` | `0` (model window) | dashboard | Context-window size (tokens) for desktop app sessions. |
+| `CC_AIO_MON_FABLE_REFRESH_SEC` | `300` | statusline | FBL usage-cache refresh interval; `0` keeps FBL read-only |
+| `CC_AIO_MON_REMOTE` | *(unset)* | dashboard + updater | Accepted `origin` URL for self-update (e.g. your fork) |
+| `CLAUDE_CONFIG_DIR` | *(unset)* | all | Claude Code config directory (transcripts and `.claude.json`); defaults to `~/.claude` and `~` |
 | `CC_AIO_MON_NO_UPDATE_CHECK` | *(unset)* | dashboard | Set to `1` to disable background release check |
 | `CC_AIO_MON_NO_PULSE` | *(unset)* | dashboard | Set to `1` to disable background Anthropic Pulse worker (no outbound network) |
+
+Full reference with types and edge cases: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 Env-var prefix convention: `CLAUDE_*` variables are shared with broader Claude tooling (warn/crit thresholds, burn warn); `CC_AIO_MON_*` are project-wide toggles (opt-out switches for background worker threads); `CC_MON_*` are dashboard-specific limit overrides for bar ceilings.
 
@@ -311,14 +334,15 @@ export CLAUDE_STATUS_CRIT=90
   - macOS / Linux: usually pre-installed (`python3 --version` to verify)
   - Windows: must be installed separately (not bundled with Windows)
   - No pip packages needed — stdlib only. See [platform setup guide](#setup).
-- **Claude Code CLI** with statusline support
+- **Claude Code CLI** with statusline support — for the statusline and full metrics. Claude desktop app sessions are shown without it (estimated from transcripts).
 - **Truecolor terminal** — Windows Terminal, iTerm2, Alacritty, Kitty, or any terminal supporting ANSI 24-bit color
 - **80 columns** minimum recommended
 
 ## Known Limitations
 
-- **Delayed refresh after context compaction** — when Claude Code compacts the context window, the dashboard continues showing the pre-compaction CTX value until Claude Code emits the next statusline event (typically the next assistant message). This is a Claude Code protocol limitation — `statusline.py` is only invoked on assistant messages, permission mode changes, or vim mode toggles. There is no external API to trigger a refresh on demand.
-- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown stores explicit per-model per-1M-token rates; cache-read rates are roughly 0.1× and cache-write roughly 1.25× the model's input rate. Current priced families: Fable (5 / 5.1), Mythos 5, Opus (4.1 / 4.5 / 4.6 / 4.7 / 4.8 / 5 / 5.5), Sonnet (4.5 / 4.6 / 5.5), Haiku (3.5 / 4.5). Cache-read rates are lower on Fable 5.1 (0.025×), Opus 5.5 (0.05×), and Sonnet 5.5 (0.05×).
+- **Refresh between events** — the statusline runs only on Claude Code events (see [How It Works](#how-it-works)), so between them the dashboard shows the last reported values. Set `refreshInterval` in the `statusLine` block to refresh on a timer.
+- **Desktop app sessions are estimates** — see [Desktop app sessions](#desktop-app-sessions).
+- **Pricing drift** — model prices are hardcoded snapshots of Anthropic's published rates at release time. If Anthropic adjusts pricing, cost breakdown numbers drift until the next release. Cost breakdown stores explicit per-model per-1M-token rates; cache-read rates are roughly 0.1× and 5-minute cache writes 1.25× the model's input rate, 1-hour cache writes 2×. Current priced families: Fable (5 / 5.1 / 5.2), Mythos (5 / 5.1 / 5.2), Opus (4.1 / 4.5 / 4.6 / 4.7 / 4.8 / 5 / 5.5), Sonnet (4.5 / 4.6 / 5 / 5.5), Haiku (3.5 / 4.5 / 5.5). Cache-read rates are lower on Fable and Mythos 5.1 / 5.2 (0.025×), Opus 5.5 (0.05×), and Sonnet 5.5 (0.05×). Haiku 5.5 bills a prompt above 100K tokens at 5× its base rates. The Sonnet 5 and Haiku 5.5 cache rates assume the standard multipliers.
 - **Local timezone everywhere** — all timestamps (header clock, daily aggregation, rollback tags like `pre-update-YYYYMMDD-HHMMSS`, pulse JSONL entries) use the machine's local timezone, not UTC. If you ship temp-dir logs to a maintainer in a different zone, clock labels will not line up — report the date plus your TZ offset when filing an issue.
 
 ## Troubleshooting
@@ -405,9 +429,9 @@ This project is an **independent, community-maintained tool**. It is **not affil
 
 "Anthropic", "Claude", and "Claude Code" are trademarks of Anthropic, PBC — used here for descriptive purposes only (nominative fair use). No claim of partnership, endorsement, or association is made or implied.
 
-All source code is **original work** by the project contributors. No code was copied, decompiled, or derived from Anthropic's proprietary codebase. The tool interacts with Anthropic products exclusively through **publicly documented extension points** (Claude Code `statusLine` hook, `status.claude.com` public Statuspage API) and the user's own local files (`~/.claude/projects/` transcripts). No reverse engineering, traffic interception, authentication bypass, or rate-limit circumvention was performed.
+All source code is **original work** by the project contributors. No code was copied, decompiled, or derived from Anthropic's proprietary codebase. The tool interacts with Anthropic products through **publicly documented extension points** (Claude Code `statusLine` hook, `status.claude.com` public Statuspage API) and the user's own local files (`~/.claude/projects/` transcripts, `~/.claude.json`). One optional feature goes further: the FBL refresher reads Claude Code's undocumented `cachedUsageUtilization` cache and asks the user's own `claude` CLI for an update through its experimental `get_usage` control request (disable with `CC_AIO_MON_FABLE_REFRESH_SEC=0`). No reverse engineering, traffic interception, authentication bypass, or rate-limit circumvention was performed.
 
-This tool **does not modify, patch, or alter** Claude Code or any Anthropic service — it is a read-only observer of data the user's own Claude Code installation voluntarily emits via its documented extension points.
+This tool **does not modify, patch, or alter** Claude Code or any Anthropic service — it observes data the user's own Claude Code installation writes or emits.
 
 See [NOTICE](NOTICE.md) for full provenance, third-party references, and trademark attribution.
 

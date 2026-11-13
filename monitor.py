@@ -20,7 +20,9 @@ TUI navigable while preserving the five-runtime-file stdlib layout:
     3.  ANSI / characters / format — colours, char_width, formatting helpers
     4.  Bars & warnings            — mkbar, collect_warnings
     5.  Cost aggregation & RLS     — cross-session cost, release check worker
-    6.  Layout & data loading      — sep, list_sessions, load_state/_history
+    6.  Layout & data loading      — sep, list_sessions, load_state/_history,
+                                     desktop app sessions (list_desktop_sessions,
+                                     load_desktop_state)
     7.  Spinners                   — session / RLS spinners
     8.  Render — main dashboard    — render_frame (+ _window_buf scroll engine)
     9.  Legend overlay             — render_legend
@@ -30,7 +32,7 @@ TUI navigable while preserving the five-runtime-file stdlib layout:
     13. Update modal               — render_update_modal + apply worker
     14. Token stats modal          — render_stats
     15. Agents modal               — render_agents + scan_subagents fan-out
-    16. Session picker             — render_picker (+ _picker_order SSoT)
+    16. Session picker             — render_picker (+ _picker_rows SSoT)
     17. Screen flush               — flush (synchronized-output frame writer)
     18. Main                       — event loop, key handling, lifecycle
 """
@@ -59,7 +61,7 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
                     SECONDS_1H, SECONDS_5H, SECONDS_1D, SECONDS_7D,
-                    HISTORY_RATE_SAMPLES,
+                    HISTORY_RATE_SAMPLES, MIN_EPOCH,
                     WARN_PCT, CRIT_PCT,
                     DATA_DIR, VERSION_RE, VERSION, SCHEMA_VERSION,
                     PY_FILES,  # noqa: F401 — pinned by TestPyFilesSingleSourceOfTruth (SSoT regression guard)
@@ -68,14 +70,14 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
-                    read_fable_weekly, fable_display_state,
+                    read_fable_weekly, fable_display_state, claude_projects_dir,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
 
 # ---------------------------------------------------------------------------
 # Transcript usage scanner — reads ~/.claude/projects/**/*.jsonl
 # ---------------------------------------------------------------------------
-_CLAUDE_DIR = pathlib.Path.home() / ".claude" / "projects"
+_CLAUDE_DIR = claude_projects_dir()  # honours CLAUDE_CONFIG_DIR, like claude_json_path()
 MAX_TRANSCRIPT_FILES = 1000  # hard cap on scan to prevent DoS via oversized projects dir
 _usage_cache = {}
 
@@ -173,6 +175,7 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
     the iterator's path resolution and this open, the file was swapped
     and we skip it rather than aggregate from an unverified inode.
     """
+    reqs = OrderedDict()  # request key -> (model, inp, out, cr, cw, ts); last record wins
     try:
         with open(jl, "rb") as f:
             try:
@@ -220,34 +223,42 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
                 u = msg["usage"]
                 if not isinstance(u, dict):
                     continue
-                inp = int(_num(u.get("input_tokens", 0)))
-                out = int(_num(u.get("output_tokens", 0)))
-                cr = int(_num(u.get("cache_read_input_tokens", 0)))
-                cw = int(_num(u.get("cache_creation_input_tokens", 0)))
-                if model not in models:
-                    models[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
-                models[model]["input"] += inp
-                models[model]["output"] += out
-                models[model]["cache_read"] += cr
-                models[model]["cache_write"] += cw
-                models[model]["calls"] += 1
-
-                if ts > 0:
-                    # A corrupt/huge ts raises OverflowError (not OSError, so
-                    # the outer guard wouldn't catch it) or OSError on Windows.
-                    # Skip just this record's day attribution rather than abort
-                    # the whole transcript's aggregation.
-                    try:
-                        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-                    except (OverflowError, OSError, ValueError):
-                        continue
-                    active_days.add(day)
-                    daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
+                key = _usage_key(obj, msg) or f"#{len(reqs)}"
+                prev = reqs.get(key)
+                reqs[key] = (
+                    model,
+                    int(_num(u.get("input_tokens", 0))),
+                    int(_num(u.get("output_tokens", 0))),
+                    int(_num(u.get("cache_read_input_tokens", 0))),
+                    int(_num(u.get("cache_creation_input_tokens", 0))),
+                    prev[5] if prev and prev[5] > 0 else ts,  # day of the request's first record
+                )
                 # Known-but-ignored fields (F-18/F-19/F-20 / SD-003/007/008):
                 # u.get("diagnostics"), u.get("inference_geo"), u.get("service_tier"),
                 # obj.get("context_management") — not needed for stats aggregation.
     except (OSError, UnicodeDecodeError):
-        return
+        pass  # best-effort: keep what was read before the error
+
+    # One entry per API request: Claude Code repeats a request's usage on every
+    # content-block record, so summing records would count it several times.
+    for model, inp, out, cr, cw, ts in reqs.values():
+        if model not in models:
+            models[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
+        models[model]["input"] += inp
+        models[model]["output"] += out
+        models[model]["cache_read"] += cr
+        models[model]["cache_write"] += cw
+        models[model]["calls"] += 1
+        if ts > 0:
+            # A corrupt/huge ts raises OverflowError (not OSError, so the outer
+            # guard wouldn't catch it) or OSError on Windows. Skip just this
+            # request's day attribution rather than abort the aggregation.
+            try:
+                day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            except (OverflowError, OSError, ValueError):
+                continue
+            active_days.add(day)
+            daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
 
 
 def scan_transcript_stats(period="all", ttl=30.0):
@@ -697,6 +708,29 @@ def truncate(s, maxw):
     if truncated and R not in result[max(0, len(result) - 10):]:
         result += R
     return result
+
+
+def _vis_width(s):
+    """Visible width of s in terminal columns (ANSI codes ignored, CJK-aware)."""
+    return sum(char_width(c) for c in _ANSI_RE.sub("", s))
+
+
+def _ellipsize(text, maxw):
+    """Cut plain text to maxw visible columns, ending in '…' when shortened.
+    Used for the variable-length part of a line (a session name) so the fixed
+    tags after it stay visible in a narrow terminal."""
+    if maxw <= 0:
+        return ""
+    if _vis_width(text) <= maxw:
+        return text
+    out, w = [], 0
+    for ch in text:
+        cw = char_width(ch)
+        if w + cw > maxw - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -1218,6 +1252,425 @@ def load_history(sid, n=HISTORY_RATE_SAMPLES):
 
 
 # ---------------------------------------------------------------------------
+# Desktop app sessions — transcript-only sessions
+# ---------------------------------------------------------------------------
+# The Claude desktop app runs Claude Code headless (stream-json), so the
+# statusLine command never fires and no snapshot reaches DATA_DIR. The session
+# transcript (~/.claude/projects/<project>/<sid>.jsonl) is still written live.
+# The helpers below derive a snapshot-shaped dict from it, so render_frame can
+# draw the session. Values are estimates: cost from _MODELS pricing, context %
+# from the last request's input tokens. The transcript carries no API time, no
+# line counts and no rate limits.
+#
+# Claude Code writes one assistant record per content block and repeats the
+# request's usage on each of them, so usage is counted once per request
+# (_usage_key).
+DESKTOP_SESSION_TTL = DEAD_SESSION_TTL  # list transcripts touched in the last 48 h
+# Context-window size for desktop sessions; 0 = the model's window from _MODELS
+# (_model_context_window), or 1M when the requested model carries [1m].
+_desktop_ctx_env = _env_float("CC_MON_DESKTOP_CTX", 0.0)
+# inf / nan / absurd values mean "not set" (int(inf) would crash the import).
+DESKTOP_CTX_SIZE = int(_desktop_ctx_env) if 0 < _desktop_ctx_env < 1e12 else 0
+# The parse is incremental, so a long session may grow past the 50 MiB cap
+# that whole-file readers use. The first catch-up read is capped per poll so a
+# large transcript never stalls the render loop.
+DESKTOP_TRANSCRIPT_MAX_BYTES = 1024 * 1024 * 1024
+_DESKTOP_READ_BUDGET = 16 * 1024 * 1024
+_TRANSCRIPT_HEAD_BYTES = 64 * 1024
+_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+_DESKTOP_SCAN_CAP = 512               # max fresh transcripts whose metadata is read per scan
+_DESKTOP_STAT_CAP = 20_000            # max transcript files stat'ed per scan (DoS bound)
+_ENTRYPOINT_TAGS = {"claude-desktop": "desk"}
+_ENTRYPOINT_TAG_MAX = 8
+_desktop_meta_cache = OrderedDict()   # {path_str: (mtime, size, meta)}
+_DESKTOP_META_CACHE_MAX = 256
+_desktop_sessions_cache = {"t": 0.0, "key": None, "sessions": None}
+_desktop_state = OrderedDict()        # {sid: incremental parser state}
+_DESKTOP_STATE_MAX = 8
+
+
+def _origin_tag(entrypoint):
+    """Short picker tag for the transcript's entrypoint ('claude-desktop' → 'desk')."""
+    if not isinstance(entrypoint, str) or not entrypoint.strip():
+        return "?"
+    ep = entrypoint.strip()
+    return _ENTRYPOINT_TAGS.get(ep) or _sanitize(ep)[:_ENTRYPOINT_TAG_MAX] or "?"
+
+
+def _open_checked(path, st):
+    """Open `path` for binary reading only if it is still the file `st`
+    described (same inode/device — TOCTOU guard shared with _scan_ai_title).
+    Returns an open file object or None."""
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return None
+    try:
+        fst = os.fstat(fh.fileno())
+    except OSError:
+        fh.close()
+        return None
+    if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+        fh.close()
+        return None
+    return fh
+
+
+def _complete_lines(raw, *, drop_first=False):
+    """Decode a byte window into whole JSONL lines. A window cut mid-file drops
+    its partial first line (drop_first) and always its partial last line."""
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if drop_first and lines:
+        lines = lines[1:]
+    if lines and not text.endswith("\n"):
+        lines = lines[:-1]
+    return lines
+
+
+def _transcript_meta(path, st):
+    """Picker metadata from the transcript head and tail: entrypoint, title,
+    cwd and the most recent assistant model. Cached per (mtime, size)."""
+    key = str(path)
+    cached = _desktop_meta_cache.get(key)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        _desktop_meta_cache.move_to_end(key)
+        return cached[2]
+    meta = {"entrypoint": "", "title": "", "cwd": "", "model": ""}
+    fh = _open_checked(path, st)
+    if fh is None:
+        return None
+    try:
+        with fh:
+            head = fh.read(_TRANSCRIPT_HEAD_BYTES)
+            tail_start = max(len(head), st.st_size - _TRANSCRIPT_TAIL_BYTES)
+            tail = b""
+            if tail_start < st.st_size:
+                fh.seek(tail_start)
+                tail = fh.read(_TRANSCRIPT_TAIL_BYTES)
+    except OSError:
+        return None
+    if tail_start == len(head):
+        lines = _complete_lines(head + tail)  # head and tail are contiguous
+    else:
+        lines = _complete_lines(head) + _complete_lines(tail, drop_first=True)
+    ai_title = ""
+    for line in lines:
+        if not line.startswith("{"):
+            continue
+        rec = json_object(line)
+        if rec is None:
+            continue
+        rtype = rec.get("type")
+        if not meta["entrypoint"] and isinstance(rec.get("entrypoint"), str):
+            meta["entrypoint"] = rec["entrypoint"]
+        if isinstance(rec.get("cwd"), str) and rec["cwd"]:
+            meta["cwd"] = _sanitize(rec["cwd"])
+        if rtype == "custom-title" and isinstance(rec.get("customTitle"), str) and rec["customTitle"].strip():
+            meta["title"] = _sanitize(rec["customTitle"].strip())
+        elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str) and rec["aiTitle"].strip():
+            ai_title = _sanitize(rec["aiTitle"].strip())
+        elif rtype == "assistant" and not rec.get("isSidechain"):
+            mid = as_dict(rec.get("message")).get("model")
+            if isinstance(mid, str) and mid and not mid.startswith("<"):
+                meta["model"] = mid
+    meta["title"] = meta["title"] or ai_title
+    _desktop_meta_cache[key] = (st.st_mtime, st.st_size, meta)
+    while len(_desktop_meta_cache) > _DESKTOP_META_CACHE_MAX:
+        _desktop_meta_cache.popitem(last=False)
+    return meta
+
+
+def list_desktop_sessions(exclude=()):
+    """Transcript-only sessions touched within DESKTOP_SESSION_TTL.
+
+    Scans ~/.claude/projects/<project>/<sid>.jsonl (subagent transcripts live
+    one level deeper and are not sessions). Session IDs in `exclude` — those
+    that already have a statusline snapshot — are skipped, so a CLI session
+    appears once, in the CLI section. Each entry has the list_sessions() keys
+    plus source="desktop", origin (entrypoint tag) and path. Newest first."""
+    root = _safe_claude_projects_root()
+    if root is None:
+        return []
+    exclude = set(exclude)
+    now = time.time()
+    # Pass 1 — stat only (cheap): keep transcripts touched within the TTL, the
+    # newest file per sid. The scan cap applies to these fresh files, so old
+    # transcripts (Claude Code keeps 30 days) can never crowd out a new one.
+    fresh = {}
+    stat_count = 0
+    try:
+        projects = list(root.iterdir())
+    except OSError:
+        return []
+    for proj in projects:
+        try:
+            pst = proj.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+            continue
+        try:
+            files = list(proj.glob("*.jsonl"))
+        except OSError:
+            continue
+        for jl in files:
+            stat_count += 1
+            if stat_count > _DESKTOP_STAT_CAP:
+                break
+            sid = jl.stem
+            if sid in exclude or sid in RESERVED_SIDS or not _SID_RE.match(sid):
+                continue
+            try:
+                st = jl.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                continue
+            if now - st.st_mtime > DESKTOP_SESSION_TTL or st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
+                continue
+            prev = fresh.get(sid)
+            if prev is None or prev[1].st_mtime < st.st_mtime:
+                fresh[sid] = (jl, st)
+    # Pass 2 — read head/tail metadata of the newest _DESKTOP_SCAN_CAP files.
+    found = {}
+    newest = sorted(fresh.items(), key=lambda kv: kv[1][1].st_mtime, reverse=True)
+    for sid, (jl, st) in newest[:_DESKTOP_SCAN_CAP]:
+        path = _safe_transcript_path(str(jl))
+        if path is None:
+            continue
+        meta = _transcript_meta(path, st)
+        if not meta or not meta["model"]:
+            continue  # no assistant reply yet — nothing to show
+        age = now - st.st_mtime
+        found[sid] = {
+            "id": sid, "mtime": st.st_mtime, "age": age,
+            "stale": age > STALE_THRESHOLD,
+            "model": _sanitize(_model_label(meta["model"])),
+            "session_name": meta["title"],
+            "ai_title": "",
+            "cwd": meta["cwd"],
+            "source": "desktop",
+            "origin": _origin_tag(meta["entrypoint"]),
+            "path": str(path),
+        }
+    sessions = list(found.values())
+    sessions.sort(key=lambda s: s["mtime"], reverse=True)
+    return sessions
+
+
+def cached_desktop_sessions(exclude=(), ttl=2.0):
+    """list_desktop_sessions() behind a short TTL for the 20 Hz picker loop."""
+    now = time.monotonic()
+    key = frozenset(exclude)
+    c = _desktop_sessions_cache
+    if c["sessions"] is not None and c["key"] == key and now - c["t"] < ttl:
+        return c["sessions"]
+    sessions = list_desktop_sessions(exclude)
+    c.update({"t": now, "key": key, "sessions": sessions})
+    return sessions
+
+
+def _new_desktop_state(path, st):
+    return {
+        "path": str(path), "ident": (st.st_ino, st.st_dev), "offset": 0,
+        "msgs": OrderedDict(), "first_t": 0.0, "last_t": 0.0,
+        "title": "", "ai_title": "", "cwd": "", "entrypoint": "",
+        "requested": "", "built_at": -1, "built": None,
+    }
+
+
+def _ingest_desktop_record(state, rec):
+    ts = _parse_ts(rec.get("timestamp"))
+    if ts >= MIN_EPOCH:
+        if not state["first_t"] or ts < state["first_t"]:
+            state["first_t"] = ts
+        state["last_t"] = max(state["last_t"], ts)
+    rtype = rec.get("type")
+    if not state["entrypoint"] and isinstance(rec.get("entrypoint"), str):
+        state["entrypoint"] = rec["entrypoint"]
+    if isinstance(rec.get("cwd"), str) and rec["cwd"]:
+        state["cwd"] = rec["cwd"]
+    if isinstance(rec.get("requestedModel"), str):
+        state["requested"] = rec["requestedModel"]
+    if rtype == "custom-title" and isinstance(rec.get("customTitle"), str):
+        state["title"] = rec["customTitle"].strip()
+    elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str):
+        state["ai_title"] = rec["aiTitle"].strip()
+    elif rtype == "assistant" and not rec.get("isSidechain"):
+        msg = as_dict(rec.get("message"))
+        model = msg.get("model")
+        if not isinstance(model, str) or not model or model.startswith("<"):
+            return  # synthetic / local placeholder message — no API usage
+        u = as_dict(msg.get("usage"))
+        mid = _usage_key(rec, msg) or rec.get("uuid")
+        if not isinstance(mid, str) or not mid:
+            return
+        prev = state["msgs"].get(mid)
+        cc = as_dict(u.get("cache_creation"))
+        stu = as_dict(u.get("server_tool_use"))
+        state["msgs"][mid] = {
+            "t": prev["t"] if prev else (ts if ts >= MIN_EPOCH else 0.0),
+            "model": model,
+            "speed": u.get("speed") if isinstance(u.get("speed"), str) else None,
+            "in": _num(u.get("input_tokens")),
+            "out": _num(u.get("output_tokens")),
+            "cr": _num(u.get("cache_read_input_tokens")),
+            "cw": _num(u.get("cache_creation_input_tokens")),
+            "cw1h": _num(cc.get("ephemeral_1h_input_tokens")),
+            "cw5m": _num(cc.get("ephemeral_5m_input_tokens")),
+            "wsr": _num(stu.get("web_search_requests")),
+            "wfr": _num(stu.get("web_fetch_requests")),
+        }
+
+
+def _desktop_ctx_size(state, model_id):
+    if DESKTOP_CTX_SIZE > 0:
+        return DESKTOP_CTX_SIZE
+    if "[1m]" in state["requested"].lower():
+        return 1_000_000
+    return _model_context_window(model_id)
+
+
+def _build_desktop_snapshot(sid, state, mtime):
+    """Snapshot-shaped dict + rate history from the parsed transcript state.
+    The snapshot also carries _session_cost, the breakdown the cost modal
+    shows (same shape as _aggregate_session_cost)."""
+    msgs = list(state["msgs"].values())
+    if not msgs:
+        return None
+    last = msgs[-1]
+    window = _desktop_ctx_size(state, last["model"])
+    sc = {k: 0.0 for k in ("input", "output", "cache_read", "cache_write",
+                           "cost_input", "cost_output", "cost_cache_read", "cost_cache_write",
+                           "web_search_requests", "web_fetch_requests", "cache_1h", "cache_5m")}
+    cost = 0.0
+    hist = []
+    for m in msgs:
+        c = _usage_cost(m["model"], m["speed"], m["in"], m["out"], m["cr"], m["cw"], m["cw1h"])
+        cost += sum(c.values())
+        for k, v in (("input", m["in"]), ("output", m["out"]), ("cache_read", m["cr"]),
+                     ("cache_write", m["cw"]), ("cache_1h", m["cw1h"]), ("cache_5m", m["cw5m"]),
+                     ("web_search_requests", m["wsr"]), ("web_fetch_requests", m["wfr"])):
+            sc[k] += v
+        for k in ("input", "output", "cache_read", "cache_write"):
+            sc["cost_" + k] += c[k]
+        if m["t"] >= MIN_EPOCH:
+            pct = (m["in"] + m["cr"] + m["cw"]) / window * 100
+            hist.append({"t": m["t"], "cost": {"total_cost_usd": cost},
+                         "context_window": {"used_percentage": pct}})
+    session_cost = {k: (int(v) if not k.startswith("cost_") else v) for k, v in sc.items()}
+    session_cost["cost_total"] = cost
+    ctx_tokens = last["in"] + last["cr"] + last["cw"]
+    dur_ms = max(0.0, (state["last_t"] - state["first_t"]) * 1000) if state["first_t"] else 0.0
+    data = {
+        "session_id": sid,
+        "transcript_path": state["path"],
+        "cwd": _sanitize(state["cwd"]),
+        "session_name": _sanitize(state["title"] or state["ai_title"]),
+        "model": {"id": _sanitize(last["model"]),
+                  "display_name": _sanitize(_model_label(last["model"]))},
+        "context_window": {
+            "context_window_size": window,
+            "used_percentage": min(100.0, ctx_tokens / window * 100),
+            # Same meaning as the statusline fields: the current context.
+            "total_input_tokens": int(ctx_tokens),
+            "total_output_tokens": int(last["out"]),
+            "current_usage": {
+                "input_tokens": int(last["in"]),
+                "output_tokens": int(last["out"]),
+                "cache_read_input_tokens": int(last["cr"]),
+                "cache_creation_input_tokens": int(last["cw"]),
+            },
+        },
+        "cost": {"total_cost_usd": cost, "total_duration_ms": dur_ms},
+        "_source": "desktop",
+        "_origin": _origin_tag(state["entrypoint"]),
+        "_mtime": mtime,
+        "_session_cost": session_cost,
+    }
+    return data, hist[-HISTORY_RATE_SAMPLES:]
+
+
+def load_desktop_state(sid, path):
+    """Return (snapshot, history) for a desktop session, or None.
+
+    Parses the transcript incrementally: only bytes appended since the last
+    call are read, so polling a multi-megabyte transcript stays cheap. At most
+    _DESKTOP_READ_BUDGET bytes are read per call; while a large transcript is
+    still being caught up the call returns None. A replaced or truncated file
+    restarts the parse."""
+    if not isinstance(sid, str) or not _SID_RE.match(sid):
+        return None
+    safe = _safe_transcript_path(path)
+    if safe is None:
+        return None
+    try:
+        st = safe.stat()
+    except OSError:
+        return None
+    if st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
+        return None
+    state = _desktop_state.get(sid)
+    if (state is None or state["path"] != str(safe)
+            or state["ident"] != (st.st_ino, st.st_dev) or st.st_size < state["offset"]):
+        state = _new_desktop_state(safe, st)
+    _desktop_state[sid] = state
+    _desktop_state.move_to_end(sid)
+    while len(_desktop_state) > _DESKTOP_STATE_MAX:
+        _desktop_state.popitem(last=False)
+    caught_up = True
+    if st.st_size > state["offset"]:
+        want = st.st_size - state["offset"]
+        caught_up = want <= _DESKTOP_READ_BUDGET
+        fh = _open_checked(safe, st)
+        if fh is None:
+            return None
+        try:
+            with fh:
+                fh.seek(state["offset"])
+                raw = fh.read(min(want, _DESKTOP_READ_BUDGET))
+        except OSError:
+            return None
+        end = raw.rfind(b"\n")
+        if end < 0 and not caught_up:
+            end = len(raw) - 1  # one line longer than the budget: skip it
+        if end >= 0:
+            chunk = raw[:end + 1]
+            state["offset"] += len(chunk)
+            for line in chunk.decode("utf-8", errors="replace").split("\n"):
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                rec = json_object(line)
+                if rec is not None:
+                    _ingest_desktop_record(state, rec)
+    if not caught_up:
+        return None  # still reading a large transcript; the next poll continues
+    if state["built_at"] != state["offset"] or state["built"] is None:
+        state["built"] = _build_desktop_snapshot(sid, state, st.st_mtime)
+        state["built_at"] = state["offset"]
+    elif state["built"] is not None:
+        state["built"][0]["_mtime"] = st.st_mtime
+    return state["built"]
+
+
+def _snapshot_mtime(data):
+    """Last-update time of the session behind `data`: the transcript mtime for
+    desktop sessions, the statusline snapshot mtime otherwise. None if unknown."""
+    if data.get("_source") == "desktop":
+        mt = data.get("_mtime")
+        return float(mt) if isinstance(mt, (int, float)) and not isinstance(mt, bool) else None
+    sid = str(data.get("session_id") or "default")
+    if not _SID_RE.match(sid):
+        return None
+    try:
+        return (DATA_DIR / f"{sid}.json").stat().st_mtime
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Spinners
 # ---------------------------------------------------------------------------
 # Session spinner — braille dots, 10 frames, 80ms
@@ -1432,19 +1885,31 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     buf.append(f"{BG_BAR}{hp_text}{' ' * hp_pad}{R}")
 
     # ── Session status line (always visible) ────────────────
+    # Desktop app sessions are read from the transcript: tag them so every
+    # number below is understood as an estimate.
+    is_desktop = data.get("_source") == "desktop"
+    upd_mt = _snapshot_mtime(data)
     if stale:
         _stale_age = ""
-        _sid_safe = str(data.get("session_id") or "default")
-        if _SID_RE.match(_sid_safe):
-            try:
-                _mt = (DATA_DIR / f"{_sid_safe}.json").stat().st_mtime
-                _idle = int(time.time() - _mt)
-                _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
-            except OSError:
-                pass
-        buf.append(f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  {c(C_FG)}{session_label}{R}")
+        if upd_mt is not None:
+            _idle = int(time.time() - upd_mt)
+            _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
+        prefix = f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  "
+        label_color = c(C_FG)
     else:
-        buf.append(f"{C_GRN}{B}{spin_session()} Session Active{R} {C_FG}{session_label}{R}")
+        prefix = f"{C_GRN}{B}{spin_session()} Session Active{R} "
+        label_color = C_FG
+    # In a narrow terminal the tag shortens and the name is cut with '…', so
+    # the line never loses its end to the terminal edge.
+    room = SW - _vis_width(prefix)
+    tag = ""
+    if is_desktop:
+        tag = "  desktop app, estimated"
+        if _vis_width(session_label) + len(tag) > room:
+            tag = "  est."
+    label = _ellipsize(session_label, room - len(tag))
+    src_tag = f"{C_DIM}{tag}{R}" if tag else ""
+    buf.append(f"{prefix}{label_color}{label}{R}{src_tag}")
 
     buf.append(sep(SW))
 
@@ -1462,7 +1927,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     cwt = _num(usage.get("cache_creation_input_tokens", 0))
 
     # ── APR — API Ratio ──
-    if dur > 0:
+    if is_desktop:
+        # The transcript records no API time, so the ratio is unknown.
+        buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"    {C_DIM}DUR:{R} {c(C_WHT)}{f_dur(dur) if dur > 0 else '--'}{R} {C_DIM}API: n/a{R}")
+    elif dur > 0:
         apr_pct = min(100.0, round(api_dur / dur * 100, 1))
         buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
         buf.append(f"    {C_DIM}DUR:{R} {c(C_WHT)}{f_dur(dur)}{R} {C_DIM}API:{R} {c(C_GRN)}{f_dur(api_dur)}{R}")
@@ -1531,7 +2000,12 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             _render_rate_limit(as_dict(src.get(key)), label, window, fable_tag if key == "fable" else "")
             for key, label, window, _legend in _RL_ROWS
         ]
-        if not any(shown):
+        if not any(shown) and is_desktop:
+            # Limits arrive only through the statusline; a CLI session (any
+            # one — they are per account) supplies them via
+            # cached_freshest_rate_limits.
+            buf.append(f"{C_DIM}Rate limits: n/a (desktop app){R}")
+        elif not any(shown):
             buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
         buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
@@ -1542,13 +2016,9 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     brn_val = f"{cpm:.4f} $/min" if cpm and cpm > 0.0001 else "collecting..."
     ctr_val = f"{xpm:.2f} %/min" if xpm and xpm > 0.001 else "--"
     now = datetime.now().strftime("%H:%M:%S")
-    if _SID_RE.match(sid_str):
-        try:
-            mt = (DATA_DIR / f"{sid_str}.json").stat().st_mtime
-            age = int(time.time() - mt)
-            age_s = f"{age}s" if age < 120 else f"{age // 60}m"
-        except OSError:
-            age_s = "?"
+    if upd_mt is not None:
+        age = int(time.time() - upd_mt)
+        age_s = f"{age}s" if age < 120 else f"{age // 60}m"
     else:
         age_s = "?"
     # ── BRN — burn rate bar (scales to BRN_MAX $/min) ──────
@@ -1563,7 +2033,8 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     cst_pct = min(100, usd / CST_MAX * 100) if usd > 0 else 0
     buf.append(f"{c(C_ORN)}{B}CST{R} {mkbar(cst_pct, c(C_ORN))}")
     reported_cost = f_cost_value(as_dict(data.get("cost")).get("total_cost_usd"))
-    buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{reported_cost}{R}")
+    est_tag = f" {C_DIM}est.{R}" if is_desktop else ""
+    buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{reported_cost}{R}{est_tag}")
     # ── Cross-session cost (TDY / WEK) ─────────────────────
     tdy, wek = cached_cross_session_costs()
     tdy_s = f_cost(tdy) if tdy > 0 else "--"
@@ -1626,9 +2097,10 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}]{R} {C_DIM}Select Session / Period{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}1-3{R}{C_DIM}]{R} {C_DIM}Token Stats Period{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal{R} {C_DIM}PgUp/Dn Home/End{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal / move picker{R} {C_DIM}PgUp/Dn Home/End{R}")
+    buf.append(f"{C_DIM}[{R}{C_WHT}enter{R}{C_DIM}]{R} {C_DIM}Open Session (picker){R}")
     # ── Dashboard metrics ──
     buf.append(sep(SW))
     dp = max(0, SW - 9)  # "DASHBOARD" = 9 chars
@@ -1651,6 +2123,16 @@ def render_legend(cols, rows):
     buf.append(f"{C_WHT}LNS{R} {C_DIM}Lines Changed{R} {C_GRN}+{R}{C_DIM}added{R} {C_RED}-{R}{C_DIM}removed{R}")
     buf.append(f"{C_WHT}NOW{R} {C_DIM}Current Time{R} {C_WHT}UPD{R} {C_DIM}Last Update{R}")
     buf.append(f"{C_WHT}RLS{R} {C_DIM}Release Status{R}")
+    # ── Desktop app sessions ──
+    buf.append(sep(SW))
+    dk = max(0, SW - 11)  # "DESKTOP APP" = 11 chars
+    buf.append(f"{BG_BAR}{C_WHT}{B}DESKTOP APP{R}{BG_BAR}{' ' * dk}{R}")
+    buf.append(sep(SW))
+    buf.append(f"{C_DIM}Read from the session transcript; marked {R}{C_WHT}desktop app, estimated{R}{C_DIM} (narrow: {R}{C_WHT}est.{R}{C_DIM}){R}")
+    buf.append(f"{C_ORN}CST{R} {C_DIM}Estimated from token prices{R} {C_CYN}CTX{R} {C_DIM}From the last request{R}")
+    buf.append(f"{C_DIM} APR and LNS: n/a, not in the transcript{R}")
+    buf.append(f"{C_DIM} 5HL / 7DL: shown only while a CLI session reports them{R}")
+    buf.append(f"{C_DIM} desk  Desktop app; other tags name the Claude Code entrypoint{R}")
     # ── Token Stats ──
     buf.append(sep(SW))
     tp = max(0, SW - 11)
@@ -1693,18 +2175,36 @@ def render_legend(cols, rows):
 # Cost breakdown modal
 # ---------------------------------------------------------------------------
 # Prices per 1M tokens (USD). Sources: official Anthropic pricing page.
-# cache_write = 5-minute TTL price. 1h cache write adds ~60% — documented separately.
+# cache_write = 5-minute TTL price (1.25x input). A 1-hour cache write costs
+# CACHE_WRITE_1H_MULT x input; _usage_cost applies it to the 1h share that
+# usage.cache_creation reports.
 _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}  # Sonnet-tier fallback
+CACHE_WRITE_1H_MULT = 2.0
+DEFAULT_CTX_WINDOW = 1_000_000  # every current model except Haiku 4.5; older 200K models set "ctx"
 
 # Single source of truth for model metadata — keyed by Anthropic model ID.
 # Each entry: {"name": "...", "code": ("XX", "V.v"), "pricing": {...} | None}
 # Pricing is per-1M-token USD (input / output / cache_read / cache_write).
+# Optional: "pricing_fast" (speed="fast"), "pricing_long" + "long_threshold"
+# (rates for a request whose prompt exceeds the threshold), "ctx" (context
+# window when it is not DEFAULT_CTX_WINDOW).
 # Adding a new model = one entry here, not three. Used by _get_pricing (below)
 # and _model_code (token-stats modal section).
 _MODELS = {
+    # Fable 5.2 / Mythos 5.2: $8 / $40, cache read $0.20 (0.025x), 5m write $10.
+    # Fast mode $16 / $80; its cache rates follow the same 2x as the other
+    # fast-mode entries (not published separately).
+    "claude-fable-5-2": {"name": "Fable 5.2", "code": ("FBL", "5.2"),
+                         "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00},
+                         "pricing_fast": {"input": 16.0, "output": 80.0, "cache_read": 0.40, "cache_write": 20.00}},
+    "claude-mythos-5-2": {"name": "Mythos 5.2", "code": ("MY", "5.2"),
+                          "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00},
+                          "pricing_fast": {"input": 16.0, "output": 80.0, "cache_read": 0.40, "cache_write": 20.00}},
     # Fable 5.1: same per-token price as Fable 5, but cache reads are 0.025x ($0.25).
     "claude-fable-5-1": {"name": "Fable 5.1", "code": ("FBL", "5.1"),
                          "pricing": {"input": 10.0, "output": 50.0, "cache_read": 0.25, "cache_write": 12.50}},
+    "claude-mythos-5-1": {"name": "Mythos 5.1", "code": ("MY", "5.1"),
+                          "pricing": {"input": 10.0, "output": 50.0, "cache_read": 0.25, "cache_write": 12.50}},
     "claude-fable-5": {"name": "Fable 5", "code": ("FBL", "5"),
                        "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     # Project Glasswing only — same tier as Fable 5. Rare in transcripts.
@@ -1728,21 +2228,30 @@ _MODELS = {
     "claude-opus-4-6": {"name": "Opus 4.6", "code": ("OP", "4.6"),
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
                         "pricing_fast": {"input": 30.0, "output": 150.0, "cache_read": 3.00, "cache_write": 37.50}},
-    "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"),
+    "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"), "ctx": 200_000,
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
-    "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"),
+    "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"), "ctx": 200_000,
                         "pricing": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}},
     "claude-sonnet-5-5": {"name": "Sonnet 5.5", "code": ("SO", "5.5"),
                           "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.10, "cache_write": 2.50}},
+    # Sonnet 5: $2 / $10; cache read assumed at the standard 0.1x (not published here).
+    "claude-sonnet-5": {"name": "Sonnet 5", "code": ("SO", "5"),
+                        "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.20, "cache_write": 2.50}},
     "claude-sonnet-4-6": {"name": "Sonnet 4.6", "code": ("SO", "4.6"),
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
-    "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"),
+    "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"), "ctx": 200_000,
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
-    "claude-haiku-4-5": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
+    # Haiku 5.5: $0.10 / $0.50 up to a 100K-token prompt, $0.50 / $2.50 above.
+    # Cache rates assumed at the standard 0.1x read / 1.25x write.
+    "claude-haiku-5-5": {"name": "Haiku 5.5", "code": ("HA", "5.5"),
+                         "pricing": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+                         "pricing_long": {"input": 0.50, "output": 2.50, "cache_read": 0.05, "cache_write": 0.625},
+                         "long_threshold": 100_000},
+    "claude-haiku-4-5": {"name": "Haiku 4.5", "code": ("HA", "4.5"), "ctx": 200_000,
                          "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
     # Retired model — kept for correct pricing of historical transcripts. Real ID
     # is claude-3-5-haiku-20241022; _model_base strips the -YYYYMMDD to this key.
-    "claude-3-5-haiku": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
+    "claude-3-5-haiku": {"name": "Haiku 3.5", "code": ("HA", "3.5"), "ctx": 200_000,
                          "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
     # Short-ID fallbacks (some transcript entries use abbreviated IDs).
     # Priced at current standard tier to avoid falling back to _DEFAULT_PRICING
@@ -1750,6 +2259,9 @@ _MODELS = {
     "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": {"input": 1.0, "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
     "sonnet": {"name": "Sonnet", "code": ("SO", ""), "pricing": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
     "opus":   {"name": "Opus",   "code": ("OP", ""), "pricing": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    # Fable / Mythos short aliases: priced as the current release (5.2).
+    "fable":  {"name": "Fable",  "code": ("FBL", ""), "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00}},
+    "mythos": {"name": "Mythos", "code": ("MY", ""), "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00}},
 }
 
 
@@ -1762,16 +2274,54 @@ def _model_base(model_id):
     return re.sub(r"-\d{8}$", "", base)
 
 
-def _get_pricing(model_id, speed=None):
+def _get_pricing(model_id, speed=None, prompt_tokens=None):
     """Get pricing for model. speed="fast" selects fast-mode rates when the
-    model defines them; otherwise standard. Falls back to _DEFAULT_PRICING."""
+    model defines them; a prompt (input + cache read + cache write tokens)
+    above the model's long_threshold selects pricing_long; otherwise standard.
+    Falls back to _DEFAULT_PRICING."""
     entry = _MODELS.get(_model_base(model_id))
     if entry:
         if speed == "fast" and entry.get("pricing_fast"):
             return entry["pricing_fast"]
+        if (entry.get("pricing_long") and prompt_tokens is not None
+                and prompt_tokens > entry.get("long_threshold", float("inf"))):
+            return entry["pricing_long"]
         if entry.get("pricing"):
             return entry["pricing"]
     return _DEFAULT_PRICING
+
+
+def _model_context_window(model_id):
+    """Context window in tokens: DEFAULT_CTX_WINDOW unless _MODELS says otherwise."""
+    entry = _MODELS.get(_model_base(model_id)) or {}
+    return int(entry.get("ctx") or DEFAULT_CTX_WINDOW)
+
+
+def _usage_key(rec, msg):
+    """Identity of the API request behind an assistant record. Claude Code
+    writes one record per content block and repeats the request's usage on
+    each, so usage must be counted once per key. None = no identity (count
+    the record on its own)."""
+    for k in (msg.get("id"), rec.get("requestId")):
+        if isinstance(k, str) and k:
+            return k
+    return None
+
+
+def _usage_cost(model_id, speed, inp, out, cr, cw, cw_1h=0):
+    """USD cost of one request, split as {input, output, cache_read,
+    cache_write}. cw is every cache-creation token; cw_1h is the part written
+    with the 1-hour TTL (from usage.cache_creation), priced at
+    CACHE_WRITE_1H_MULT x input instead of the 5-minute write rate."""
+    p = _get_pricing(model_id, speed, prompt_tokens=inp + cr + cw)
+    cw_1h = max(0.0, min(cw_1h, cw))
+    return {
+        "input": inp * p["input"] / 1_000_000,
+        "output": out * p["output"] / 1_000_000,
+        "cache_read": cr * p["cache_read"] / 1_000_000,
+        "cache_write": ((cw - cw_1h) * p["cache_write"]
+                        + cw_1h * p["input"] * CACHE_WRITE_1H_MULT) / 1_000_000,
+    }
 
 
 _SESSION_COST_CACHE = OrderedDict()  # LRU: {session_id: (ts, breakdown_dict)}
@@ -1827,16 +2377,15 @@ def _safe_transcript_path(tp):
 _AI_TITLE_CACHE = OrderedDict()  # LRU: {sid: (ts, mtime, title_or_None)}
 _AI_TITLE_CACHE_MAX = 64
 _AI_TITLE_TTL = 30.0
-_AI_TITLE_SCAN_BYTES = 64 * 1024  # CC writes ai-title within first ~20 records (<50 KiB); 64 KiB head suffices and is ~8x faster on cache miss than the prior 512 KiB cap
 
 
 def _scan_ai_title(transcript_path):
-    """Return sanitized aiTitle from transcript JSONL, or None.
+    """Return the session's sanitized title from its transcript, or None.
 
-    CC writes `{"type":"ai-title","aiTitle":"..."}` records early in the file
-    (within the first dozen records). We bound-read the head to keep this fast
-    on multi-megabyte transcripts called per render tick. Last record in the
-    scanned window wins. Path containment via _safe_transcript_path.
+    A rename (`custom-title`) wins over the generated `ai-title`; the last
+    non-empty record of a kind wins. Only the head and tail of the file are
+    read, so this stays fast on multi-megabyte transcripts called per render
+    tick. Path containment via _safe_transcript_path.
     """
     path = _safe_transcript_path(transcript_path)
     if path is None:
@@ -1845,7 +2394,7 @@ def _scan_ai_title(transcript_path):
         st = path.stat()
     except OSError:
         return None
-    if st.st_size > TRANSCRIPT_MAX_BYTES:
+    if st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
         return None
 
     sid = path.stem
@@ -1858,46 +2407,11 @@ def _scan_ai_title(transcript_path):
         _AI_TITLE_CACHE.move_to_end(sid)
         return cached[2]
 
-    title = None
-    try:
-        with open(path, "rb") as fh:
-            # S-P2-2 (CWE-367): TOCTOU mitigation — re-stat the *open*
-            # file descriptor and require (st_ino, st_dev) to match the
-            # pre-open stat. If they differ, the underlying inode was
-            # swapped between resolve() (in _safe_transcript_path) and open(), which on
-            # a shared filesystem could let another user point us at a
-            # different file via fast unlink/link or symlink-flip races.
-            # st_dev guard ensures the swap can't move us to a different
-            # mount either.
-            try:
-                fst = os.fstat(fh.fileno())
-            except OSError:
-                raw = None
-            else:
-                if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
-                    raw = None
-                else:
-                    raw = fh.read(_AI_TITLE_SCAN_BYTES)
-    except OSError:
-        raw = None
-    if raw:
-        try:
-            text = raw.decode("utf-8", errors="replace")
-        except (UnicodeDecodeError, ValueError):
-            text = ""
-        # Drop the trailing fragment if our read sliced mid-line.
-        if len(raw) >= _AI_TITLE_SCAN_BYTES:
-            nl = text.rfind("\n")
-            if nl >= 0:
-                text = text[:nl]
-        for line in text.splitlines():
-            if not line:
-                continue
-            obj = json_object(line)
-            if isinstance(obj, dict) and obj.get("type") == "ai-title":
-                t = obj.get("aiTitle")
-                if isinstance(t, str) and t.strip():
-                    title = _sanitize(t.strip())
+    # Head + tail read with the TOCTOU identity check (_transcript_meta):
+    # Claude Code repeats ai-title records through the session (the first one
+    # can sit hundreds of KiB in), and a rename writes custom-title, which wins.
+    meta = _transcript_meta(path, st)
+    title = (meta or {}).get("title") or None
 
     while len(_AI_TITLE_CACHE) >= _AI_TITLE_CACHE_MAX:
         _AI_TITLE_CACHE.popitem(last=False)
@@ -1907,16 +2421,19 @@ def _scan_ai_title(transcript_path):
 
 def _aggregate_session_cost(data):
     """Walk the current session's transcript JSONL, sum per-category tokens
-    across all assistant records, apply pricing per-record model.
+    once per API request (_usage_key), apply pricing per-request model.
     Returns dict {input, output, cache_read, cache_write, cost_total,
                   cost_input, cost_output, cost_cache_read, cost_cache_write}
-    or None if transcript unreachable.
+    or None if transcript unreachable. A desktop app snapshot already carries
+    this breakdown (_session_cost) from its incremental parse.
 
     F-06 / CACHE-06: all failure paths for a valid sid write a short-lived
     sentinel (now, None) to _SESSION_COST_CACHE so the next render-frame call
     within TTL returns cached None immediately instead of re-scanning.  The
     cache-hit branch already returns cached[1] (which may be None) correctly.
     """
+    if data.get("_source") == "desktop" and isinstance(data.get("_session_cost"), dict):
+        return data["_session_cost"]
     sid = data.get("session_id")
     sid = sid.strip() if isinstance(sid, str) else ""
     if not sid or not _SID_RE.match(sid):
@@ -1963,11 +2480,8 @@ def _aggregate_session_cost(data):
         _cache_sentinel()
         return None
 
-    inp = out = cr = cw = 0.0
-    ci = co = ccr = ccw = 0.0
     has_usage = False
-    wsr = wfr = 0
-    c1h = c5m = 0
+    reqs = OrderedDict()  # request key -> usage of that request (last record wins)
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             # S-P2-2 (CWE-367): TOCTOU guard — same fstat identity check as
@@ -2004,26 +2518,21 @@ def _aggregate_session_cost(data):
                 mid = msg.get("model") or ""
                 if not isinstance(mid, str):
                     mid = ""
-                pricing = _get_pricing(mid, u.get("speed"))
-                # Per-record token deltas — name with cr_inc/cw_inc (not r/w)
-                # to avoid visual collision with module-level `R` ANSI reset.
-                in_inc = _num(u.get("input_tokens", 0))
-                out_inc = _num(u.get("output_tokens", 0))
-                cr_inc = _num(u.get("cache_read_input_tokens", 0))
-                cw_inc = _num(u.get("cache_creation_input_tokens", 0))
-                inp += in_inc; out += out_inc; cr += cr_inc; cw += cw_inc
-                ci += in_inc * pricing["input"] / 1_000_000
-                co += out_inc * pricing["output"] / 1_000_000
-                ccr += cr_inc * pricing["cache_read"] / 1_000_000
-                ccw += cw_inc * pricing["cache_write"] / 1_000_000
-                stu = u.get("server_tool_use") or {}
-                if isinstance(stu, dict):
-                    wsr += int(_num(stu.get("web_search_requests", 0)))
-                    wfr += int(_num(stu.get("web_fetch_requests", 0)))
-                cc = u.get("cache_creation") or {}
-                if isinstance(cc, dict):
-                    c1h += int(_num(cc.get("ephemeral_1h_input_tokens", 0)))
-                    c5m += int(_num(cc.get("ephemeral_5m_input_tokens", 0)))
+                if mid.startswith("<"):
+                    continue  # <synthetic> placeholder — no API usage
+                stu = as_dict(u.get("server_tool_use"))
+                cc = as_dict(u.get("cache_creation"))
+                key = _usage_key(rec, msg) or f"#{len(reqs)}"
+                reqs[key] = (
+                    mid, u.get("speed"),
+                    _num(u.get("input_tokens", 0)), _num(u.get("output_tokens", 0)),
+                    _num(u.get("cache_read_input_tokens", 0)),
+                    _num(u.get("cache_creation_input_tokens", 0)),
+                    int(_num(cc.get("ephemeral_1h_input_tokens", 0))),
+                    int(_num(cc.get("ephemeral_5m_input_tokens", 0))),
+                    int(_num(stu.get("web_search_requests", 0))),
+                    int(_num(stu.get("web_fetch_requests", 0))),
+                )
                 # Known-but-ignored fields (F-18/F-19/F-20 / SD-003/007/008):
                 # u.get("diagnostics"), u.get("inference_geo"), u.get("service_tier"),
                 # rec.get("context_management") — not needed for cost/token aggregation.
@@ -2034,6 +2543,16 @@ def _aggregate_session_cost(data):
     if not has_usage:
         _cache_sentinel()
         return None
+
+    inp = out = cr = cw = 0.0
+    ci = co = ccr = ccw = 0.0
+    wsr = wfr = c1h = c5m = 0
+    for mid, speed, in_inc, out_inc, cr_inc, cw_inc, h1, m5, ws, wf in reqs.values():
+        inp += in_inc; out += out_inc; cr += cr_inc; cw += cw_inc
+        cost = _usage_cost(mid, speed, in_inc, out_inc, cr_inc, cw_inc, h1)
+        ci += cost["input"]; co += cost["output"]
+        ccr += cost["cache_read"]; ccw += cost["cache_write"]
+        c1h += h1; c5m += m5; wsr += ws; wfr += wf
 
     result = {
         "input": int(inp), "output": int(out),
@@ -2318,7 +2837,7 @@ def render_pulse_modal(cols, rows):
             affected.add(m)
     if affected or incidents:
         parts = []
-        for m in ("opus", "sonnet", "haiku"):
+        for m in pulse.MODEL_FAMILIES:
             if m in affected:
                 parts.append(f"{C_RED}{B}{m}{R}")
             else:
@@ -3118,6 +3637,7 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
         # grows between lstat and read). None == unreadable or over cap.
         raw = safe_read(f, _SUBAGENT_FILE_MAX)
         too_large = raw is None
+        seen = set()  # request keys already counted (usage repeats per content block)
         if raw is not None:
             for line in raw.decode("utf-8", errors="replace").splitlines():
                 o = json_object(line)
@@ -3132,7 +3652,10 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
                 if not isinstance(m, dict):
                     continue
                 u = m.get("usage")
-                if isinstance(u, dict):
+                ukey = _usage_key(o, m)  # not `key`: that names the cache entry
+                if isinstance(u, dict) and (ukey is None or ukey not in seen):
+                    if ukey is not None:
+                        seen.add(ukey)
                     tok += (_num(u.get("input_tokens"), 0) + _num(u.get("output_tokens"), 0)
                             + _num(u.get("cache_creation_input_tokens"), 0)
                             + _num(u.get("cache_read_input_tokens"), 0))
@@ -3221,6 +3744,9 @@ _TOOL_ABBR = {
     "Agent": "AGNT", "WebFetch": "WFCH", "WebSearch": "WSCH",
     "TodoWrite": "TODO", "ExitPlanMode": "PLAN", "Skill": "SKIL",
     "AskUserQuestion": "ASK", "SlashCommand": "SLSH",
+    "PowerShell": "PWSH", "ToolSearch": "TSRC", "TaskStop": "TSTP",
+    "TaskCreate": "TCRT", "TaskUpdate": "TUPD", "SendMessage": "SMSG",
+    "Workflow": "WFLW", "Monitor": "MNTR",
 }
 
 
@@ -3313,48 +3839,146 @@ def render_agents(data, cols, rows, active_only=False):
 # ---------------------------------------------------------------------------
 # Session picker
 # ---------------------------------------------------------------------------
+_picker_scroll = 0  # first visible body line of the picker (kept around the cursor)
+
+
 def _picker_order(sessions):
-    """Single source of truth for picker ordering: active sessions first, then
-    stale, capped at 9 (the keyboard 1-9 limit). render_picker and main()'s
-    digit-selection MUST share this so position N on screen maps to the Nth
-    session a keypress selects — two hand-synced copies risked an index->sid
-    desync where [3] picked a different session than the one shown at slot 3."""
-    return sorted(sessions, key=lambda s: s["stale"])[:9]
+    """Active sessions first, then stale; stable, so newest-first input stays
+    newest-first within each group. No cap — the picker scrolls."""
+    return sorted(sessions, key=lambda s: s["stale"])
 
 
-def render_picker(sessions, cols, rows):
-    W = cols
-    buf = []
-    buf.append(sep(W))
-    hp = max(0, W - len(f"CC AIO MON {VERSION}"))
-    buf.append(f"{BG_BAR}{C_WHT}{B}CC AIO MON {VERSION}{R}{BG_BAR}{' ' * hp}{R}")
-    buf.append(sep(W))
+def _picker_rows(sessions, desktop=None):
+    """Single source of truth for the picker's row order: CLI sessions, then
+    desktop app sessions, each in _picker_order. render_picker draws exactly
+    this list and main() moves its cursor over it, so the highlighted row is
+    always the session Enter opens."""
+    return _picker_order(sessions) + _picker_order(desktop or [])
 
-    if not sessions:
-        buf.append(f"{C_DIM}Waiting for Claude Code session...{R}")
-        buf.append(f"{C_DIM}Start a session, then come back here.{R}")
+
+def _picker_cursor(rows_list, selected):
+    """Index of the session `selected` (an id) in rows_list; 0 when absent."""
+    for i, s in enumerate(rows_list):
+        if s.get("id") == selected:
+            return i
+    return 0
+
+
+def _picker_move(idx, k, n, page):
+    """New cursor index for a navigation key; clamped to [0, n-1]."""
+    if n <= 0:
+        return 0
+    if k in ("<UP>", "k"):
+        idx -= 1
+    elif k in ("<DOWN>", "j"):
+        idx += 1
+    elif k == "<PGUP>":
+        idx -= page
+    elif k == "<PGDN>":
+        idx += page
+    elif k == "<HOME>":
+        idx = 0
+    elif k == "<END>":
+        idx = n - 1
+    return max(0, min(n - 1, idx))
+
+
+def _picker_line(s, is_cursor, W):
+    tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
+    nm = _sanitize(s.get("session_name") or s.get("ai_title") or s["id"][:8])
+    # Short model: "Opus 4.6 (1M context)" → "OP 4.6" via single source of truth
+    code, ver = _model_code_from_label(s.get("model", ""))
+    model_short = f"{code} {ver}".strip() if ver else code
+    origin = f" {C_DIM}{s['origin']}{R}" if s.get("source") == "desktop" else ""
+    # Cut the name, not the tags, when the row is wider than the terminal.
+    tail = _vis_width(f" {model_short}{origin} {tag}")
+    nm = _ellipsize(nm, max(1, W - 2 - tail))
+    if is_cursor:
+        line = f"{C_CYN}{B}▸{R} {C_WHT}{B}{nm}{R} {C_DIM}{model_short}{R}{origin} {tag}"
     else:
-        buf.append(f"{C_WHT}{B}SESSIONS{R}")
-        buf.append(sep(W))
-        # Sort: active first, then stale. Limit to 9 (keyboard limit).
-        shown = _picker_order(sessions)
-        for i, s in enumerate(shown):
-            tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
-            nm = s["session_name"] or s.get("ai_title") or s["id"][:8]
-            # Short model: "Opus 4.6 (1M context)" → "OP 4.6" via single source of truth
-            code, ver = _model_code_from_label(s["model"])
-            model_short = f"{code} {ver}".strip() if ver else code
-            line = f"{C_WHT}[{i + 1}]{R} {B}{nm}{R} {C_DIM}{model_short}{R} {tag}"
-            buf.append(truncate(line, W))
-        if len(sessions) > 9:
-            buf.append(f"{C_DIM}+{len(sessions) - 9} more{R}")
+        line = f"  {C_FG}{nm}{R} {C_DIM}{model_short}{R}{origin} {tag}"
+    return truncate(line, W)
 
-    buf.append(sep(W))
-    buf.append(f"{C_DIM}[{R}{C_WHT}1-9{R}{C_DIM}] select{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}")
 
-    _window_buf(buf, rows)
-    return buf
+def render_picker(sessions, cols, rows, desktop=None, selected=None, loading=False):
+    """Session picker: CLI sessions (statusline snapshots) above desktop app
+    sessions (transcripts). The cursor sits on `selected` (a session id) and
+    the list scrolls to keep it visible; header and key hints stay pinned.
+    loading=True shows the transcript-loading notice instead of the list."""
+    global _picker_scroll
+    W = cols
+    desktop = desktop or []
+    head = [sep(W)]
+    hp = max(0, W - len(f"CC AIO MON {VERSION}"))
+    head.append(f"{BG_BAR}{C_WHT}{B}CC AIO MON {VERSION}{R}{BG_BAR}{' ' * hp}{R}")
+    head.append(sep(W))
+
+    if loading or (not sessions and not desktop):
+        msg = (["Loading session transcript...", "Large transcripts take a few seconds."]
+               if loading else
+               ["Waiting for Claude Code session...", "Start a session, then come back here."])
+        buf = head + [
+            f"{C_DIM}{msg[0]}{R}",
+            f"{C_DIM}{msg[1]}{R}",
+            sep(W),
+            f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}",
+        ]
+        _picker_scroll = 0
+        return buf[:max(1, rows)]
+
+    order = _picker_rows(sessions, desktop)
+    cur = _picker_cursor(order, selected)
+    body = []
+    cursor_line = 0
+    idx = 0
+    sections = (
+        ("CLI SESSIONS", "", _picker_order(sessions),
+         "No CLI session. Run claude in a terminal."),
+        ("DESKTOP APP SESSIONS", "estimated from transcripts", _picker_order(desktop),
+         "No desktop app session in the last 48 h."),
+    )
+    for n, (title, note, group, empty) in enumerate(sections):
+        if n:
+            body.append(sep(W))
+        # The note is optional context: drop it rather than cut it mid-word.
+        note_s = f"  {C_DIM}{note}{R}" if note and len(title) + 2 + len(note) <= W else ""
+        body.append(truncate(f"{C_WHT}{B}{title}{R}{note_s}", W))
+        body.append(sep(W))
+        if not group:
+            body.append(f"  {C_DIM}{empty}{R}")
+        for s in group:
+            if idx == cur:
+                cursor_line = len(body)
+            body.append(_picker_line(s, idx == cur, W))
+            idx += 1
+
+    foot = [
+        sep(W),
+        f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}] move   [{R}{C_WHT}enter{R}{C_DIM}] open   "
+        f"[{R}{C_WHT}q{R}{C_DIM}] quit{R}",
+    ]
+    try:
+        rows = max(1, int(rows))
+    except (TypeError, ValueError):
+        rows = 24
+    room = rows - len(head) - len(foot)
+    if len(body) <= room:
+        _picker_scroll = 0
+        return head + body + foot
+    visible = max(1, room - 1)  # one line for the position hint
+    off = max(0, min(_picker_scroll, len(body) - visible))
+    if cursor_line < off:
+        # Scrolling up onto a section's first row also reveals its title.
+        off = max(0, cursor_line - 2 if cursor_line >= 2 and body[cursor_line - 1] == sep(W) else cursor_line)
+    elif cursor_line >= off + visible:
+        off = cursor_line - visible + 1
+    _picker_scroll = off
+    win = body[off:off + visible]
+    up = "↑" if off > 0 else " "
+    dn = "↓" if off + visible < len(body) else " "
+    hint = f"{C_DIM}{up}{dn} {cur + 1}/{len(order)}{R}"
+    buf = head + win + [hint] + foot
+    return buf[:rows]
 
 
 # ---------------------------------------------------------------------------
@@ -3445,10 +4069,15 @@ def main():
 
     if args.list:
         try:
-            for s in list_sessions():
+            cli = list_sessions()
+            for s in cli:
                 tag = "(stale)" if s["stale"] else "(live)"
                 nm = s["session_name"] or s.get("ai_title") or "--"
                 print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag}")
+            for s in list_desktop_sessions(exclude={x["id"] for x in cli}):
+                tag = "(stale)" if s["stale"] else "(live)"
+                nm = s["session_name"] or "--"
+                print(f"  {s['id'][:16]}  {s['model']:>8}  {nm}  {s['cwd']}  {tag} [{s['origin']}]")
         finally:
             # Undo the console-wide CP65001 change so the parent shell is left
             # as found (Windows); no-op if no CP was saved / on non-Windows.
@@ -3508,6 +4137,8 @@ def main():
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
 
     sid = args.session
+    sid_path = None     # transcript path when `sid` is a desktop app session
+    picker_sel = None   # session id under the picker cursor
     if sid and not _SID_RE.match(sid):
         # sid failed regex — could contain ANSI escapes / control chars.
         # Sanitize + length-cap before echoing to terminal.
@@ -3603,7 +4234,9 @@ def main():
                     last_mt = 0
                     last_seen = time.monotonic()
                 elif k == "s":
+                    picker_sel = sid
                     sid = None
+                    sid_path = None
                     force_picker = True
                     last_data = None
                     last_mt = 0
@@ -3639,7 +4272,9 @@ def main():
                 last_mt = 0
                 last_seen = time.monotonic()
             elif k == "s":
+                picker_sel = sid
                 sid = None
+                sid_path = None
                 force_picker = True
                 last_data = None
                 last_mt = 0
@@ -3748,24 +4383,47 @@ def main():
             # doesn't rescan DATA_DIR every tick (audit P1-3)
             if sid is None:
                 sessions = cached_list_sessions()
-                active = [s for s in sessions if not s["stale"]]
-                if len(active) == 1 and len(sessions) == 1 and not force_picker:
-                    sid = active[0]["id"]
-                elif not sessions:
+                desktop = cached_desktop_sessions(exclude=[s["id"] for s in sessions])
+                order = _picker_rows(sessions, desktop)
+                if (len(order) == 1 and not order[0]["stale"]
+                        and not force_picker):
+                    sid = order[0]["id"]
+                    sid_path = order[0].get("path")
+                    last_seen = time.monotonic()
+                elif not order:
                     flush(render_picker([], cols, rows), cols)
                     time.sleep(tick)
                     continue
                 else:
-                    sorted_s = _picker_order(sessions)
-                    flush(render_picker(sessions, cols, rows), cols)
-                    if k and k.isdigit():
-                        idx = int(k) - 1
-                        if 0 <= idx < len(sorted_s):
-                            sid = sorted_s[idx]["id"]
-                            force_picker = False
-                            last_seen = time.monotonic()
-                    time.sleep(tick)
-                    continue
+                    cur = _picker_cursor(order, picker_sel)
+                    page = max(1, rows - 8)
+                    if k in _SCROLL_KEYS:
+                        cur = _picker_move(cur, k, len(order), page)
+                        # Coalesce a wheel / key-repeat burst into this frame
+                        # (same reason as the modal scroll drain above).
+                        drain_deadline = time.monotonic() + 0.05
+                        drained = 0
+                        while drained < 512 and time.monotonic() < drain_deadline:
+                            k2 = poll_key()
+                            if k2 in _SCROLL_KEYS:
+                                cur = _picker_move(cur, k2, len(order), page)
+                                drained += 1
+                                drain_deadline = time.monotonic() + 0.02
+                            elif k2 is None:
+                                time.sleep(0.001)
+                            else:
+                                _key_pushback[0] = k2
+                                break
+                    picker_sel = order[cur]["id"]
+                    if k in ("\r", "\n"):
+                        sid = order[cur]["id"]
+                        sid_path = order[cur].get("path")
+                        force_picker = False
+                        last_seen = time.monotonic()
+                    else:
+                        flush(render_picker(sessions, cols, rows, desktop, picker_sel), cols)
+                        time.sleep(tick)
+                        continue
 
             # Load state (only on data interval, not resize)
             if since_data >= data_interval:
@@ -3776,8 +4434,24 @@ def main():
                     mt = jp.stat().st_mtime
                 except OSError:
                     mt = 0
+                if sid_path is not None and mt > 0:
+                    # A statusline snapshot appeared (e.g. --session started
+                    # before the CLI's first event): it beats the estimate.
+                    sid_path = None
+                    last_data = None
+                    last_mt = 0
+                elif sid_path is None and mt == 0:
+                    # --session with a desktop app session id: find its transcript.
+                    for s in cached_desktop_sessions(exclude=[]):
+                        if s["id"] == sid:
+                            sid_path = s["path"]
+                            break
 
-                if mt != last_mt or last_data is None:
+                if sid_path is not None:
+                    res = load_desktop_state(sid, sid_path)
+                    if res:
+                        last_data, last_hist = res
+                elif mt != last_mt or last_data is None:
                     d = load_state(sid)
                     if d:
                         last_data = d
@@ -3787,20 +4461,27 @@ def main():
                         last_mt = 0
 
             if last_data is None:
-                flush(render_picker([], cols, rows), cols)
+                # A desktop transcript is still being read (large files are
+                # caught up in steps) — say so instead of "Waiting for...".
+                flush(render_picker([], cols, rows, loading=sid_path is not None), cols)
                 time.sleep(tick)
                 continue
 
-            # Only reload history when file has changed
-            try:
-                hmt = (DATA_DIR / f"{sid}.jsonl").stat().st_mtime
-            except OSError:
-                hmt = 0
-            if hmt != last_hist_mt:
-                # Always replace (even []) so BRN/CTR don't stay stale when jsonl is cleared/truncated
-                last_hist = load_history(sid)
-                last_hist_mt = hmt
-            is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
+            if sid_path is not None:
+                # Desktop session: staleness follows the transcript's mtime.
+                upd = _snapshot_mtime(last_data)
+                is_stale = upd is not None and (time.time() - upd) > STALE_THRESHOLD
+            else:
+                # Only reload history when file has changed
+                try:
+                    hmt = (DATA_DIR / f"{sid}.jsonl").stat().st_mtime
+                except OSError:
+                    hmt = 0
+                if hmt != last_hist_mt:
+                    # Always replace (even []) so BRN/CTR don't stay stale when jsonl is cleared/truncated
+                    last_hist = load_history(sid)
+                    last_hist_mt = hmt
+                is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
             # A-P2-1: release-check trigger lives in the event loop, not in
             # render_frame. _rls_maybe_check is rate-limited internally
             # (_RLS_TTL) so per-tick invocation here is cheap.

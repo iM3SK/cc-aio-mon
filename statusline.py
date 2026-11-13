@@ -28,7 +28,7 @@ import sys
 import time
 
 from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
-                    f_tok, f_cost, f_cost_value, f_cd, nonnegative_number,
+                    f_tok, f_cost_value, f_cd, nonnegative_number,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
                     lock_file_handle, unlock_file_handle, acquire_singleton_lock,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,

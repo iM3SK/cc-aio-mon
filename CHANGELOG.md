@@ -1,5 +1,88 @@
 # Changelog
 
+## v1.18.0 — 2026-11-14
+
+**New — desktop app sessions:**
+- **Sessions from the Claude desktop app appear in the monitor.** The app runs
+  Claude Code without its terminal interface, so the statusline never runs for
+  them. `monitor.list_desktop_sessions()` finds transcript-only sessions in
+  `~/.claude/projects/<project>/<sid>.jsonl` touched in the last 48 hours, and
+  `monitor.load_desktop_state()` builds a snapshot-shaped dict from the
+  transcript, parsing only appended bytes on each poll.
+- The dashboard marks them `desktop app, estimated`. CST and BRN come from
+  per-model token prices with each request counted once (Claude Code repeats a
+  request's usage on every content-block record). CTX uses the last request's
+  input tokens against the model's context window; `CC_MON_DESKTOP_CTX`
+  overrides it. APR and LNS show `n/a`; 5HL / 7DL come only from a CLI session.
+  Large transcripts (up to 1 GiB) are caught up in 16 MiB steps per poll.
+
+**Fixes — token and cost counting:**
+- **Each API request is counted once.** Claude Code writes one assistant record
+  per content block and repeats the request's usage on each. The cost
+  breakdown (`c`), token stats (`t`) and agents (`a`) summed every record and
+  showed about 2–3× the real tokens and cost; they now count usage once per
+  `message.id` / `requestId` (`monitor._usage_key`).
+- **1-hour cache writes are priced at 2× input** instead of the 5-minute write
+  rate (`monitor._usage_cost`, from `usage.cache_creation`).
+- **Prices for current models:** Fable 5.2 and Mythos 5.2 ($8 / $40, cache read
+  $0.20, fast mode $16 / $80), Mythos 5.1, Sonnet 5 ($2 / $10) and Haiku 5.5
+  ($0.10 / $0.50, $0.50 / $2.50 for a prompt above 100K tokens), plus the
+  `fable` / `mythos` aliases. They fell back to Sonnet 4.x rates before.
+  Sonnet 5 and Haiku 5.5 cache rates assume the standard multipliers.
+- **Context windows per model** (`_MODELS[...]["ctx"]`, `_model_context_window`):
+  1M for current models, 200K for Haiku 4.5 and older.
+
+**Fixes — other:**
+- **Session titles** come from the transcript's head and tail, and a rename
+  (`custom-title`) wins over the generated `ai-title`. The generated title can
+  sit hundreds of KiB into the file, past the old 64 KiB head window.
+- **Anthropic Pulse tags Fable and Mythos incidents** and lists both families in
+  the modal (`pulse.MODEL_FAMILIES`).
+- **`CLAUDE_CONFIG_DIR`** now also moves the transcripts root
+  (`shared.claude_projects_dir`), matching the FBL reader.
+- `check-requirements.ps1` reported a missing `git` or `claude` as found; both
+  scripts now check for Python 3.8+, treat the Claude Code CLI as optional
+  (statusline only) and exit 1 when a requirement is missing.
+- Agents modal: short codes for PowerShell, ToolSearch, TaskStop and other
+  current tools.
+- **Desktop session discovery** applies its 512-file limit to transcripts
+  touched in the last 48 h, newest first, so older transcripts can no longer
+  hide a new session. While a large transcript loads the screen says
+  "Loading session transcript..." instead of "Waiting for Claude Code
+  session...". With `--session`, a statusline snapshot that appears later
+  replaces the transcript estimate. `CC_MON_DESKTOP_CTX=inf` (or `nan`) is
+  treated as unset instead of crashing the import.
+- **Narrow terminals:** the dashboard status line and picker rows cut the
+  session name with `…` instead of losing their tags at the terminal edge; the
+  desktop tag shortens to `est.` and the picker drops its section note.
+
+**Docs:**
+- Setup guides: the statusline command is `py …/statusline.py` (Windows) or
+  `python3 …/statusline.py`; the `bash -c` wrapper is gone (on Windows without
+  Git Bash it ran WSL `bash`, which has no `py`).
+- README, NOTICE and SECURITY describe the desktop-session transcript reading
+  and the FBL refresher's undocumented cache and experimental control request;
+  the statusline trigger list matches the current Claude Code docs.
+- FILE-IPC-CONTRACT: corrected `context_window` field paths, the transcript
+  fields the monitor reads, in-memory desktop fields, invalid-SID behaviour
+  and snapshot lifetime.
+
+**CI:** Ubuntu jobs run on `ubuntu-latest` again (only Python 3.8 stays on
+`ubuntu-24.04`) and the matrix adds Python 3.13 and 3.14. The version gate
+re-runs when the `no-release` label is added or removed.
+
+**Changed — session picker:**
+- Two sections: **CLI SESSIONS** and **DESKTOP APP SESSIONS**, the latter with
+  an entrypoint tag per row (`desk` for the desktop app).
+- Cursor navigation replaces digit selection: arrows, `j` / `k`, Page keys,
+  `Home` / `End` and the mouse wheel move the cursor, `Enter` opens the session.
+  `1`–`9` no longer select sessions, and the 9-session cap and `+N more` line
+  are gone; the list scrolls to keep the cursor visible.
+- Legend: `[1-3] Token Stats Period`, `[enter] Open Session`, and a
+  `DESKTOP APP` section.
+
+**Tests:** 936 passing (+46).
+
 ## v1.17.2 — 2026-11-04
 
 **Fixes — pricing of the 5.x models:**

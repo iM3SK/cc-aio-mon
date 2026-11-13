@@ -1,15 +1,17 @@
 # Configuration — environment variables
 
 Authoritative catalog of every environment variable `cc-aio-mon` reads.
-Grounded in observable code: every entry below has a file:line citation.
+Every entry names the module and symbol that reads it.
 If you add a new env var, add it here in the same commit.
 
 ---
 
 ## Naming convention
 
-- **`CC_AIO_MON_*`** — preferred prefix for **all new** project-specific
-  toggles and overrides.
+- **`CC_AIO_MON_*`** — prefix for project-wide toggles (feature switches,
+  background workers, update source).
+- **`CC_MON_*`** — dashboard display overrides: bar ceilings and the
+  desktop-session context window.
 - **`CLAUDE_STATUS_*` / `CLAUDE_WARN_*`** — legacy prefixes inherited from
   the v1.x line. Kept for backward compatibility; **do not introduce new
   vars under these prefixes**. If you need to add a threshold or feature
@@ -110,6 +112,16 @@ If you add a new env var, add it here in the same commit.
 - **Effect:** ceiling of the `CST` (session cost) bar. Raise for
   long-running API sessions.
 
+### `CC_MON_DESKTOP_CTX`
+
+- **Type:** integer (tokens)
+- **Default:** `0` — the model's window from `monitor._MODELS`
+  (`_model_context_window`: 1 000 000 for current models, 200 000 for
+  Haiku 4.5 and older), or 1 000 000 when the requested model carries `[1m]`
+- **Read by:** `monitor.py` (`_env_float` → `DESKTOP_CTX_SIZE`)
+- **Effect:** context-window size used for `CTX` of desktop app sessions,
+  which are read from the transcript and carry no window size.
+
 ---
 
 ## Threshold variables (legacy `CLAUDE_*` prefix)
@@ -164,14 +176,15 @@ have a documented diagnostic anchor.
   message instead of trying to drive an interactive TUI on a non-capable
   terminal (CI logs, redirected output, etc.).
 
-### `COLUMNS`
+### `COLUMNS` / `LINES`
 
 - **Type:** int
-- **Default:** unset → `os.get_terminal_size()` fallback
-- **Read by:** `statusline.py` (`_get_terminal_width`)
-- **Effect:** explicit terminal-width override for the one-line
-  statusline. Useful when the parent process (Claude Code) reports a
-  width that differs from what the user sees, or for fixed-width tests.
+- **Default:** Claude Code sets both before it runs the statusline command;
+  in a plain terminal they are usually unset → `os.get_terminal_size()`
+- **Read by:** `statusline.py` (`_get_terminal_width`, `COLUMNS` only) and
+  `monitor.py` (`shutil.get_terminal_size`, both)
+- **Effect:** terminal-size override. The statusline uses the width to drop
+  trailing segments; the dashboard uses width and height for its layout.
 
 ### `TMPDIR` / `TMP` / `TEMP`
 
@@ -187,12 +200,14 @@ have a documented diagnostic anchor.
 ### `CLAUDE_CONFIG_DIR`
 
 - **Type:** path
-- **Default:** unset → `~/.claude.json`
-- **Read by:** `shared.claude_json_path()`
+- **Default:** unset → `~/.claude.json` and `~/.claude/projects/`
+- **Read by:** `shared.claude_json_path()`, `shared.claude_projects_dir()`
 - **Effect:** set by Claude Code users running a second account; when set,
-  the FBL reader uses `$CLAUDE_CONFIG_DIR/.claude.json` — the same file
-  Claude Code writes for that account. Inherited by the statusline from
-  Claude Code, so no manual setting is needed.
+  the FBL reader uses `$CLAUDE_CONFIG_DIR/.claude.json` and the monitor reads
+  transcripts (desktop sessions, token stats, cost breakdown, agents) from
+  `$CLAUDE_CONFIG_DIR/projects/` — the files Claude Code writes for that
+  account. Inherited by the statusline from Claude Code; start `monitor.py`
+  with the same value.
 
 ### `HOME` / `USERPROFILE`
 

@@ -62,7 +62,7 @@ Work through these in order before creating any tag.
   python3 tests.py     # macOS / Linux
   ```
   `tests.py` is a thin wrapper that runs `unittest discover tests/`
-  (`tests.py:main()`). Current baseline: **890 tests** (v1.17.2; platform
+  (`tests.py:main()`). Current baseline: **936 tests** (v1.18.0; platform
   skips vary). The new release's count must be >= this number unless tests were
   intentionally removed (document the removal in CHANGELOG).
 
@@ -195,7 +195,7 @@ headers, bullet list under each, blank line, trailing test count line.
   ```
   Confirm your changes compile cleanly in all five:
   ```
-  py -c "import py_compile; [py_compile.compile(f) for f in ['monitor.py','statusline.py','shared.py','pulse.py','update.py']]"
+  py -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
   ```
 
 - [ ] **Self-update dry run (read-only).**

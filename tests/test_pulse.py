@@ -973,6 +973,20 @@ class TestAtomicReplaceLogOSErrorCleanup(unittest.TestCase):
         self.assertFalse(self._p.LOG_PATH.exists(), "LOG_PATH must not exist after failed replace")
 
 
+class TestModelFamilies(unittest.TestCase):
+
+    def test_fable_and_mythos_tagged(self):
+        import pulse
+        inc = {"name": "Elevated errors on Fable 52 and Mythos 52", "components": []}
+        self.assertEqual(pulse._tag_models_from_incident(inc), ["fable", "mythos"])
+        inc = {"name": "Degraded Fable 5.1, Sonnet 5.5, and Haiku 5.5"}
+        self.assertEqual(pulse._tag_models_from_incident(inc), ["fable", "haiku", "sonnet"])
+
+    def test_modal_lists_every_family(self):
+        import pulse
+        self.assertEqual(pulse.MODEL_FAMILIES, ("fable", "mythos", "opus", "sonnet", "haiku"))
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

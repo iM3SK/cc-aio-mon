@@ -45,11 +45,11 @@ CC AIO MON reads session data from Claude Code via stdin and writes snapshots to
 ### Monitored Surfaces
 
 - **statusLine JSON input** (stdin) — size-capped (1 MB), parse-error bounded.
-- **Session IDs** — regex-validated (`^[a-zA-Z0-9_\-]{1,128}$`), reserved names (`rls`, `stats`, `pulse`) blocked.
+- **Session IDs** — regex-validated (`^[a-zA-Z0-9_\-]{1,128}$`), reserved names (`rls`, `stats`, `pulse`, `fable-refresh-settings`) blocked.
 - **transcript_path** (statusline JSON) — containment-checked: `~/.claude/projects/` itself must be a real directory, and the transcript must be a regular file inside it; symlinks/junctions are rejected. (added 2026-04; root validation tightened 2026-05)
 - **Transcript content** (read-only, `~/.claude/projects/`) — per-file 50 MB cap, model IDs sanitized before terminal render. (added 2026-04)
-- **File I/O** — confined to `$TMPDIR/claude-aio-monitor/` (writes) and `~/.claude/projects/` (reads). Atomic writes via `NamedTemporaryFile` + `os.replace`.
-- **Subprocess** — git only. `shell=False`, list args, `GIT_TERMINAL_PROMPT=0`, bounded timeouts, minimal env whitelist (added 2026-04). Never uses `--no-verify` / `--force`.
+- **File I/O** — confined to `$TMPDIR/claude-aio-monitor/` (writes) and `~/.claude/projects/` plus `~/.claude.json` (reads; `$CLAUDE_CONFIG_DIR` when set). `~/.claude.json` is read size-capped for the FBL usage cache only; `.credentials.json` and OAuth tokens are never read. Desktop app transcripts are read incrementally, up to 1 GiB per file and 16 MiB per poll. Atomic writes via `NamedTemporaryFile` + `os.replace`.
+- **Subprocess** — `git` (`shell=False`, list args, `GIT_TERMINAL_PROMPT=0`, bounded timeouts, minimal env whitelist, added 2026-04; never `--no-verify` / `--force`), plus the optional FBL refresher: `statusline.py --refresh-fable` (same interpreter, detached) which runs the user's `claude -p` with hooks and session persistence disabled. Disable with `CC_AIO_MON_FABLE_REFRESH_SEC=0`.
 - **Network** — Pulse: `status.claude.com` + `api.anthropic.com` HTTPS GET, no auth, bounded size (512 KB) + timeout (5 s). Update: git fetch origin main (HTTPS or SSH, configurable by user's git remote).
 
 Opt-out env vars: `CC_AIO_MON_NO_PULSE=1`, `CC_AIO_MON_NO_UPDATE_CHECK=1`.
@@ -66,7 +66,7 @@ Key protections:
 - `pulse.py` uses `urllib.request.urlopen` with default CA verification (no `ssl._create_unverified_context`); errors are caught by specific type, never broadly suppressed in probe logic
 - **(v1.12.0)** Both `monitor.py` (interactive TUI) AND `update.py --apply` (CLI updater) acquire the same singleton OS-level lock (`shared.acquire_singleton_lock` — `fcntl.flock` on Unix, `msvcrt.locking` on Windows) on `$TMPDIR/claude-aio-monitor/monitor.lock`. Prevents two concurrent dashboards from racing on shared snapshot reads and crash-log writes, AND prevents `update.py --apply` from rewriting `.py` files while monitor's threads still hold open references. `monitor.py --list` mode is exempt (one-shot, non-interactive read)
 - **(v1.12.0; extended v1.12.2)** `monitor-crash.log` rotated to `.log.1` via `shared.rotate_crash_log` — bounds disk growth across repeated crash cycles. Since v1.12.2 `_install_crash_logger` calls it with `always=True` so the previous traceback is preserved even when both crashes are under 1 MB (two crashes in quick succession can no longer overwrite each other)
-- **(v1.12.0)** File-IPC schema tagged with `shared.SCHEMA_VERSION` (currently `1`) — statusline writes the field on every snapshot + history entry; monitor reads via `dict.get()` so unknown values are silently ignored, providing forward-compat for future incompatible bumps
+- **(v1.12.0)** File-IPC schema tagged with `shared.SCHEMA_VERSION` (currently `1`) — statusline writes the field on every snapshot + history entry; monitor reads via `dict.get()` and `monitor.load_state()` refuses a snapshot tagged with a newer version than it understands
 - **(v1.12.0)** Post-pull syntax check unified in `shared.check_syntax_after_pull` — single canonical loop iterated by both `update.py --apply` (CLI) and `monitor.py:_apply_update_worker` (TUI background thread). A regression-guard test fails if either consumer reintroduces the parallel implementation
 
 ## See also

@@ -5,8 +5,9 @@
 Usage: python3 update.py           (read-only check)
        python3 update.py --apply   (fetch + pull + verify)
 
-Safe git pull --ff-only with guard rails: detects uncommitted changes,
-branch divergence, remote version regression. Cross-platform (Windows: py,
+Safe git pull --ff-only with guard rails: verifies the origin remote, the
+main branch and a clean working tree, refuses diverged history, and
+syntax-checks the runtime files after the pull. Cross-platform (Windows: py,
 macOS/Linux: python3). Stdlib only.
 """
 

@@ -10,13 +10,22 @@ permissions: read-all
 
 jobs:
   test:
-    # Preserve required-check names while pinning the Linux runner for Python 3.8.
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
+    # Python 3.8 is not built for the current ubuntu-latest image, so only that
+    # job runs on ubuntu-24.04; the job name (and required-check name) is kept.
+    runs-on: ${{ (matrix.os == 'ubuntu-latest' && matrix.python-version == '3.8') && 'ubuntu-24.04' || matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.8", "3.10", "3.11", "3.12"]
+        python-version: ["3.8", "3.10", "3.11", "3.12", "3.13", "3.14"]
         exclude:
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.14"
+          - os: macos-latest
+            python-version: "3.14"
           - os: windows-latest
             python-version: "3.8"
           - os: macos-latest
@@ -38,5 +47,5 @@ jobs:
         run: python -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
       - name: Run tests
         run: python tests.py
-    # Ubuntu: 3.8 + 3.10 + 3.11 + 3.12 for full compat coverage.
+    # Ubuntu: 3.8 + 3.10 – 3.14 for full compat coverage.
     # Windows + macOS: 3.12 only (older versions not reliably available on GitHub runners).

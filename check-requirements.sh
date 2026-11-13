@@ -2,6 +2,7 @@
 # CC AIO MON — System Requirements Check
 # Run this in bash:  bash check-requirements.sh
 # Read-only. Checks system requirements only. No changes are made to your system.
+# Exit code: 0 when Python 3.8+ and Git are present, 1 otherwise.
 
 # ---------- Colors ----------
 if [ -t 1 ]; then
@@ -27,16 +28,20 @@ blank
 
 all_ok=1
 
-# ---------- Python ----------
+# ---------- Python (3.8+) ----------
 PY_CMD=""
 if command -v python3 >/dev/null 2>&1; then
-    ok "$(python3 --version 2>&1)  (python3)"
     PY_CMD="python3"
 elif command -v python >/dev/null 2>&1; then
-    ok "$(python --version 2>&1)  (python)"
     PY_CMD="python"
-else
+fi
+if [ -z "$PY_CMD" ]; then
     err "Python — not found (tried python3 and python)"
+    all_ok=0
+elif "$PY_CMD" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then
+    ok "$("$PY_CMD" --version 2>&1)  ($PY_CMD)"
+else
+    err "$("$PY_CMD" --version 2>&1) — Python 3.8 or newer is required"
     all_ok=0
 fi
 
@@ -48,12 +53,12 @@ else
     all_ok=0
 fi
 
-# ---------- Claude Code CLI ----------
+# ---------- Claude Code CLI (statusline only) ----------
 if command -v claude >/dev/null 2>&1; then
     ok "Claude Code $(claude --version 2>&1)"
 else
-    err "Claude Code — not found in PATH"
-    all_ok=0
+    printf "[--]  Claude Code CLI — not found in PATH\n"
+    note "Needed for the statusline. Claude desktop app sessions are shown without it."
 fi
 
 blank
@@ -73,3 +78,4 @@ else
 fi
 
 blank
+[ $all_ok -eq 1 ] || exit 1

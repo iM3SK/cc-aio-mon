@@ -58,7 +58,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.17.2"
+VERSION = "1.18.0"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -742,6 +742,13 @@ def claude_json_path() -> pathlib.Path:
     cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     base = pathlib.Path(cfg).expanduser() if cfg else pathlib.Path.home()
     return base / ".claude.json"
+
+
+def claude_projects_dir() -> pathlib.Path:
+    """Session transcripts root: $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    base = pathlib.Path(cfg).expanduser() if cfg else pathlib.Path.home() / ".claude"
+    return base / "projects"
 
 
 def _fable_finite_number(value) -> Optional[float]:
