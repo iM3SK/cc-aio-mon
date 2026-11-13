@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.18.0 — 2026-11-14
 
 **New — desktop app sessions:**
 - **Sessions from the Claude desktop app appear in the monitor.** The app runs
