@@ -229,7 +229,7 @@ Every session is listed; the list scrolls to keep the cursor visible, with the h
 
 ### Desktop app sessions
 
-The Claude desktop app runs Claude Code without its terminal interface, so the `statusLine` command never runs and no snapshot reaches the temp directory. The monitor reads these sessions from their transcript instead and marks them `desktop app, estimated`:
+The Claude desktop app runs Claude Code without its terminal interface, so the `statusLine` command never runs and no snapshot reaches the temp directory. The monitor reads these sessions from their transcript instead and marks them `desktop app, estimated` (`est.` in a narrow terminal, where a long session name is cut with `…` so the tags stay visible):
 
 - **CST, BRN** — estimated from per-model token prices, counting each request once. TDY / WEK still sum CLI sessions only.
 - **CTX** — from the last request's input tokens, against the model's context window (1M for current models, 200K for Haiku 4.5 and older); set `CC_MON_DESKTOP_CTX` to override.

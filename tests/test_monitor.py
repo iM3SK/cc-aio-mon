@@ -5307,7 +5307,19 @@ class TestDesktopSessions(unittest.TestCase):
         self.assertIn("desktop app, estimated", plain)
         self.assertIn("API: n/a", plain)
         self.assertIn("est.", plain)
-        self.assertIn("desktop app does not report them", plain)
+        self.assertIn("Rate limits: n/a (desktop app)", plain)
+
+    def test_render_frame_narrow_keeps_line_ends(self):
+        p = self._basic()
+        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        data["session_name"] = "A very long desktop session name ľščťž"
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            lines = _strip_ansi(render_frame(data, hist, 40, 60))
+        status = next(ln for ln in lines if "Session" in ln)
+        self.assertTrue(status.endswith("est."), status)   # short tag kept
+        self.assertIn("…", status)                          # name cut instead
+        self.assertLessEqual(monitor._vis_width(status), 40)
+        self.assertIn("Rate limits: n/a (desktop app)", lines)
 
     def test_render_frame_cli_unchanged(self):
         with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
@@ -5343,6 +5355,21 @@ class TestTwoSectionPicker(unittest.TestCase):
         self.assertIn("No CLI session", plain)
         plain = _ANSI_RE.sub("", "\n".join(render_picker([self._s("c1")], 80, 40, [])))
         self.assertIn("No desktop app session", plain)
+
+    def test_narrow_picker_cuts_name_not_tags(self):
+        s = self._s("d1", source="desktop")
+        s["session_name"] = "Nezávislá kontrola opráv cc-aio-mon a ďalšie"
+        lines = _strip_ansi(render_picker([], 36, 40, [s], "d1"))
+        row = next(ln for ln in lines if "Nezávislá" in ln)
+        self.assertTrue(row.endswith("desk live"), row)
+        self.assertIn("…", row)
+        self.assertLessEqual(monitor._vis_width(row), 36)
+        self.assertIn("DESKTOP APP SESSIONS", lines)  # note dropped, title intact
+
+    def test_ellipsize(self):
+        self.assertEqual(monitor._ellipsize("abcdef", 10), "abcdef")
+        self.assertEqual(monitor._ellipsize("abcdef", 4), "abc…")
+        self.assertEqual(monitor._ellipsize("abcdef", 0), "")
 
     def test_cursor_defaults_to_first_row(self):
         plain = _ANSI_RE.sub("", "\n".join(render_picker([self._s("c1")], 80, 40, [], "missing")))

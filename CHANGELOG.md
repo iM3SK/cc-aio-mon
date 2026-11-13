@@ -45,6 +45,9 @@
   (statusline only) and exit 1 when a requirement is missing.
 - Agents modal: short codes for PowerShell, ToolSearch, TaskStop and other
   current tools.
+- **Narrow terminals:** the dashboard status line and picker rows cut the
+  session name with `…` instead of losing their tags at the terminal edge; the
+  desktop tag shortens to `est.` and the picker drops its section note.
 
 **Docs:**
 - Setup guides: the statusline command is `py …/statusline.py` (Windows) or
@@ -71,7 +74,7 @@ re-runs when the `no-release` label is added or removed.
 - Legend: `[1-3] Token Stats Period`, `[enter] Open Session`, and a
   `DESKTOP APP` section.
 
-**Tests:** 930 passing (+40).
+**Tests:** 933 passing (+43).
 
 ## v1.17.2 — 2026-11-04
 

@@ -710,6 +710,29 @@ def truncate(s, maxw):
     return result
 
 
+def _vis_width(s):
+    """Visible width of s in terminal columns (ANSI codes ignored, CJK-aware)."""
+    return sum(char_width(c) for c in _ANSI_RE.sub("", s))
+
+
+def _ellipsize(text, maxw):
+    """Cut plain text to maxw visible columns, ending in '…' when shortened.
+    Used for the variable-length part of a line (a session name) so the fixed
+    tags after it stay visible in a narrow terminal."""
+    if maxw <= 0:
+        return ""
+    if _vis_width(text) <= maxw:
+        return text
+    out, w = [], 0
+    for ch in text:
+        cw = char_width(ch)
+        if w + cw > maxw - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
 # ---------------------------------------------------------------------------
 # Characters
 # ---------------------------------------------------------------------------
@@ -1857,16 +1880,28 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # Desktop app sessions are read from the transcript: tag them so every
     # number below is understood as an estimate.
     is_desktop = data.get("_source") == "desktop"
-    src_tag = f"  {C_DIM}desktop app, estimated{R}" if is_desktop else ""
     upd_mt = _snapshot_mtime(data)
     if stale:
         _stale_age = ""
         if upd_mt is not None:
             _idle = int(time.time() - upd_mt)
             _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
-        buf.append(f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  {c(C_FG)}{session_label}{R}{src_tag}")
+        prefix = f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  "
+        label_color = c(C_FG)
     else:
-        buf.append(f"{C_GRN}{B}{spin_session()} Session Active{R} {C_FG}{session_label}{R}{src_tag}")
+        prefix = f"{C_GRN}{B}{spin_session()} Session Active{R} "
+        label_color = C_FG
+    # In a narrow terminal the tag shortens and the name is cut with '…', so
+    # the line never loses its end to the terminal edge.
+    room = SW - _vis_width(prefix)
+    tag = ""
+    if is_desktop:
+        tag = "  desktop app, estimated"
+        if _vis_width(session_label) + len(tag) > room:
+            tag = "  est."
+    label = _ellipsize(session_label, room - len(tag))
+    src_tag = f"{C_DIM}{tag}{R}" if tag else ""
+    buf.append(f"{prefix}{label_color}{label}{R}{src_tag}")
 
     buf.append(sep(SW))
 
@@ -1961,7 +1996,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             # Limits arrive only through the statusline; a CLI session (any
             # one — they are per account) supplies them via
             # cached_freshest_rate_limits.
-            buf.append(f"{C_DIM}Rate limits: n/a, the desktop app does not report them{R}")
+            buf.append(f"{C_DIM}Rate limits: n/a (desktop app){R}")
         elif not any(shown):
             buf.append(f"{C_DIM}Rate limits: no data{R}")
     else:
@@ -2085,7 +2120,7 @@ def render_legend(cols, rows):
     dk = max(0, SW - 11)  # "DESKTOP APP" = 11 chars
     buf.append(f"{BG_BAR}{C_WHT}{B}DESKTOP APP{R}{BG_BAR}{' ' * dk}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}Read from the session transcript; marked {R}{C_WHT}desktop app, estimated{R}")
+    buf.append(f"{C_DIM}Read from the session transcript; marked {R}{C_WHT}desktop app, estimated{R}{C_DIM} (narrow: {R}{C_WHT}est.{R}{C_DIM}){R}")
     buf.append(f"{C_ORN}CST{R} {C_DIM}Estimated from token prices{R} {C_CYN}CTX{R} {C_DIM}From the last request{R}")
     buf.append(f"{C_DIM} APR and LNS: n/a, not in the transcript{R}")
     buf.append(f"{C_DIM} 5HL / 7DL: shown only while a CLI session reports them{R}")
@@ -3847,6 +3882,9 @@ def _picker_line(s, is_cursor, W):
     code, ver = _model_code_from_label(s.get("model", ""))
     model_short = f"{code} {ver}".strip() if ver else code
     origin = f" {C_DIM}{s['origin']}{R}" if s.get("source") == "desktop" else ""
+    # Cut the name, not the tags, when the row is wider than the terminal.
+    tail = _vis_width(f" {model_short}{origin} {tag}")
+    nm = _ellipsize(nm, max(1, W - 2 - tail))
     if is_cursor:
         line = f"{C_CYN}{B}▸{R} {C_WHT}{B}{nm}{R} {C_DIM}{model_short}{R}{origin} {tag}"
     else:
@@ -3890,7 +3928,8 @@ def render_picker(sessions, cols, rows, desktop=None, selected=None):
     for n, (title, note, group, empty) in enumerate(sections):
         if n:
             body.append(sep(W))
-        note_s = f"  {C_DIM}{note}{R}" if note else ""
+        # The note is optional context: drop it rather than cut it mid-word.
+        note_s = f"  {C_DIM}{note}{R}" if note and len(title) + 2 + len(note) <= W else ""
         body.append(truncate(f"{C_WHT}{B}{title}{R}{note_s}", W))
         body.append(sep(W))
         if not group:
