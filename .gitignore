@@ -96,3 +96,4 @@ docs/audits/
 .full-review/
 
 # Serena (lokálny LSP/memory state — nekomitovať)
+.serena/

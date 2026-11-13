@@ -19,6 +19,9 @@ internal, version-dependent usage control request through Claude Code CLI.
 CC AIO MON reads session metrics from the **official Claude Code statusline
 JSON**. The separate Fable weekly limit comes from Claude Code's usage cache;
 its age controls whether it is displayed normally, marked stale, or hidden.
+Sessions in the Claude desktop app never run the statusline (the app runs
+Claude Code headless); the monitor reads them from their transcripts in
+`~/.claude/projects/` and labels their metrics as estimates.
 
 Design center: five runtime Python files, stdlib only, no build step, no pip
 install. Python 3.8+ on Windows, macOS, and Linux.
@@ -33,8 +36,10 @@ separate lifecycles.
 **statusline.py — short-lived, N instances**
 
 Claude Code launches `statusline.py` as a subprocess on every statusline event
-(each assistant message, permission mode change, or vim mode toggle, with a
-300 ms debounce on Claude Code's side). The script reads one JSON payload from
+(session start or resume, each assistant message, a completed `/compact`, a
+permission mode change or vim mode toggle, a rate-limit reset or prompt-cache
+expiry, and every `refreshInterval` seconds if set, with a 300 ms debounce on
+Claude Code's side). The script reads one JSON payload from
 stdin, renders one ANSI status line to stdout, writes the IPC files, and exits.
 Multiple Claude Code sessions run simultaneously, each spawning their own
 `statusline.py` instance writing to a different `{session_id}.json` file.
@@ -45,7 +50,9 @@ Claude Code owns this lifecycle entirely.
 The user launches `monitor.py` once in a separate terminal. It runs until the
 user presses `q` or kills the process. It polls the IPC files at a 500 ms
 data-refresh interval (50 ms tick for keyboard responsiveness) and renders a
-fullscreen TUI dashboard. A singleton lock (`monitor.lock`, acquired via
+fullscreen TUI dashboard. It also reads desktop app sessions incrementally
+from their transcripts (`load_desktop_state`) and, on demand, the transcripts
+behind the token stats, cost breakdown and agents modals. A singleton lock (`monitor.lock`, acquired via
 `fcntl.flock` on Unix / `msvcrt.locking` on Windows, see `shared.acquire_singleton_lock`)
 prevents two concurrent dashboard instances from racing the same files.
 
@@ -69,11 +76,12 @@ that refreshes Claude Code's usage cache for FBL (`_maybe_refresh_fable`). On Wi
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~3 830 LOC. Owns the event
-loop, all `render_*` functions, the session picker, and the daemon worker
-threads (see Section 5). The crash logger (`_install_crash_logger`) writes
+**monitor.py** — Entry point 2 (interactive TUI). ~4 450 LOC. Owns the event
+loop, all `render_*` functions, the two-section session picker (CLI /
+desktop app), the desktop-session transcript reader, the model pricing table
+(`_MODELS`), and the daemon worker threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
-otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4000 LOC.
+otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4500 LOC.
 
 **pulse.py** — Daemon thread module. Fetches `status.claude.com/api/v2/summary.json`
 and probes `api.anthropic.com/v1/messages` (any HTTP response counts as liveness).
@@ -125,6 +133,14 @@ statusline.py
                                           monitor.py
                                                 │
                                                 └─── render_frame() ──► fullscreen TUI
+
+Claude desktop app (Claude Code headless, no statusline)
+    │
+    └─── ~/.claude/projects/<project>/<sid>.jsonl  (transcript)
+                                                │
+                                                │  read incrementally every 500 ms
+                                                ▼
+                                          monitor.py  (load_desktop_state)
 ```
 
 ```mermaid
@@ -146,8 +162,8 @@ flowchart LR
 The IPC contract: `statusline.write_shared_state()` serializes the full
 Claude Code payload plus `_schema_version` (= `shared.SCHEMA_VERSION`, currently
 `1`) and a Unix timestamp `t` into both the snapshot JSON and each JSONL history
-line. The schema version field is advisory today (monitor reads all fields via
-`dict.get()`) but exists to enable future non-backward-compatible changes.
+line. Fields are read via `dict.get()`, and `monitor.load_state()` refuses a
+snapshot whose `_schema_version` is newer than its own `SCHEMA_VERSION`.
 The canonical field list lives in `shared.py` constants and the v1.12.0
 CHANGELOG entry.
 
@@ -169,6 +185,7 @@ three run on a recurring cadence while the dashboard renders (`pulse-worker`,
 | `pulse-worker` | `pulse.start_pulse_worker()` | Fetch Anthropic status + ping API every 30 s |
 | `rls-check` (anonymous) | `_rls_maybe_check()` | Check GitHub for new release once per hour |
 | `update-apply` | `_apply_update_action()` | Run `git pull --ff-only` when user presses `a` |
+| `update-checks` | `_cached_update_checks()` | Run the update modal's git checks (branch, clean tree, ahead/behind) off the render thread |
 | `stats-scan` | `_stats_refresh_async()` | Scan `~/.claude/projects` transcripts off-thread, including the first open and period changes; show loading/errors and retain prior results on refresh failure |
 | `subagents-scan` | `_subagents_refresh_async()` | Scan the watched session's `subagents/` dir for the agents fan-out modal |
 | `cost-scan` | `_cost_refresh_async()` | Aggregate cross-session TDY/WEK cost (glob + per-line JSONL re-parse of every session's history) off the render thread; refreshes every 30 s |
@@ -193,6 +210,12 @@ thread.
   (`threading.Lock`) — worker-spawn single-flight guards for the `cost-scan`,
   `stats-scan` and `subagents-scan` daemons; each ensures only one of its scans
   is in flight while the dashboard / modal reads the corresponding cache.
+- `_checks_lock` (`threading.Lock`) — single-flight guard for the
+  `update-checks` worker.
+- `_cost_cache_lock` (`threading.Lock`) — coherence of the TDY/WEK
+  `_cost_cache` between the `cost-scan` writer and the render thread.
+- Desktop app sessions are read on the main thread: `load_desktop_state`
+  parses only appended bytes and caps each catch-up read at 16 MiB per poll.
 - `_SINGLETON_LOCK_HANDLE` (module-level file handle) — not a `threading.Lock`;
   it is an OS-level file lock held via `msvcrt.locking` / `fcntl.flock` for
   the process lifetime. Python must not GC it, hence the module-level reference.
@@ -225,7 +248,9 @@ in `requirements.txt` (there is none).
 | `status.claude.com` | `pulse.py:_fetch_summary()` | HTTPS (urllib) | Optional — disable with `CC_AIO_MON_NO_PULSE=1` |
 | `api.anthropic.com/v1/messages` | `pulse.py:_ping_api()` | HTTPS (urllib) | Optional — same opt-out |
 | GitHub (`origin/main`) | `_rls_check_worker`, `update.py` | HTTPS via `git fetch` | Optional — disable with `CC_AIO_MON_NO_UPDATE_CHECK=1` |
-| `~/.claude/projects/` | `monitor.py:scan_transcript_stats()` | local file | Optional — token stats modal reads transcripts |
+| `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`) | `monitor.py:scan_transcript_stats()`, `_aggregate_session_cost()`, `list_desktop_sessions()`, `load_desktop_state()` | local file | Optional — token stats, cost breakdown and desktop app sessions |
+| `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) | `shared.read_fable_weekly()` | local file | Optional — FBL weekly pool; hidden when absent |
+| `claude` CLI | `statusline.py` (`run_fable_refresh`, detached) | subprocess (`claude -p`, experimental `get_usage` control request) | Optional — disable with `CC_AIO_MON_FABLE_REFRESH_SEC=0` |
 | `~/.claude/projects/<proj>/<session>/subagents/` | `monitor.py:scan_subagents()` | local file | Optional — agents fan-out modal; derived from the session `transcript_path`, containment-checked |
 
 `shared.run_git()` uses a minimal env whitelist (`_GIT_ENV_WHITELIST`) to strip

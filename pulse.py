@@ -357,22 +357,27 @@ def _ping_api():
     return (time.monotonic() - start) * 1000.0
 
 
+# Model families tagged in incidents and shown in the Pulse modal, most capable first.
+MODEL_FAMILIES = ("fable", "mythos", "opus", "sonnet", "haiku")
+
+
 def _tag_models_from_incident(inc):
     """Return sorted model tags for an incident.
 
-    Prefers incidents[].components[] array (canonical Statuspage schema).
-    Falls back to regex on title + first incident_update body (legacy).
+    Checks incidents[].components[] first (Statuspage schema; status.claude.com
+    names products there, not models, so this rarely matches), then the
+    title + first incident_update body.
     """
     tags = set()
     for comp in (inc.get("components") or []):
         if isinstance(comp, dict):
             name = (comp.get("name") or "").lower()
-            for fam in ("opus", "sonnet", "haiku"):
+            for fam in MODEL_FAMILIES:
                 if re.search(rf"\b{fam}\b", name):
                     tags.add(fam)
     if tags:
         return sorted(tags)
-    # Legacy fallback — regex on title + first update body
+    # Fallback — regex on title + first update body
     title = (inc.get("name") or "").lower()
     body = ""
     updates = inc.get("incident_updates") or []
@@ -385,7 +390,7 @@ def _tag_models_from_incident(inc):
         else ""
     )
     text = f"{title} {impact_override_s} {body}"
-    for fam in ("opus", "sonnet", "haiku"):
+    for fam in MODEL_FAMILIES:
         if re.search(rf"\b{fam}\b", text):
             tags.add(fam)
     return sorted(tags)

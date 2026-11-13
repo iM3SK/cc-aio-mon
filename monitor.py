@@ -70,14 +70,14 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
-                    read_fable_weekly, fable_display_state,
+                    read_fable_weekly, fable_display_state, claude_projects_dir,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
 import pulse
 
 # ---------------------------------------------------------------------------
 # Transcript usage scanner — reads ~/.claude/projects/**/*.jsonl
 # ---------------------------------------------------------------------------
-_CLAUDE_DIR = pathlib.Path.home() / ".claude" / "projects"
+_CLAUDE_DIR = claude_projects_dir()  # honours CLAUDE_CONFIG_DIR, like claude_json_path()
 MAX_TRANSCRIPT_FILES = 1000  # hard cap on scan to prevent DoS via oversized projects dir
 _usage_cache = {}
 
@@ -175,6 +175,7 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
     the iterator's path resolution and this open, the file was swapped
     and we skip it rather than aggregate from an unverified inode.
     """
+    reqs = OrderedDict()  # request key -> (model, inp, out, cr, cw, ts); last record wins
     try:
         with open(jl, "rb") as f:
             try:
@@ -222,34 +223,42 @@ def _aggregate_transcript(jl, st, sid, is_subagent, cutoff,
                 u = msg["usage"]
                 if not isinstance(u, dict):
                     continue
-                inp = int(_num(u.get("input_tokens", 0)))
-                out = int(_num(u.get("output_tokens", 0)))
-                cr = int(_num(u.get("cache_read_input_tokens", 0)))
-                cw = int(_num(u.get("cache_creation_input_tokens", 0)))
-                if model not in models:
-                    models[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
-                models[model]["input"] += inp
-                models[model]["output"] += out
-                models[model]["cache_read"] += cr
-                models[model]["cache_write"] += cw
-                models[model]["calls"] += 1
-
-                if ts > 0:
-                    # A corrupt/huge ts raises OverflowError (not OSError, so
-                    # the outer guard wouldn't catch it) or OSError on Windows.
-                    # Skip just this record's day attribution rather than abort
-                    # the whole transcript's aggregation.
-                    try:
-                        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-                    except (OverflowError, OSError, ValueError):
-                        continue
-                    active_days.add(day)
-                    daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
+                key = _usage_key(obj, msg) or f"#{len(reqs)}"
+                prev = reqs.get(key)
+                reqs[key] = (
+                    model,
+                    int(_num(u.get("input_tokens", 0))),
+                    int(_num(u.get("output_tokens", 0))),
+                    int(_num(u.get("cache_read_input_tokens", 0))),
+                    int(_num(u.get("cache_creation_input_tokens", 0))),
+                    prev[5] if prev and prev[5] > 0 else ts,  # day of the request's first record
+                )
                 # Known-but-ignored fields (F-18/F-19/F-20 / SD-003/007/008):
                 # u.get("diagnostics"), u.get("inference_geo"), u.get("service_tier"),
                 # obj.get("context_management") — not needed for stats aggregation.
     except (OSError, UnicodeDecodeError):
-        return
+        pass  # best-effort: keep what was read before the error
+
+    # One entry per API request: Claude Code repeats a request's usage on every
+    # content-block record, so summing records would count it several times.
+    for model, inp, out, cr, cw, ts in reqs.values():
+        if model not in models:
+            models[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
+        models[model]["input"] += inp
+        models[model]["output"] += out
+        models[model]["cache_read"] += cr
+        models[model]["cache_write"] += cw
+        models[model]["calls"] += 1
+        if ts > 0:
+            # A corrupt/huge ts raises OverflowError (not OSError, so the outer
+            # guard wouldn't catch it) or OSError on Windows. Skip just this
+            # request's day attribution rather than abort the aggregation.
+            try:
+                day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            except (OverflowError, OSError, ValueError):
+                continue
+            active_days.add(day)
+            daily_tokens[day] = daily_tokens.get(day, 0) + inp + out + cr + cw
 
 
 def scan_transcript_stats(period="all", ttl=30.0):
@@ -1231,13 +1240,17 @@ def load_history(sid, n=HISTORY_RATE_SAMPLES):
 # line counts and no rate limits.
 #
 # Claude Code writes one assistant record per content block and repeats the
-# request's usage on each of them, so usage is counted once per message.id.
+# request's usage on each of them, so usage is counted once per request
+# (_usage_key).
 DESKTOP_SESSION_TTL = DEAD_SESSION_TTL  # list transcripts touched in the last 48 h
-DESKTOP_CTX_DEFAULT = 200_000
-DESKTOP_CTX_1M = 1_000_000
-# Context-window size for desktop sessions; 0 = infer (1M when the requested
-# model carries [1m] or the context already exceeds 200k, else 200k).
+# Context-window size for desktop sessions; 0 = the model's window from _MODELS
+# (_model_context_window), or 1M when the requested model carries [1m].
 DESKTOP_CTX_SIZE = int(max(0.0, _env_float("CC_MON_DESKTOP_CTX", 0.0)))
+# The parse is incremental, so a long session may grow past the 50 MiB cap
+# that whole-file readers use. The first catch-up read is capped per poll so a
+# large transcript never stalls the render loop.
+DESKTOP_TRANSCRIPT_MAX_BYTES = 1024 * 1024 * 1024
+_DESKTOP_READ_BUDGET = 16 * 1024 * 1024
 _TRANSCRIPT_HEAD_BYTES = 64 * 1024
 _TRANSCRIPT_TAIL_BYTES = 256 * 1024
 _DESKTOP_SCAN_CAP = 512               # max project transcripts examined per scan
@@ -1327,9 +1340,9 @@ def _transcript_meta(path, st):
             meta["entrypoint"] = rec["entrypoint"]
         if isinstance(rec.get("cwd"), str) and rec["cwd"]:
             meta["cwd"] = _sanitize(rec["cwd"])
-        if rtype == "custom-title" and isinstance(rec.get("customTitle"), str):
+        if rtype == "custom-title" and isinstance(rec.get("customTitle"), str) and rec["customTitle"].strip():
             meta["title"] = _sanitize(rec["customTitle"].strip())
-        elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str):
+        elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str) and rec["aiTitle"].strip():
             ai_title = _sanitize(rec["aiTitle"].strip())
         elif rtype == "assistant" and not rec.get("isSidechain"):
             mid = as_dict(rec.get("message")).get("model")
@@ -1388,7 +1401,7 @@ def list_desktop_sessions(exclude=()):
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
                 continue
             age = now - st.st_mtime
-            if age > DESKTOP_SESSION_TTL or st.st_size > TRANSCRIPT_MAX_BYTES:
+            if age > DESKTOP_SESSION_TTL or st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
                 continue
             prev = found.get(sid)
             if prev and prev["mtime"] >= st.st_mtime:
@@ -1459,10 +1472,12 @@ def _ingest_desktop_record(state, rec):
         if not isinstance(model, str) or not model or model.startswith("<"):
             return  # synthetic / local placeholder message — no API usage
         u = as_dict(msg.get("usage"))
-        mid = msg.get("id") or rec.get("requestId") or rec.get("uuid")
+        mid = _usage_key(rec, msg) or rec.get("uuid")
         if not isinstance(mid, str) or not mid:
             return
         prev = state["msgs"].get(mid)
+        cc = as_dict(u.get("cache_creation"))
+        stu = as_dict(u.get("server_tool_use"))
         state["msgs"][mid] = {
             "t": prev["t"] if prev else (ts if ts >= MIN_EPOCH else 0.0),
             "model": model,
@@ -1471,38 +1486,50 @@ def _ingest_desktop_record(state, rec):
             "out": _num(u.get("output_tokens")),
             "cr": _num(u.get("cache_read_input_tokens")),
             "cw": _num(u.get("cache_creation_input_tokens")),
+            "cw1h": _num(cc.get("ephemeral_1h_input_tokens")),
+            "cw5m": _num(cc.get("ephemeral_5m_input_tokens")),
+            "wsr": _num(stu.get("web_search_requests")),
+            "wfr": _num(stu.get("web_fetch_requests")),
         }
 
 
-def _desktop_ctx_size(state, peak_tokens):
+def _desktop_ctx_size(state, model_id):
     if DESKTOP_CTX_SIZE > 0:
         return DESKTOP_CTX_SIZE
-    if "[1m]" in state["requested"].lower() or peak_tokens > DESKTOP_CTX_DEFAULT:
-        return DESKTOP_CTX_1M
-    return DESKTOP_CTX_DEFAULT
+    if "[1m]" in state["requested"].lower():
+        return 1_000_000
+    return _model_context_window(model_id)
 
 
 def _build_desktop_snapshot(sid, state, mtime):
-    """Snapshot-shaped dict + rate history from the parsed transcript state."""
+    """Snapshot-shaped dict + rate history from the parsed transcript state.
+    The snapshot also carries _session_cost, the breakdown the cost modal
+    shows (same shape as _aggregate_session_cost)."""
     msgs = list(state["msgs"].values())
     if not msgs:
         return None
-    peak = max(m["in"] + m["cr"] + m["cw"] for m in msgs)
-    window = _desktop_ctx_size(state, peak)
+    last = msgs[-1]
+    window = _desktop_ctx_size(state, last["model"])
+    sc = {k: 0.0 for k in ("input", "output", "cache_read", "cache_write",
+                           "cost_input", "cost_output", "cost_cache_read", "cost_cache_write",
+                           "web_search_requests", "web_fetch_requests", "cache_1h", "cache_5m")}
     cost = 0.0
-    tot_in = tot_out = 0.0
     hist = []
     for m in msgs:
-        p = _get_pricing(m["model"], m["speed"])
-        cost += (m["in"] * p["input"] + m["out"] * p["output"]
-                 + m["cr"] * p["cache_read"] + m["cw"] * p["cache_write"]) / 1_000_000
-        tot_in += m["in"] + m["cr"] + m["cw"]
-        tot_out += m["out"]
+        c = _usage_cost(m["model"], m["speed"], m["in"], m["out"], m["cr"], m["cw"], m["cw1h"])
+        cost += sum(c.values())
+        for k, v in (("input", m["in"]), ("output", m["out"]), ("cache_read", m["cr"]),
+                     ("cache_write", m["cw"]), ("cache_1h", m["cw1h"]), ("cache_5m", m["cw5m"]),
+                     ("web_search_requests", m["wsr"]), ("web_fetch_requests", m["wfr"])):
+            sc[k] += v
+        for k in ("input", "output", "cache_read", "cache_write"):
+            sc["cost_" + k] += c[k]
         if m["t"] >= MIN_EPOCH:
             pct = (m["in"] + m["cr"] + m["cw"]) / window * 100
             hist.append({"t": m["t"], "cost": {"total_cost_usd": cost},
                          "context_window": {"used_percentage": pct}})
-    last = msgs[-1]
+    session_cost = {k: (int(v) if not k.startswith("cost_") else v) for k, v in sc.items()}
+    session_cost["cost_total"] = cost
     ctx_tokens = last["in"] + last["cr"] + last["cw"]
     dur_ms = max(0.0, (state["last_t"] - state["first_t"]) * 1000) if state["first_t"] else 0.0
     data = {
@@ -1515,8 +1542,9 @@ def _build_desktop_snapshot(sid, state, mtime):
         "context_window": {
             "context_window_size": window,
             "used_percentage": min(100.0, ctx_tokens / window * 100),
-            "total_input_tokens": int(tot_in),
-            "total_output_tokens": int(tot_out),
+            # Same meaning as the statusline fields: the current context.
+            "total_input_tokens": int(ctx_tokens),
+            "total_output_tokens": int(last["out"]),
             "current_usage": {
                 "input_tokens": int(last["in"]),
                 "output_tokens": int(last["out"]),
@@ -1528,6 +1556,7 @@ def _build_desktop_snapshot(sid, state, mtime):
         "_source": "desktop",
         "_origin": _origin_tag(state["entrypoint"]),
         "_mtime": mtime,
+        "_session_cost": session_cost,
     }
     return data, hist[-HISTORY_RATE_SAMPLES:]
 
@@ -1536,8 +1565,10 @@ def load_desktop_state(sid, path):
     """Return (snapshot, history) for a desktop session, or None.
 
     Parses the transcript incrementally: only bytes appended since the last
-    call are read, so polling a multi-megabyte transcript stays cheap. A
-    replaced or truncated file restarts the parse."""
+    call are read, so polling a multi-megabyte transcript stays cheap. At most
+    _DESKTOP_READ_BUDGET bytes are read per call; while a large transcript is
+    still being caught up the call returns None. A replaced or truncated file
+    restarts the parse."""
     if not isinstance(sid, str) or not _SID_RE.match(sid):
         return None
     safe = _safe_transcript_path(path)
@@ -1547,7 +1578,7 @@ def load_desktop_state(sid, path):
         st = safe.stat()
     except OSError:
         return None
-    if st.st_size > TRANSCRIPT_MAX_BYTES:
+    if st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
         return None
     state = _desktop_state.get(sid)
     if (state is None or state["path"] != str(safe)
@@ -1557,17 +1588,22 @@ def load_desktop_state(sid, path):
     _desktop_state.move_to_end(sid)
     while len(_desktop_state) > _DESKTOP_STATE_MAX:
         _desktop_state.popitem(last=False)
+    caught_up = True
     if st.st_size > state["offset"]:
+        want = st.st_size - state["offset"]
+        caught_up = want <= _DESKTOP_READ_BUDGET
         fh = _open_checked(safe, st)
         if fh is None:
             return None
         try:
             with fh:
                 fh.seek(state["offset"])
-                raw = fh.read(st.st_size - state["offset"])
+                raw = fh.read(min(want, _DESKTOP_READ_BUDGET))
         except OSError:
             return None
         end = raw.rfind(b"\n")
+        if end < 0 and not caught_up:
+            end = len(raw) - 1  # one line longer than the budget: skip it
         if end >= 0:
             chunk = raw[:end + 1]
             state["offset"] += len(chunk)
@@ -1578,6 +1614,8 @@ def load_desktop_state(sid, path):
                 rec = json_object(line)
                 if rec is not None:
                     _ingest_desktop_record(state, rec)
+    if not caught_up:
+        return None  # still reading a large transcript; the next poll continues
     if state["built_at"] != state["offset"] or state["built"] is None:
         state["built"] = _build_desktop_snapshot(sid, state, st.st_mtime)
         state["built_at"] = state["offset"]
@@ -2094,18 +2132,36 @@ def render_legend(cols, rows):
 # Cost breakdown modal
 # ---------------------------------------------------------------------------
 # Prices per 1M tokens (USD). Sources: official Anthropic pricing page.
-# cache_write = 5-minute TTL price. 1h cache write adds ~60% — documented separately.
+# cache_write = 5-minute TTL price (1.25x input). A 1-hour cache write costs
+# CACHE_WRITE_1H_MULT x input; _usage_cost applies it to the 1h share that
+# usage.cache_creation reports.
 _DEFAULT_PRICING = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}  # Sonnet-tier fallback
+CACHE_WRITE_1H_MULT = 2.0
+DEFAULT_CTX_WINDOW = 1_000_000  # every current model except Haiku 4.5; older 200K models set "ctx"
 
 # Single source of truth for model metadata — keyed by Anthropic model ID.
 # Each entry: {"name": "...", "code": ("XX", "V.v"), "pricing": {...} | None}
 # Pricing is per-1M-token USD (input / output / cache_read / cache_write).
+# Optional: "pricing_fast" (speed="fast"), "pricing_long" + "long_threshold"
+# (rates for a request whose prompt exceeds the threshold), "ctx" (context
+# window when it is not DEFAULT_CTX_WINDOW).
 # Adding a new model = one entry here, not three. Used by _get_pricing (below)
 # and _model_code (token-stats modal section).
 _MODELS = {
+    # Fable 5.2 / Mythos 5.2: $8 / $40, cache read $0.20 (0.025x), 5m write $10.
+    # Fast mode $16 / $80; its cache rates follow the same 2x as the other
+    # fast-mode entries (not published separately).
+    "claude-fable-5-2": {"name": "Fable 5.2", "code": ("FBL", "5.2"),
+                         "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00},
+                         "pricing_fast": {"input": 16.0, "output": 80.0, "cache_read": 0.40, "cache_write": 20.00}},
+    "claude-mythos-5-2": {"name": "Mythos 5.2", "code": ("MY", "5.2"),
+                          "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00},
+                          "pricing_fast": {"input": 16.0, "output": 80.0, "cache_read": 0.40, "cache_write": 20.00}},
     # Fable 5.1: same per-token price as Fable 5, but cache reads are 0.025x ($0.25).
     "claude-fable-5-1": {"name": "Fable 5.1", "code": ("FBL", "5.1"),
                          "pricing": {"input": 10.0, "output": 50.0, "cache_read": 0.25, "cache_write": 12.50}},
+    "claude-mythos-5-1": {"name": "Mythos 5.1", "code": ("MY", "5.1"),
+                          "pricing": {"input": 10.0, "output": 50.0, "cache_read": 0.25, "cache_write": 12.50}},
     "claude-fable-5": {"name": "Fable 5", "code": ("FBL", "5"),
                        "pricing": {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.50}},
     # Project Glasswing only — same tier as Fable 5. Rare in transcripts.
@@ -2129,21 +2185,30 @@ _MODELS = {
     "claude-opus-4-6": {"name": "Opus 4.6", "code": ("OP", "4.6"),
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25},
                         "pricing_fast": {"input": 30.0, "output": 150.0, "cache_read": 3.00, "cache_write": 37.50}},
-    "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"),
+    "claude-opus-4-5": {"name": "Opus 4.5", "code": ("OP", "4.5"), "ctx": 200_000,
                         "pricing": {"input": 5.0,  "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
-    "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"),
+    "claude-opus-4-1": {"name": "Opus 4.1", "code": ("OP", "4.1"), "ctx": 200_000,
                         "pricing": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}},
     "claude-sonnet-5-5": {"name": "Sonnet 5.5", "code": ("SO", "5.5"),
                           "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.10, "cache_write": 2.50}},
+    # Sonnet 5: $2 / $10; cache read assumed at the standard 0.1x (not published here).
+    "claude-sonnet-5": {"name": "Sonnet 5", "code": ("SO", "5"),
+                        "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.20, "cache_write": 2.50}},
     "claude-sonnet-4-6": {"name": "Sonnet 4.6", "code": ("SO", "4.6"),
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
-    "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"),
+    "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"), "ctx": 200_000,
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
-    "claude-haiku-4-5": {"name": "Haiku 4.5", "code": ("HA", "4.5"),
+    # Haiku 5.5: $0.10 / $0.50 up to a 100K-token prompt, $0.50 / $2.50 above.
+    # Cache rates assumed at the standard 0.1x read / 1.25x write.
+    "claude-haiku-5-5": {"name": "Haiku 5.5", "code": ("HA", "5.5"),
+                         "pricing": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+                         "pricing_long": {"input": 0.50, "output": 2.50, "cache_read": 0.05, "cache_write": 0.625},
+                         "long_threshold": 100_000},
+    "claude-haiku-4-5": {"name": "Haiku 4.5", "code": ("HA", "4.5"), "ctx": 200_000,
                          "pricing": {"input": 1.0,  "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
     # Retired model — kept for correct pricing of historical transcripts. Real ID
     # is claude-3-5-haiku-20241022; _model_base strips the -YYYYMMDD to this key.
-    "claude-3-5-haiku": {"name": "Haiku 3.5", "code": ("HA", "3.5"),
+    "claude-3-5-haiku": {"name": "Haiku 3.5", "code": ("HA", "3.5"), "ctx": 200_000,
                          "pricing": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08, "cache_write": 1.00}},
     # Short-ID fallbacks (some transcript entries use abbreviated IDs).
     # Priced at current standard tier to avoid falling back to _DEFAULT_PRICING
@@ -2151,6 +2216,9 @@ _MODELS = {
     "haiku":  {"name": "Haiku",  "code": ("HA", ""), "pricing": {"input": 1.0, "output": 5.0,  "cache_read": 0.10, "cache_write": 1.25}},
     "sonnet": {"name": "Sonnet", "code": ("SO", ""), "pricing": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
     "opus":   {"name": "Opus",   "code": ("OP", ""), "pricing": {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write": 6.25}},
+    # Fable / Mythos short aliases: priced as the current release (5.2).
+    "fable":  {"name": "Fable",  "code": ("FBL", ""), "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00}},
+    "mythos": {"name": "Mythos", "code": ("MY", ""), "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00}},
 }
 
 
@@ -2163,16 +2231,54 @@ def _model_base(model_id):
     return re.sub(r"-\d{8}$", "", base)
 
 
-def _get_pricing(model_id, speed=None):
+def _get_pricing(model_id, speed=None, prompt_tokens=None):
     """Get pricing for model. speed="fast" selects fast-mode rates when the
-    model defines them; otherwise standard. Falls back to _DEFAULT_PRICING."""
+    model defines them; a prompt (input + cache read + cache write tokens)
+    above the model's long_threshold selects pricing_long; otherwise standard.
+    Falls back to _DEFAULT_PRICING."""
     entry = _MODELS.get(_model_base(model_id))
     if entry:
         if speed == "fast" and entry.get("pricing_fast"):
             return entry["pricing_fast"]
+        if (entry.get("pricing_long") and prompt_tokens is not None
+                and prompt_tokens > entry.get("long_threshold", float("inf"))):
+            return entry["pricing_long"]
         if entry.get("pricing"):
             return entry["pricing"]
     return _DEFAULT_PRICING
+
+
+def _model_context_window(model_id):
+    """Context window in tokens: DEFAULT_CTX_WINDOW unless _MODELS says otherwise."""
+    entry = _MODELS.get(_model_base(model_id)) or {}
+    return int(entry.get("ctx") or DEFAULT_CTX_WINDOW)
+
+
+def _usage_key(rec, msg):
+    """Identity of the API request behind an assistant record. Claude Code
+    writes one record per content block and repeats the request's usage on
+    each, so usage must be counted once per key. None = no identity (count
+    the record on its own)."""
+    for k in (msg.get("id"), rec.get("requestId")):
+        if isinstance(k, str) and k:
+            return k
+    return None
+
+
+def _usage_cost(model_id, speed, inp, out, cr, cw, cw_1h=0):
+    """USD cost of one request, split as {input, output, cache_read,
+    cache_write}. cw is every cache-creation token; cw_1h is the part written
+    with the 1-hour TTL (from usage.cache_creation), priced at
+    CACHE_WRITE_1H_MULT x input instead of the 5-minute write rate."""
+    p = _get_pricing(model_id, speed, prompt_tokens=inp + cr + cw)
+    cw_1h = max(0.0, min(cw_1h, cw))
+    return {
+        "input": inp * p["input"] / 1_000_000,
+        "output": out * p["output"] / 1_000_000,
+        "cache_read": cr * p["cache_read"] / 1_000_000,
+        "cache_write": ((cw - cw_1h) * p["cache_write"]
+                        + cw_1h * p["input"] * CACHE_WRITE_1H_MULT) / 1_000_000,
+    }
 
 
 _SESSION_COST_CACHE = OrderedDict()  # LRU: {session_id: (ts, breakdown_dict)}
@@ -2228,16 +2334,15 @@ def _safe_transcript_path(tp):
 _AI_TITLE_CACHE = OrderedDict()  # LRU: {sid: (ts, mtime, title_or_None)}
 _AI_TITLE_CACHE_MAX = 64
 _AI_TITLE_TTL = 30.0
-_AI_TITLE_SCAN_BYTES = 64 * 1024  # CC writes ai-title within first ~20 records (<50 KiB); 64 KiB head suffices and is ~8x faster on cache miss than the prior 512 KiB cap
 
 
 def _scan_ai_title(transcript_path):
-    """Return sanitized aiTitle from transcript JSONL, or None.
+    """Return the session's sanitized title from its transcript, or None.
 
-    CC writes `{"type":"ai-title","aiTitle":"..."}` records early in the file
-    (within the first dozen records). We bound-read the head to keep this fast
-    on multi-megabyte transcripts called per render tick. Last record in the
-    scanned window wins. Path containment via _safe_transcript_path.
+    A rename (`custom-title`) wins over the generated `ai-title`; the last
+    non-empty record of a kind wins. Only the head and tail of the file are
+    read, so this stays fast on multi-megabyte transcripts called per render
+    tick. Path containment via _safe_transcript_path.
     """
     path = _safe_transcript_path(transcript_path)
     if path is None:
@@ -2246,7 +2351,7 @@ def _scan_ai_title(transcript_path):
         st = path.stat()
     except OSError:
         return None
-    if st.st_size > TRANSCRIPT_MAX_BYTES:
+    if st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
         return None
 
     sid = path.stem
@@ -2259,46 +2364,11 @@ def _scan_ai_title(transcript_path):
         _AI_TITLE_CACHE.move_to_end(sid)
         return cached[2]
 
-    title = None
-    try:
-        with open(path, "rb") as fh:
-            # S-P2-2 (CWE-367): TOCTOU mitigation — re-stat the *open*
-            # file descriptor and require (st_ino, st_dev) to match the
-            # pre-open stat. If they differ, the underlying inode was
-            # swapped between resolve() (in _safe_transcript_path) and open(), which on
-            # a shared filesystem could let another user point us at a
-            # different file via fast unlink/link or symlink-flip races.
-            # st_dev guard ensures the swap can't move us to a different
-            # mount either.
-            try:
-                fst = os.fstat(fh.fileno())
-            except OSError:
-                raw = None
-            else:
-                if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
-                    raw = None
-                else:
-                    raw = fh.read(_AI_TITLE_SCAN_BYTES)
-    except OSError:
-        raw = None
-    if raw:
-        try:
-            text = raw.decode("utf-8", errors="replace")
-        except (UnicodeDecodeError, ValueError):
-            text = ""
-        # Drop the trailing fragment if our read sliced mid-line.
-        if len(raw) >= _AI_TITLE_SCAN_BYTES:
-            nl = text.rfind("\n")
-            if nl >= 0:
-                text = text[:nl]
-        for line in text.splitlines():
-            if not line:
-                continue
-            obj = json_object(line)
-            if isinstance(obj, dict) and obj.get("type") == "ai-title":
-                t = obj.get("aiTitle")
-                if isinstance(t, str) and t.strip():
-                    title = _sanitize(t.strip())
+    # Head + tail read with the TOCTOU identity check (_transcript_meta):
+    # Claude Code repeats ai-title records through the session (the first one
+    # can sit hundreds of KiB in), and a rename writes custom-title, which wins.
+    meta = _transcript_meta(path, st)
+    title = (meta or {}).get("title") or None
 
     while len(_AI_TITLE_CACHE) >= _AI_TITLE_CACHE_MAX:
         _AI_TITLE_CACHE.popitem(last=False)
@@ -2308,16 +2378,19 @@ def _scan_ai_title(transcript_path):
 
 def _aggregate_session_cost(data):
     """Walk the current session's transcript JSONL, sum per-category tokens
-    across all assistant records, apply pricing per-record model.
+    once per API request (_usage_key), apply pricing per-request model.
     Returns dict {input, output, cache_read, cache_write, cost_total,
                   cost_input, cost_output, cost_cache_read, cost_cache_write}
-    or None if transcript unreachable.
+    or None if transcript unreachable. A desktop app snapshot already carries
+    this breakdown (_session_cost) from its incremental parse.
 
     F-06 / CACHE-06: all failure paths for a valid sid write a short-lived
     sentinel (now, None) to _SESSION_COST_CACHE so the next render-frame call
     within TTL returns cached None immediately instead of re-scanning.  The
     cache-hit branch already returns cached[1] (which may be None) correctly.
     """
+    if data.get("_source") == "desktop" and isinstance(data.get("_session_cost"), dict):
+        return data["_session_cost"]
     sid = data.get("session_id")
     sid = sid.strip() if isinstance(sid, str) else ""
     if not sid or not _SID_RE.match(sid):
@@ -2364,11 +2437,8 @@ def _aggregate_session_cost(data):
         _cache_sentinel()
         return None
 
-    inp = out = cr = cw = 0.0
-    ci = co = ccr = ccw = 0.0
     has_usage = False
-    wsr = wfr = 0
-    c1h = c5m = 0
+    reqs = OrderedDict()  # request key -> usage of that request (last record wins)
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             # S-P2-2 (CWE-367): TOCTOU guard — same fstat identity check as
@@ -2405,26 +2475,21 @@ def _aggregate_session_cost(data):
                 mid = msg.get("model") or ""
                 if not isinstance(mid, str):
                     mid = ""
-                pricing = _get_pricing(mid, u.get("speed"))
-                # Per-record token deltas — name with cr_inc/cw_inc (not r/w)
-                # to avoid visual collision with module-level `R` ANSI reset.
-                in_inc = _num(u.get("input_tokens", 0))
-                out_inc = _num(u.get("output_tokens", 0))
-                cr_inc = _num(u.get("cache_read_input_tokens", 0))
-                cw_inc = _num(u.get("cache_creation_input_tokens", 0))
-                inp += in_inc; out += out_inc; cr += cr_inc; cw += cw_inc
-                ci += in_inc * pricing["input"] / 1_000_000
-                co += out_inc * pricing["output"] / 1_000_000
-                ccr += cr_inc * pricing["cache_read"] / 1_000_000
-                ccw += cw_inc * pricing["cache_write"] / 1_000_000
-                stu = u.get("server_tool_use") or {}
-                if isinstance(stu, dict):
-                    wsr += int(_num(stu.get("web_search_requests", 0)))
-                    wfr += int(_num(stu.get("web_fetch_requests", 0)))
-                cc = u.get("cache_creation") or {}
-                if isinstance(cc, dict):
-                    c1h += int(_num(cc.get("ephemeral_1h_input_tokens", 0)))
-                    c5m += int(_num(cc.get("ephemeral_5m_input_tokens", 0)))
+                if mid.startswith("<"):
+                    continue  # <synthetic> placeholder — no API usage
+                stu = as_dict(u.get("server_tool_use"))
+                cc = as_dict(u.get("cache_creation"))
+                key = _usage_key(rec, msg) or f"#{len(reqs)}"
+                reqs[key] = (
+                    mid, u.get("speed"),
+                    _num(u.get("input_tokens", 0)), _num(u.get("output_tokens", 0)),
+                    _num(u.get("cache_read_input_tokens", 0)),
+                    _num(u.get("cache_creation_input_tokens", 0)),
+                    int(_num(cc.get("ephemeral_1h_input_tokens", 0))),
+                    int(_num(cc.get("ephemeral_5m_input_tokens", 0))),
+                    int(_num(stu.get("web_search_requests", 0))),
+                    int(_num(stu.get("web_fetch_requests", 0))),
+                )
                 # Known-but-ignored fields (F-18/F-19/F-20 / SD-003/007/008):
                 # u.get("diagnostics"), u.get("inference_geo"), u.get("service_tier"),
                 # rec.get("context_management") — not needed for cost/token aggregation.
@@ -2435,6 +2500,16 @@ def _aggregate_session_cost(data):
     if not has_usage:
         _cache_sentinel()
         return None
+
+    inp = out = cr = cw = 0.0
+    ci = co = ccr = ccw = 0.0
+    wsr = wfr = c1h = c5m = 0
+    for mid, speed, in_inc, out_inc, cr_inc, cw_inc, h1, m5, ws, wf in reqs.values():
+        inp += in_inc; out += out_inc; cr += cr_inc; cw += cw_inc
+        cost = _usage_cost(mid, speed, in_inc, out_inc, cr_inc, cw_inc, h1)
+        ci += cost["input"]; co += cost["output"]
+        ccr += cost["cache_read"]; ccw += cost["cache_write"]
+        c1h += h1; c5m += m5; wsr += ws; wfr += wf
 
     result = {
         "input": int(inp), "output": int(out),
@@ -2719,7 +2794,7 @@ def render_pulse_modal(cols, rows):
             affected.add(m)
     if affected or incidents:
         parts = []
-        for m in ("opus", "sonnet", "haiku"):
+        for m in pulse.MODEL_FAMILIES:
             if m in affected:
                 parts.append(f"{C_RED}{B}{m}{R}")
             else:
@@ -3519,6 +3594,7 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
         # grows between lstat and read). None == unreadable or over cap.
         raw = safe_read(f, _SUBAGENT_FILE_MAX)
         too_large = raw is None
+        seen = set()  # request keys already counted (usage repeats per content block)
         if raw is not None:
             for line in raw.decode("utf-8", errors="replace").splitlines():
                 o = json_object(line)
@@ -3533,7 +3609,10 @@ def scan_subagents(transcript_path, ttl=_SUBAGENTS_TTL):
                 if not isinstance(m, dict):
                     continue
                 u = m.get("usage")
-                if isinstance(u, dict):
+                ukey = _usage_key(o, m)  # not `key`: that names the cache entry
+                if isinstance(u, dict) and (ukey is None or ukey not in seen):
+                    if ukey is not None:
+                        seen.add(ukey)
                     tok += (_num(u.get("input_tokens"), 0) + _num(u.get("output_tokens"), 0)
                             + _num(u.get("cache_creation_input_tokens"), 0)
                             + _num(u.get("cache_read_input_tokens"), 0))
@@ -3622,6 +3701,9 @@ _TOOL_ABBR = {
     "Agent": "AGNT", "WebFetch": "WFCH", "WebSearch": "WSCH",
     "TodoWrite": "TODO", "ExitPlanMode": "PLAN", "Skill": "SKIL",
     "AskUserQuestion": "ASK", "SlashCommand": "SLSH",
+    "PowerShell": "PWSH", "ToolSearch": "TSRC", "TaskStop": "TSTP",
+    "TaskCreate": "TCRT", "TaskUpdate": "TUPD", "SendMessage": "SMSG",
+    "Workflow": "WFLW", "Monitor": "MNTR",
 }
 
 

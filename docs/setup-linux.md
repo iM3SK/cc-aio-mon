@@ -42,7 +42,7 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "bash -c 'python3 /home/yourname/.cc-aio-mon/statusline.py'"
+    "command": "python3 /home/yourname/.cc-aio-mon/statusline.py"
   }
 }
 ```
@@ -91,10 +91,8 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 ## Troubleshooting
 
 **Statusline not appearing**
-- Claude Code's statusLine runs commands in a context where external binaries (`python3`, `python`) do not produce captured output. The command **must** be wrapped in `bash -c '...'`.
-- Correct: `"command": "bash -c 'python3 /home/you/.cc-aio-mon/statusline.py'"`
-- Wrong: `"command": "python3 /home/you/.cc-aio-mon/statusline.py"`
-- If the statusline was working before and stopped, verify the `bash -c` wrapper is still present in `~/.claude/settings.json`.
+- Use an absolute path: `"command": "python3 /home/you/.cc-aio-mon/statusline.py"`.
+- The statusline does not run in the Claude desktop app; its sessions appear in the monitor's DESKTOP APP section instead.
 
 **Monitor shows "Waiting for Claude Code session..."**
 - Check `statusLine.command` in `~/.claude/settings.json`.

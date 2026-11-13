@@ -37,19 +37,23 @@ Open `%USERPROFILE%\.claude\settings.json` (create the file if it doesn't exist)
 {
   "statusLine": {
     "type": "command",
-    "command": "bash -c 'py C:/Users/<your-username>/.cc-aio-mon/statusline.py'"
+    "command": "py C:/Users/<your-username>/.cc-aio-mon/statusline.py"
   }
 }
 ```
 
 **If `settings.json` already has other settings**, add only the `statusLine` key — do not overwrite the file. The file must remain valid JSON.
 
+Use forward slashes in the path. On Windows, Claude Code runs the command through Git Bash when it is installed and through PowerShell otherwise; `py` works in both. Do not wrap the command in `bash -c '...'`: without Git Bash, `bash` from PowerShell is WSL, where `py` does not exist.
+
 **Tip:** to print the exact command value for your machine, run:
 
 ```powershell
 $p = "$env:USERPROFILE\.cc-aio-mon\statusline.py" -replace '\\', '/'
-Write-Host "bash -c 'py $p'"
+Write-Host "py $p"
 ```
+
+The statusline runs only in Claude Code in a terminal. Sessions in the Claude desktop app have no statusline; the monitor reads them from their transcripts (see [README — Desktop app sessions](../README.md#desktop-app-sessions)).
 
 ## Step 4 — Launch the dashboard
 
@@ -67,7 +71,7 @@ function mon { py "$env:USERPROFILE\.cc-aio-mon\monitor.py" @args }
 
 ## Requirements check (optional)
 
-[check-requirements.ps1](../check-requirements.ps1) is an optional read-only script that verifies your system has Python, Git, and Claude Code CLI installed. It makes no changes to your system.
+[check-requirements.ps1](../check-requirements.ps1) is an optional read-only script that verifies Python 3.8+ (`py` launcher) and Git, and reports whether the Claude Code CLI is on `PATH` (needed only for the statusline). It makes no changes to your system and exits with code 1 when a requirement is missing.
 
 Run from the repo directory:
 
@@ -94,10 +98,9 @@ Restart Claude Code after updating. See [README — Updating](../README.md#updat
 ## Troubleshooting
 
 **Statusline not appearing**
-- Claude Code's statusLine runs commands in a context where external binaries (`py`, `python`, `python3`) do not produce captured output. The command **must** be wrapped in `bash -c '...'`.
-- Correct: `"command": "bash -c 'py C:/Users/you/.cc-aio-mon/statusline.py'"`
-- Wrong: `"command": "py \"C:/Users/you/.cc-aio-mon/statusline.py\""`
-- If the statusline was working before and stopped, verify the `bash -c` wrapper is still present in `%USERPROFILE%\.claude\settings.json`.
+- Use `"command": "py C:/Users/you/.cc-aio-mon/statusline.py"` with forward slashes.
+- A `bash -c '...'` wrapper fails when Git Bash is not installed: Claude Code then runs the command in PowerShell, where `bash` is WSL and has no `py`.
+- The statusline does not run in the Claude desktop app; its sessions appear in the monitor's DESKTOP APP section instead.
 
 **`py` not found**
 - Reinstall Python from [python.org](https://www.python.org/downloads/). Check "Install Python Launcher" during setup.

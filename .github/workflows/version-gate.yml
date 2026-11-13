@@ -9,6 +9,8 @@ name: Version Gate
 on:
   pull_request:
     branches: [main]
+    # labeled/unlabeled re-run the gate when 'no-release' is added or removed.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions: read-all
 

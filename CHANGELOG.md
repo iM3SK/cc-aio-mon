@@ -12,8 +12,54 @@
 - The dashboard marks them `desktop app, estimated`. CST and BRN come from
   per-model token prices with each request counted once (Claude Code repeats a
   request's usage on every content-block record). CTX uses the last request's
-  input tokens; `CC_MON_DESKTOP_CTX` overrides the inferred window. APR and LNS
-  show `n/a`; 5HL / 7DL come only from a CLI session.
+  input tokens against the model's context window; `CC_MON_DESKTOP_CTX`
+  overrides it. APR and LNS show `n/a`; 5HL / 7DL come only from a CLI session.
+  Large transcripts (up to 1 GiB) are caught up in 16 MiB steps per poll.
+
+**Fixes — token and cost counting:**
+- **Each API request is counted once.** Claude Code writes one assistant record
+  per content block and repeats the request's usage on each. The cost
+  breakdown (`c`), token stats (`t`) and agents (`a`) summed every record and
+  showed about 2–3× the real tokens and cost; they now count usage once per
+  `message.id` / `requestId` (`monitor._usage_key`).
+- **1-hour cache writes are priced at 2× input** instead of the 5-minute write
+  rate (`monitor._usage_cost`, from `usage.cache_creation`).
+- **Prices for current models:** Fable 5.2 and Mythos 5.2 ($8 / $40, cache read
+  $0.20, fast mode $16 / $80), Mythos 5.1, Sonnet 5 ($2 / $10) and Haiku 5.5
+  ($0.10 / $0.50, $0.50 / $2.50 for a prompt above 100K tokens), plus the
+  `fable` / `mythos` aliases. They fell back to Sonnet 4.x rates before.
+  Sonnet 5 and Haiku 5.5 cache rates assume the standard multipliers.
+- **Context windows per model** (`_MODELS[...]["ctx"]`, `_model_context_window`):
+  1M for current models, 200K for Haiku 4.5 and older.
+
+**Fixes — other:**
+- **Session titles** come from the transcript's head and tail, and a rename
+  (`custom-title`) wins over the generated `ai-title`. The generated title can
+  sit hundreds of KiB into the file, past the old 64 KiB head window.
+- **Anthropic Pulse tags Fable and Mythos incidents** and lists both families in
+  the modal (`pulse.MODEL_FAMILIES`).
+- **`CLAUDE_CONFIG_DIR`** now also moves the transcripts root
+  (`shared.claude_projects_dir`), matching the FBL reader.
+- `check-requirements.ps1` reported a missing `git` or `claude` as found; both
+  scripts now check for Python 3.8+, treat the Claude Code CLI as optional
+  (statusline only) and exit 1 when a requirement is missing.
+- Agents modal: short codes for PowerShell, ToolSearch, TaskStop and other
+  current tools.
+
+**Docs:**
+- Setup guides: the statusline command is `py …/statusline.py` (Windows) or
+  `python3 …/statusline.py`; the `bash -c` wrapper is gone (on Windows without
+  Git Bash it ran WSL `bash`, which has no `py`).
+- README, NOTICE and SECURITY describe the desktop-session transcript reading
+  and the FBL refresher's undocumented cache and experimental control request;
+  the statusline trigger list matches the current Claude Code docs.
+- FILE-IPC-CONTRACT: corrected `context_window` field paths, the transcript
+  fields the monitor reads, in-memory desktop fields, invalid-SID behaviour
+  and snapshot lifetime.
+
+**CI:** Ubuntu jobs run on `ubuntu-latest` again (only Python 3.8 stays on
+`ubuntu-24.04`) and the matrix adds Python 3.13 and 3.14. The version gate
+re-runs when the `no-release` label is added or removed.
 
 **Changed — session picker:**
 - Two sections: **CLI SESSIONS** and **DESKTOP APP SESSIONS**, the latter with
@@ -25,7 +71,7 @@
 - Legend: `[1-3] Token Stats Period`, `[enter] Open Session`, and a
   `DESKTOP APP` section.
 
-**Tests:** 911 passing (+21).
+**Tests:** 930 passing (+40).
 
 ## v1.17.2 — 2026-11-04
 

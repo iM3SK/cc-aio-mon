@@ -744,6 +744,13 @@ def claude_json_path() -> pathlib.Path:
     return base / ".claude.json"
 
 
+def claude_projects_dir() -> pathlib.Path:
+    """Session transcripts root: $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    base = pathlib.Path(cfg).expanduser() if cfg else pathlib.Path.home() / ".claude"
+    return base / "projects"
+
+
 def _fable_finite_number(value) -> Optional[float]:
     """Return a finite JSON number, without overflowing on a huge integer."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):

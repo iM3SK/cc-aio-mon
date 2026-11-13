@@ -25,13 +25,18 @@ contributors. No source code was copied, decompiled, or derived from
 Anthropic's proprietary codebase or any other third-party proprietary
 source.
 
-The project interacts with Anthropic products exclusively through:
+The project interacts with Anthropic products through:
 
-1. Publicly documented extension points:
+1. Publicly documented extension points and the user's own files:
    - Claude Code `statusLine` command hook — officially designed for
      custom status bar integrations and documented at code.claude.com.
    - User's own local transcript files in `~/.claude/projects/` —
      the user's personal data on the user's own disk, read-only.
+   - Optional FBL weekly-pool display: reads the undocumented
+     `cachedUsageUtilization` entry of the user's own `~/.claude.json`
+     and, to refresh it, runs the user's own `claude` CLI with its
+     experimental `get_usage` control request. No credentials are read.
+     Opt-out via `CC_AIO_MON_FABLE_REFRESH_SEC=0`.
 
 2. Public endpoints:
    - `status.claude.com/api/v2/summary.json` — Anthropic's public
@@ -56,10 +61,9 @@ No Modification of Anthropic Products
 ================================================================
 
 This tool does not modify, patch, wrap, or alter Claude Code, the
-Anthropic API, or any Anthropic-operated service. It is a read-only
-observer that consumes data voluntarily exposed by the user's local
-Claude Code installation via the officially documented `statusLine`
-extension point.
+Anthropic API, or any Anthropic-operated service. It observes data the
+user's local Claude Code installation exposes through the `statusLine`
+extension point or writes to the user's own disk.
 
 ================================================================
 Dependencies

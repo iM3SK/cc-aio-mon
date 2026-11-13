@@ -1486,6 +1486,19 @@ class TestFCdExplicitNow(unittest.TestCase):
             self.assertEqual(shared.f_cd(1_900_000_000.0 + 600), "10m")
 
 
+class TestClaudeProjectsDir(unittest.TestCase):
+
+    def test_default_under_home(self):
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": ""}):
+            self.assertEqual(shared.claude_projects_dir(),
+                             pathlib.Path.home() / ".claude" / "projects")
+
+    def test_config_dir_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": td}):
+                self.assertEqual(shared.claude_projects_dir(), pathlib.Path(td) / "projects")
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

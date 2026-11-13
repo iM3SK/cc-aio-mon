@@ -3985,9 +3985,27 @@ class TestScanAiTitle(unittest.TestCase):
             encoding="utf-8",
         )
         with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root), \
-             patch.object(self._monitor, "TRANSCRIPT_MAX_BYTES", 10):
+             patch.object(self._monitor, "DESKTOP_TRANSCRIPT_MAX_BYTES", 10):
             result = self._monitor._scan_ai_title(str(jl))
         self.assertIsNone(result)
+
+    def test_custom_title_wins_and_tail_is_read(self):
+        # The generated title sits past the head window; a rename wins over it.
+        filler = [json.dumps({"type": "user", "content": "x" * 1000}) for _ in range(120)]
+        jl = self._write("session10", filler + [
+            json.dumps({"type": "ai-title", "aiTitle": "Generated"}),
+            json.dumps({"type": "custom-title", "customTitle": "Renamed"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            self.assertEqual(self._monitor._scan_ai_title(str(jl)), "Renamed")
+
+    def test_ai_title_past_head_found(self):
+        filler = [json.dumps({"type": "user", "content": "x" * 1000}) for _ in range(120)]
+        jl = self._write("session11", filler + [
+            json.dumps({"type": "ai-title", "aiTitle": "Late title"}),
+        ])
+        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            self.assertEqual(self._monitor._scan_ai_title(str(jl)), "Late title")
 
     def test_empty_string_title_ignored(self):
         jl = self._write("session7", [
@@ -5196,19 +5214,51 @@ class TestDesktopSessions(unittest.TestCase):
         self.assertAlmostEqual(data["cost"]["total_cost_usd"], expected)
         self.assertEqual(len(hist), 2)
         cw = data["context_window"]
-        self.assertEqual(cw["context_window_size"], monitor.DESKTOP_CTX_DEFAULT)
-        self.assertAlmostEqual(cw["used_percentage"], 80_005 / 200_000 * 100)
+        self.assertEqual(cw["context_window_size"], 1_000_000)  # Opus 5.5
+        self.assertAlmostEqual(cw["used_percentage"], 80_005 / 1_000_000 * 100)
         self.assertEqual(cw["current_usage"]["output_tokens"], 500)
+        # total_* follow the statusline meaning: current context, not session sums
+        self.assertEqual(cw["total_input_tokens"], 80_005)
+        self.assertEqual(cw["total_output_tokens"], 500)
         self.assertEqual(data["session_name"], "Desk work")
         self.assertEqual(data["_source"], "desktop")
         self.assertEqual(data["cost"]["total_duration_ms"], 300_000)
+        sc = data["_session_cost"]
+        self.assertAlmostEqual(sc["cost_total"], expected)
+        self.assertEqual(sc["output"], 1500)
 
-    def test_context_over_200k_infers_1m_window(self):
+    def test_window_follows_model(self):
         p = self._write("desk-3", [_desk_assistant(
-            "m1", "2026-11-13T20:00:00.000Z", input_tokens=1, cache_read_input_tokens=300_000)])
+            "m1", "2026-11-13T20:00:00.000Z", model="claude-haiku-4-5-20251001",
+            input_tokens=1, cache_read_input_tokens=150_000)])
         data, _ = monitor.load_desktop_state("desk-3", str(p))
-        self.assertEqual(data["context_window"]["context_window_size"], monitor.DESKTOP_CTX_1M)
-        self.assertAlmostEqual(data["context_window"]["used_percentage"], 30.0001)
+        self.assertEqual(data["context_window"]["context_window_size"], 200_000)
+        self.assertAlmostEqual(data["context_window"]["used_percentage"], 75.0005)
+
+    def test_one_hour_cache_write_priced_double_input(self):
+        p = self._write("desk-4", [_desk_assistant(
+            "m1", "2026-11-13T20:00:00.000Z", cache_creation_input_tokens=1_000_000,
+            cache_creation={"ephemeral_1h_input_tokens": 600_000, "ephemeral_5m_input_tokens": 400_000})])
+        data, _ = monitor.load_desktop_state("desk-4", str(p))
+        # Opus 5.5: input $4 → 1h write $8/M; 5m write $5/M
+        self.assertAlmostEqual(data["cost"]["total_cost_usd"], 0.6 * 8.0 + 0.4 * 5.0)
+        self.assertEqual(data["_session_cost"]["cache_1h"], 600_000)
+
+    def test_large_transcript_read_in_chunks(self):
+        lines = [_desk_assistant(f"m{i}", "2026-11-13T20:00:00.000Z", input_tokens=1, output_tokens=1)
+                 for i in range(40)]
+        p = self._write("desk-5", lines)
+        size = p.stat().st_size
+        with patch.object(monitor, "_DESKTOP_READ_BUDGET", size // 3):
+            results = [monitor.load_desktop_state("desk-5", str(p)) for _ in range(5)]
+        self.assertIsNone(results[0])          # still catching up
+        data, hist = results[-1]
+        self.assertEqual(len(hist), 40)        # every request ingested once
+
+    def test_cost_breakdown_uses_desktop_breakdown(self):
+        p = self._basic()
+        data, _ = monitor.load_desktop_state("desk-1", str(p))
+        self.assertIs(monitor._aggregate_session_cost(data), data["_session_cost"])
 
     def test_env_override_window(self):
         p = self._basic()
@@ -5311,6 +5361,114 @@ class TestTwoSectionPicker(unittest.TestCase):
     def test_main_has_no_digit_session_selection(self):
         src = pathlib.Path(monitor.__file__).read_text(encoding="utf-8")
         self.assertNotIn("k.isdigit()", src)
+
+
+# ---------------------------------------------------------------------------
+# Usage counted once per request; current model prices
+# ---------------------------------------------------------------------------
+def _block_records(mid, model="claude-opus-5-5", blocks=3, **usage):
+    """One API request as Claude Code writes it: one record per content block,
+    each repeating the request's usage."""
+    return [json.dumps({"type": "assistant", "timestamp": "2026-11-13T20:00:00.000Z",
+                        "requestId": f"req_{mid}",
+                        "message": {"id": mid, "model": model, "usage": usage,
+                                    "content": [{"type": "text"}]}})
+            for _ in range(blocks)]
+
+
+class TestUsageCountedOncePerRequest(unittest.TestCase):
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._td.name)
+        self.proj = self.root / "proj"
+        self.proj.mkdir()
+        monitor._SESSION_COST_CACHE.clear()
+        monitor._subagents_cache.clear()
+        monitor._usage_cache.clear()
+
+    def tearDown(self):
+        monitor._SESSION_COST_CACHE.clear()
+        monitor._subagents_cache.clear()
+        monitor._usage_cache.clear()
+        self._td.cleanup()
+
+    def _lines(self):
+        return (_block_records("m1", input_tokens=10, output_tokens=100)
+                + _block_records("m2", blocks=2, input_tokens=20, output_tokens=200))
+
+    def test_session_cost_dedups(self):
+        jl = _write_transcript(self.proj, "sess-a", self._lines())
+        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
+            res = monitor._aggregate_session_cost({"session_id": "sess-a", "transcript_path": str(jl)})
+        self.assertEqual(res["input"], 30)
+        self.assertEqual(res["output"], 300)
+
+    def test_token_stats_dedup(self):
+        _write_transcript(self.proj, "sess-b", self._lines())
+        with patch.object(monitor, "_CLAUDE_DIR", self.root):
+            models, overview = monitor.scan_transcript_stats("all", ttl=0)
+        m = models["claude-opus-5-5"]
+        self.assertEqual((m["input"], m["output"], m["calls"]), (30, 300, 2))
+        self.assertEqual(sum(overview["daily_tokens"].values()), 330)
+
+    def test_records_without_id_still_counted_each(self):
+        lines = [json.dumps({"type": "assistant", "message": {
+            "model": "claude-opus-5-5", "usage": {"input_tokens": 5}}})] * 2
+        jl = _write_transcript(self.proj, "sess-c", lines)
+        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
+            res = monitor._aggregate_session_cost({"session_id": "sess-c", "transcript_path": str(jl)})
+        self.assertEqual(res["input"], 10)
+
+    def test_subagent_tokens_dedup(self):
+        (self.proj / "sess-d.jsonl").write_text('{"type":"user"}\n', encoding="utf-8")
+        sub = self.proj / "sess-d" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-x.jsonl").write_text(
+            "\n".join(_block_records("s1", input_tokens=7, output_tokens=3)) + "\n", encoding="utf-8")
+        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
+            info = monitor.scan_subagents(str(self.proj / "sess-d.jsonl"), ttl=0)
+        self.assertEqual(info["total_tokens"], 10)
+
+
+class TestCurrentModelPricing(unittest.TestCase):
+
+    def test_new_models_have_own_prices(self):
+        cases = {
+            "claude-fable-5-2": (8.0, 40.0, 0.20),
+            "claude-mythos-5-2": (8.0, 40.0, 0.20),
+            "claude-mythos-5-1": (10.0, 50.0, 0.25),
+            "claude-sonnet-5": (2.0, 10.0, 0.20),
+            "claude-haiku-5-5": (0.10, 0.50, 0.01),
+        }
+        for mid, (i, o, cr) in cases.items():
+            p = _get_pricing(mid)
+            self.assertEqual((p["input"], p["output"], p["cache_read"]), (i, o, cr), mid)
+
+    def test_fable_5_2_fast(self):
+        p = _get_pricing("claude-fable-5-2", "fast")
+        self.assertEqual((p["input"], p["output"]), (16.0, 80.0))
+
+    def test_haiku_5_5_long_prompt_tier(self):
+        self.assertEqual(_get_pricing("claude-haiku-5-5", prompt_tokens=100_000)["input"], 0.10)
+        self.assertEqual(_get_pricing("claude-haiku-5-5", prompt_tokens=100_001)["input"], 0.50)
+        c = monitor._usage_cost("claude-haiku-5-5", None, 150_000, 1_000, 0, 0)
+        self.assertAlmostEqual(c["input"], 150_000 * 0.50 / 1e6)
+
+    def test_one_hour_write_rate(self):
+        c = monitor._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 1_000_000)
+        self.assertAlmostEqual(c["cache_write"], 8.0)  # 2x the $4 input
+        c = monitor._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 0)
+        self.assertAlmostEqual(c["cache_write"], 5.0)
+
+    def test_context_windows(self):
+        self.assertEqual(monitor._model_context_window("claude-opus-5-5"), 1_000_000)
+        self.assertEqual(monitor._model_context_window("claude-haiku-4-5-20251001"), 200_000)
+        self.assertEqual(monitor._model_context_window("claude-future-9"), monitor.DEFAULT_CTX_WINDOW)
+
+    def test_aliases(self):
+        self.assertEqual(_get_pricing("fable")["input"], 8.0)
+        self.assertEqual(_model_code("mythos"), ("MY", ""))
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
