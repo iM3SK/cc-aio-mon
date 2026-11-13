@@ -1268,7 +1268,9 @@ def load_history(sid, n=HISTORY_RATE_SAMPLES):
 DESKTOP_SESSION_TTL = DEAD_SESSION_TTL  # list transcripts touched in the last 48 h
 # Context-window size for desktop sessions; 0 = the model's window from _MODELS
 # (_model_context_window), or 1M when the requested model carries [1m].
-DESKTOP_CTX_SIZE = int(max(0.0, _env_float("CC_MON_DESKTOP_CTX", 0.0)))
+_desktop_ctx_env = _env_float("CC_MON_DESKTOP_CTX", 0.0)
+# inf / nan / absurd values mean "not set" (int(inf) would crash the import).
+DESKTOP_CTX_SIZE = int(_desktop_ctx_env) if 0 < _desktop_ctx_env < 1e12 else 0
 # The parse is incremental, so a long session may grow past the 50 MiB cap
 # that whole-file readers use. The first catch-up read is capped per poll so a
 # large transcript never stalls the render loop.
@@ -1276,7 +1278,8 @@ DESKTOP_TRANSCRIPT_MAX_BYTES = 1024 * 1024 * 1024
 _DESKTOP_READ_BUDGET = 16 * 1024 * 1024
 _TRANSCRIPT_HEAD_BYTES = 64 * 1024
 _TRANSCRIPT_TAIL_BYTES = 256 * 1024
-_DESKTOP_SCAN_CAP = 512               # max project transcripts examined per scan
+_DESKTOP_SCAN_CAP = 512               # max fresh transcripts whose metadata is read per scan
+_DESKTOP_STAT_CAP = 20_000            # max transcript files stat'ed per scan (DoS bound)
 _ENTRYPOINT_TAGS = {"claude-desktop": "desk"}
 _ENTRYPOINT_TAG_MAX = 8
 _desktop_meta_cache = OrderedDict()   # {path_str: (mtime, size, meta)}
@@ -1391,15 +1394,16 @@ def list_desktop_sessions(exclude=()):
         return []
     exclude = set(exclude)
     now = time.time()
-    found = {}
-    seen = 0
+    # Pass 1 — stat only (cheap): keep transcripts touched within the TTL, the
+    # newest file per sid. The scan cap applies to these fresh files, so old
+    # transcripts (Claude Code keeps 30 days) can never crowd out a new one.
+    fresh = {}
+    stat_count = 0
     try:
         projects = list(root.iterdir())
     except OSError:
         return []
     for proj in projects:
-        if seen >= _DESKTOP_SCAN_CAP:
-            break
         try:
             pst = proj.lstat()
         except OSError:
@@ -1411,8 +1415,8 @@ def list_desktop_sessions(exclude=()):
         except OSError:
             continue
         for jl in files:
-            seen += 1
-            if seen > _DESKTOP_SCAN_CAP:
+            stat_count += 1
+            if stat_count > _DESKTOP_STAT_CAP:
                 break
             sid = jl.stem
             if sid in exclude or sid in RESERVED_SIDS or not _SID_RE.match(sid):
@@ -1423,29 +1427,33 @@ def list_desktop_sessions(exclude=()):
                 continue
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
                 continue
-            age = now - st.st_mtime
-            if age > DESKTOP_SESSION_TTL or st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
+            if now - st.st_mtime > DESKTOP_SESSION_TTL or st.st_size > DESKTOP_TRANSCRIPT_MAX_BYTES:
                 continue
-            prev = found.get(sid)
-            if prev and prev["mtime"] >= st.st_mtime:
-                continue
-            path = _safe_transcript_path(str(jl))
-            if path is None:
-                continue
-            meta = _transcript_meta(path, st)
-            if not meta or not meta["model"]:
-                continue  # no assistant reply yet — nothing to show
-            found[sid] = {
-                "id": sid, "mtime": st.st_mtime, "age": age,
-                "stale": age > STALE_THRESHOLD,
-                "model": _sanitize(_model_label(meta["model"])),
-                "session_name": meta["title"],
-                "ai_title": "",
-                "cwd": meta["cwd"],
-                "source": "desktop",
-                "origin": _origin_tag(meta["entrypoint"]),
-                "path": str(path),
-            }
+            prev = fresh.get(sid)
+            if prev is None or prev[1].st_mtime < st.st_mtime:
+                fresh[sid] = (jl, st)
+    # Pass 2 — read head/tail metadata of the newest _DESKTOP_SCAN_CAP files.
+    found = {}
+    newest = sorted(fresh.items(), key=lambda kv: kv[1][1].st_mtime, reverse=True)
+    for sid, (jl, st) in newest[:_DESKTOP_SCAN_CAP]:
+        path = _safe_transcript_path(str(jl))
+        if path is None:
+            continue
+        meta = _transcript_meta(path, st)
+        if not meta or not meta["model"]:
+            continue  # no assistant reply yet — nothing to show
+        age = now - st.st_mtime
+        found[sid] = {
+            "id": sid, "mtime": st.st_mtime, "age": age,
+            "stale": age > STALE_THRESHOLD,
+            "model": _sanitize(_model_label(meta["model"])),
+            "session_name": meta["title"],
+            "ai_title": "",
+            "cwd": meta["cwd"],
+            "source": "desktop",
+            "origin": _origin_tag(meta["entrypoint"]),
+            "path": str(path),
+        }
     sessions = list(found.values())
     sessions.sort(key=lambda s: s["mtime"], reverse=True)
     return sessions
@@ -3892,10 +3900,11 @@ def _picker_line(s, is_cursor, W):
     return truncate(line, W)
 
 
-def render_picker(sessions, cols, rows, desktop=None, selected=None):
+def render_picker(sessions, cols, rows, desktop=None, selected=None, loading=False):
     """Session picker: CLI sessions (statusline snapshots) above desktop app
     sessions (transcripts). The cursor sits on `selected` (a session id) and
-    the list scrolls to keep it visible; header and key hints stay pinned."""
+    the list scrolls to keep it visible; header and key hints stay pinned.
+    loading=True shows the transcript-loading notice instead of the list."""
     global _picker_scroll
     W = cols
     desktop = desktop or []
@@ -3904,10 +3913,13 @@ def render_picker(sessions, cols, rows, desktop=None, selected=None):
     head.append(f"{BG_BAR}{C_WHT}{B}CC AIO MON {VERSION}{R}{BG_BAR}{' ' * hp}{R}")
     head.append(sep(W))
 
-    if not sessions and not desktop:
+    if loading or (not sessions and not desktop):
+        msg = (["Loading session transcript...", "Large transcripts take a few seconds."]
+               if loading else
+               ["Waiting for Claude Code session...", "Start a session, then come back here."])
         buf = head + [
-            f"{C_DIM}Waiting for Claude Code session...{R}",
-            f"{C_DIM}Start a session, then come back here.{R}",
+            f"{C_DIM}{msg[0]}{R}",
+            f"{C_DIM}{msg[1]}{R}",
             sep(W),
             f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}",
         ]
@@ -4422,7 +4434,13 @@ def main():
                     mt = jp.stat().st_mtime
                 except OSError:
                     mt = 0
-                if sid_path is None and mt == 0:
+                if sid_path is not None and mt > 0:
+                    # A statusline snapshot appeared (e.g. --session started
+                    # before the CLI's first event): it beats the estimate.
+                    sid_path = None
+                    last_data = None
+                    last_mt = 0
+                elif sid_path is None and mt == 0:
                     # --session with a desktop app session id: find its transcript.
                     for s in cached_desktop_sessions(exclude=[]):
                         if s["id"] == sid:
@@ -4443,7 +4461,9 @@ def main():
                         last_mt = 0
 
             if last_data is None:
-                flush(render_picker([], cols, rows), cols)
+                # A desktop transcript is still being read (large files are
+                # caught up in steps) — say so instead of "Waiting for...".
+                flush(render_picker([], cols, rows, loading=sid_path is not None), cols)
                 time.sleep(tick)
                 continue
 

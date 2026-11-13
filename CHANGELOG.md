@@ -45,6 +45,13 @@
   (statusline only) and exit 1 when a requirement is missing.
 - Agents modal: short codes for PowerShell, ToolSearch, TaskStop and other
   current tools.
+- **Desktop session discovery** applies its 512-file limit to transcripts
+  touched in the last 48 h, newest first, so older transcripts can no longer
+  hide a new session. While a large transcript loads the screen says
+  "Loading session transcript..." instead of "Waiting for Claude Code
+  session...". With `--session`, a statusline snapshot that appears later
+  replaces the transcript estimate. `CC_MON_DESKTOP_CTX=inf` (or `nan`) is
+  treated as unset instead of crashing the import.
 - **Narrow terminals:** the dashboard status line and picker rows cut the
   session name with `…` instead of losing their tags at the terminal edge; the
   desktop tag shortens to `est.` and the picker drops its section note.
@@ -74,7 +81,7 @@ re-runs when the `no-release` label is added or removed.
 - Legend: `[1-3] Token Stats Period`, `[enter] Open Session`, and a
   `DESKTOP APP` section.
 
-**Tests:** 933 passing (+43).
+**Tests:** 936 passing (+46).
 
 ## v1.17.2 — 2026-11-04
 

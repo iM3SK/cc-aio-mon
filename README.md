@@ -100,7 +100,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
   <sub><b>Update manager</b> (<code>u</code>) — current vs remote version, changelog preview, and one-key apply.</sub>
 </p>
 
-- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12), macOS (Python 3.12).
+- **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12, 3.13, 3.14), Windows (Python 3.12), macOS (Python 3.12).
 - **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
 - **Multi-session** — auto-detects CLI sessions via temp files and desktop app sessions via their transcripts. Scrolling two-section picker (CLI / desktop app) for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. On the dashboard, an auto-generated ai-title label is capped at 24 characters; the picker shows the full title.
@@ -284,10 +284,10 @@ Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visua
 | `CC_AIO_MON_FABLE_REFRESH_SEC` | `300` | statusline | FBL usage-cache refresh interval; `0` keeps FBL read-only |
 | `CC_AIO_MON_REMOTE` | *(unset)* | dashboard + updater | Accepted `origin` URL for self-update (e.g. your fork) |
 | `CLAUDE_CONFIG_DIR` | *(unset)* | all | Claude Code config directory (transcripts and `.claude.json`); defaults to `~/.claude` and `~` |
-
-Full reference with types and edge cases: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 | `CC_AIO_MON_NO_UPDATE_CHECK` | *(unset)* | dashboard | Set to `1` to disable background release check |
 | `CC_AIO_MON_NO_PULSE` | *(unset)* | dashboard | Set to `1` to disable background Anthropic Pulse worker (no outbound network) |
+
+Full reference with types and edge cases: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 Env-var prefix convention: `CLAUDE_*` variables are shared with broader Claude tooling (warn/crit thresholds, burn warn); `CC_AIO_MON_*` are project-wide toggles (opt-out switches for background worker threads); `CC_MON_*` are dashboard-specific limit overrides for bar ceilings.
 

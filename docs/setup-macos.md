@@ -121,4 +121,4 @@ CC_AIO_MON_NO_PULSE=1 python3 monitor.py
 
 ## CI status
 
-CC AIO MON is CI-tested on macOS with **Python 3.12** only. Ubuntu covers 3.8, 3.10, 3.11, and 3.12. Python 3.8/3.10/3.11 on macOS are not CI-tested — the project targets Python 3.8+ but relies on the Ubuntu matrix to catch older-version regressions.
+CC AIO MON is CI-tested on macOS with **Python 3.12** only. Ubuntu covers 3.8, 3.10, 3.11, 3.12, 3.13, and 3.14. Python 3.8/3.10/3.11 on macOS are not CI-tested — the project targets Python 3.8+ but relies on the Ubuntu matrix to catch older-version regressions.

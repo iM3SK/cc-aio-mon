@@ -76,12 +76,12 @@ that refreshes Claude Code's usage cache for FBL (`_maybe_refresh_fable`). On Wi
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~4 450 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~4 500 LOC. Owns the event
 loop, all `render_*` functions, the two-section session picker (CLI /
 desktop app), the desktop-session transcript reader, the model pricing table
 (`_MODELS`), and the daemon worker threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
-otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4500 LOC.
+otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4700 LOC.
 
 **pulse.py** — Daemon thread module. Fetches `status.claude.com/api/v2/summary.json`
 and probes `api.anthropic.com/v1/messages` (any HTTP response counts as liveness).
@@ -307,7 +307,7 @@ flag. On Unix, no action needed.
 checks `st.st_file_attributes & 0x400` (`FILE_ATTRIBUTE_REPARSE_POINT`).
 On Unix, `lstat` + `S_ISDIR` is sufficient because symlinks are not directories.
 
-CI tests run on Ubuntu (Python 3.8, 3.10, 3.11, 3.12), Windows (Python 3.12),
+CI tests run on Ubuntu (Python 3.8, 3.10, 3.11, 3.12, 3.13, 3.14), Windows (Python 3.12),
 and macOS (Python 3.12), as shown by the `Tests` badge in the README.
 
 ---

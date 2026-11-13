@@ -3681,9 +3681,12 @@ class TestAuditRegressionV1105(unittest.TestCase):
         # transcript parser, transcript-only session discovery, scrolling
         # two-section picker). The five-runtime-file constraint keeps them in
         # monitor.py, their only consumer.
+        # Raised 4500 → 4700: the 2026-11 audit fixes add per-request usage
+        # dedup, current-model pricing tiers, the two-pass desktop scan and
+        # narrow-terminal fitting (~60 lines) to the same single consumer.
         self.assertLess(
-            loc, 4500,
-            f"monitor.py is {loc} LOC, past the 4500-line maintainability trigger. "
+            loc, 4700,
+            f"monitor.py is {loc} LOC, past the 4700-line maintainability trigger. "
             f"Reduce the file or raise this trigger with a technical rationale."
         )
 
@@ -5191,6 +5194,30 @@ class TestDesktopSessions(unittest.TestCase):
     def test_list_skips_session_without_reply(self):
         self._write("desk-2", [_desk_rec("user", entrypoint="claude-desktop")])
         self.assertEqual(monitor.list_desktop_sessions(), [])
+
+    def test_old_transcripts_do_not_crowd_out_fresh_one(self):
+        old = time.time() - monitor.DESKTOP_SESSION_TTL - 60
+        for i in range(30):
+            p = self.proj / f"aaa-old-{i:03d}.jsonl"   # sorts before the fresh file
+            p.write_text("{}\n", encoding="utf-8")
+            os.utime(p, (old, old))
+        self._basic("zzz-fresh")
+        with patch.object(monitor, "_DESKTOP_SCAN_CAP", 5):
+            ids = [s["id"] for s in monitor.list_desktop_sessions()]
+        self.assertEqual(ids, ["zzz-fresh"])
+
+    def test_infinite_ctx_env_does_not_crash_import(self):
+        env = dict(os.environ, CC_MON_DESKTOP_CTX="inf")
+        r = subprocess.run([sys.executable, "-c", "import monitor; print(monitor.DESKTOP_CTX_SIZE)"],
+                           cwd=str(pathlib.Path(monitor.__file__).parent), env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "0")
+
+    def test_loading_screen(self):
+        plain = _ANSI_RE.sub("", "\n".join(render_picker([], 80, 24, loading=True)))
+        self.assertIn("Loading session transcript", plain)
+        self.assertNotIn("Waiting", plain)
 
     def test_list_skips_old_transcripts(self):
         p = self._basic()
