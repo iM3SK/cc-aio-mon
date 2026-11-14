@@ -73,6 +73,10 @@ known_hosts
 # Service accounts & credential stores (defense-in-depth)
 service-account*.json
 .netrc
+_netrc
+.git-credentials
+.npmrc
+.pypirc
 *.kdbx
 .aws/credentials
 

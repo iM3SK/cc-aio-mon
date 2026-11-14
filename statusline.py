@@ -20,7 +20,6 @@ Entry points:
 import json
 import os
 import pathlib
-import shutil
 import signal
 import struct
 import subprocess
@@ -30,7 +29,7 @@ import time
 from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sanitize, safe_read, is_safe_dir, atomic_write_text,
                     f_tok, f_cost_value, f_cd, nonnegative_number,
                     ensure_data_dir, ensure_utf8_stdout, load_history as _shared_load_history,
-                    lock_file_handle, unlock_file_handle, acquire_singleton_lock,
+                    lock_file_handle, unlock_file_handle, acquire_singleton_lock, which_abs,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
                     DATA_DIR, RESERVED_SIDS, SCHEMA_VERSION,
                     strip_context_suffix, WARN_PCT, CRIT_PCT,
@@ -434,7 +433,10 @@ def _kill_tree(proc):
     """Kill the refresher's `claude` child and everything it started."""
     try:
         if _IS_WIN:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            # Full path: a bare "taskkill" is also looked up in the current directory.
+            taskkill = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows",
+                                    "System32", "taskkill.exe")
+            subprocess.run([taskkill, "/PID", str(proc.pid), "/T", "/F"],
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=10,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -463,7 +465,9 @@ def run_fable_refresh(ttl=None):
         cur = read_fable_weekly()
         if cur is not None and _num(cur.get("age_s"), 0) <= ttl:
             return "fresh"  # another refresher (or /usage) got there first
-        exe = shutil.which("claude")
+        # Absolute PATH entries only: the child runs with cwd=DATA_DIR, and
+        # shutil.which on Windows would also look in the current directory.
+        exe = which_abs("claude")
         if not exe:
             return "no-claude"
         settings = DATA_DIR / _FABLE_SETTINGS

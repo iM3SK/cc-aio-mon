@@ -2241,8 +2241,8 @@ DEFAULT_CTX_WINDOW = 1_000_000  # every current model except Haiku 4.5; older 20
 # and _model_code (token-stats modal section).
 _MODELS = {
     # Fable 5.2 / Mythos 5.2: $8 / $40, cache read $0.20 (0.025x), 5m write $10.
-    # Fast mode $16 / $80; its cache rates follow the same 2x as the other
-    # fast-mode entries (not published separately).
+    # Fast mode $16 / $80; prompt-caching multipliers apply on top of fast-mode
+    # rates (Anthropic fast-mode docs), so cache read $0.40, 5m write $20.
     "claude-fable-5-2": {"name": "Fable 5.2", "code": ("FBL", "5.2"),
                          "pricing": {"input": 8.0, "output": 40.0, "cache_read": 0.20, "cache_write": 10.00},
                          "pricing_fast": {"input": 16.0, "output": 80.0, "cache_read": 0.40, "cache_write": 20.00}},
@@ -2283,7 +2283,7 @@ _MODELS = {
                         "pricing": {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75}},
     "claude-sonnet-5-5": {"name": "Sonnet 5.5", "code": ("SO", "5.5"),
                           "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.10, "cache_write": 2.50}},
-    # Sonnet 5: $2 / $10; cache read assumed at the standard 0.1x (not published here).
+    # Sonnet 5: $2 / $10 with the standard cache multipliers (0.1x read, 1.25x 5m write).
     "claude-sonnet-5": {"name": "Sonnet 5", "code": ("SO", "5"),
                         "pricing": {"input": 2.0,  "output": 10.0, "cache_read": 0.20, "cache_write": 2.50}},
     "claude-sonnet-4-6": {"name": "Sonnet 4.6", "code": ("SO", "4.6"),
@@ -2291,7 +2291,7 @@ _MODELS = {
     "claude-sonnet-4-5": {"name": "Sonnet 4.5", "code": ("SO", "4.5"), "ctx": 200_000,
                           "pricing": {"input": 3.0,  "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}},
     # Haiku 5.5: $0.10 / $0.50 up to a 100K-token prompt, $0.50 / $2.50 above.
-    # Cache rates assumed at the standard 0.1x read / 1.25x write.
+    # Standard cache multipliers on both tiers (0.1x read, 1.25x 5m write).
     "claude-haiku-5-5": {"name": "Haiku 5.5", "code": ("HA", "5.5"),
                          "pricing": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
                          "pricing_long": {"input": 0.50, "output": 2.50, "cache_read": 0.05, "cache_write": 0.625},
