@@ -83,7 +83,7 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 ## See also
 
 - [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~4 500 LOC)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~4 800 LOC)
 - [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md) — canonical field schema for the statusline→monitor JSON contract and JSONL history entries
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting

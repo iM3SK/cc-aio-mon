@@ -202,10 +202,13 @@ def load_state(sid):
 | `cost.total_cost_usd` | float | CC | USD spent in this session (cumulative) |
 | `cost.total_duration_ms` / `cost.total_api_duration_ms` | float | CC | Wall-clock and API time; dashboard DUR and APR |
 | `cost.total_lines_added` / `cost.total_lines_removed` | int | CC | Dashboard LNS |
+| `effort` | dict | CC | `{level}`; dashboard settings line under the title (`model │ effort │ permission mode`) |
 | `session_name` | str | CC | Explicit session name; picker and header label |
-| `transcript_path` | str | CC | Session transcript; read for the title, cost breakdown and agents |
+| `transcript_path` | str | CC | Session transcript; read for the title, permission mode, cost breakdown and agents |
 | `cwd` | str | CC | Working directory; `--list` output |
-| `prompt_cache` | dict | CC | `warm`, `caching_observed`, `ttl`, `expires_at`, `recache_tokens_if_cold`; statusline CCH segment only |
+| `prompt_cache` | dict | CC | `warm`, `caching_observed`, `ttl`, `expires_at`, `recache_tokens_if_cold` (statusline CCH segment); `misses`, `last_miss_cause.causes` (dashboard `MISS:` after CRD/CWR) |
+| `fast_mode` | bool | CC | Settings line `fast`; selects fast rates for the cost modal's last-request estimate |
+| `thinking.enabled` | bool | CC | Settings line `thinking off` when `false` |
 | `rate_limits` | dict | CC | Rate limit buckets: `{five_hour: {...}, seven_day: {...}}` |
 | `rate_limits.five_hour` | dict | CC | 5-hour rolling rate limit: `{used_percentage: 0–100, resets_at: epoch}` |
 | `rate_limits.five_hour.used_percentage` | float | CC | 0–100 |
@@ -234,6 +237,7 @@ Not part of the snapshot: these come from the session transcript (`~/.claude/pro
 | `usage.server_tool_use` | **consumed** — counts | Web search / fetch request counts (WSR / WFR); not priced |
 | `custom-title.customTitle`, `ai-title.aiTitle` | **consumed** — labels | A rename (`custom-title`) wins over the generated title |
 | `entrypoint`, `cwd`, `requestedModel`, `timestamp` | **consumed** — desktop sessions | Origin tag, label, `[1m]` window hint, duration |
+| `permissionMode` (user records), `effort` (assistant records) | **consumed** — settings line | Latest non-sidechain value; the statusline JSON has no permission mode, so CLI sessions read it here too (transcript head and tail only) |
 | `usage.iterations`, `usage.service_tier`, `usage.inference_geo`, `usage.output_tokens_details` | **ignored** | |
 
 ### Desktop app sessions (in memory only)
@@ -246,6 +250,8 @@ Not part of the snapshot: these come from the session transcript (`~/.claude/pro
 | `_origin` | str | Entrypoint tag (`desk` for `claude-desktop`) |
 | `_mtime` | float | Transcript mtime; drives staleness and UPD |
 | `_session_cost` | dict | Cost breakdown, same shape as `monitor._aggregate_session_cost()` |
+| `effort` | dict | `{level}` from the latest assistant record; empty when the transcript has none |
+| `permission_mode` | str | Raw mode of the latest prompt, e.g. `default` or `bypassPermissions`; an unknown mode is shown as written |
 
 ### Rate Limits — account-wide read semantics
 
@@ -258,9 +264,26 @@ sources `rate_limits` from the **freshest snapshot across all sessions** (max
 schema gate as `load_state`). `render_frame(..., rate_limits=<override>)` applies it;
 with no override the function falls back to the passed session's own field.
 
+**Age**: `monitor.cached_rate_limits_mtime()` returns the mtime of the snapshot
+behind the value (`render_frame(..., rate_limits_mtime=...)`). Past
+`shared.STALE_DIM_SEC` (30 min) the 5HL/7DL rows render dim with `(~13h old)`;
+FBL keeps its own age rule.
+
 **Caveat**: snapshots carry **no account identifier**, so with multiple accounts
 running concurrently this may surface another account's limits. Single-account
 (the common case) is exact.
+
+### Claude Code session registry (read-only)
+
+`<CLAUDE_CONFIG_DIR or ~/.claude>/sessions/<pid>.json` holds one record per
+running interactive Claude Code session (`pid`, `sessionId`, `status`,
+`updatedAt`, …) and is removed when the session exits. The format is not
+documented by Anthropic (observed with Claude Code 2.1.325).
+`monitor.live_session_ids()` reads at most 64 records (64 KiB each, regular files
+in a non-symlinked directory, 2 s TTL) and keeps the `sessionId`s whose process
+is still running (Windows: `OpenProcess` + `GetExitCodeProcess`, never a signal).
+A session listed there is not marked stale, whatever its mtime; any read problem
+leaves the mtime rule alone.
 
 ### Fable weekly pool — external read of `.claude.json` (v1.16.0)
 

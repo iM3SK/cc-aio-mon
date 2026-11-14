@@ -23,7 +23,7 @@ TUI navigable while preserving the five-runtime-file stdlib layout:
     6.  Layout & data loading      — sep, list_sessions, load_state/_history,
                                      desktop app sessions (list_desktop_sessions,
                                      load_desktop_state)
-    7.  Spinners                   — session / RLS spinners
+    7.  Indicators                 — breathing session dot / RLS spinner
     8.  Render — main dashboard    — render_frame (+ _window_buf scroll engine)
     9.  Legend overlay             — render_legend
     10. Cost breakdown modal       — render_cost_breakdown + pricing
@@ -41,6 +41,7 @@ import argparse
 import atexit
 import bisect
 import json
+import math
 import os
 import pathlib
 import re
@@ -70,8 +71,10 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
-                    read_fable_weekly, fable_display_state, claude_projects_dir,
-                    E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
+                    read_fable_weekly, fable_display_state, claude_projects_dir, STALE_DIM_SEC,
+                    E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_TEAL, C_CYN, C_BLU, C_NAV,
+                    C_WHT, C_TXT, C_MUT, C_DIM, C_LABEL, C_MONEY, C_INFO,
+                    level_color, brn_color, WARN_BRN)
 import pulse
 
 # ---------------------------------------------------------------------------
@@ -649,8 +652,7 @@ EL = E + "K"
 SYNC_ON = E + "?2026h"
 SYNC_OFF = E + "?2026l"
 
-C_FG = E + "38;2;180;186;200m"  # monitor-only: default foreground
-BG_BAR = E + "48;2;46;52;64m"  # Nord polar night — header/bar background
+BG_BAR = E + "48;2;59;66;82m"  # nord1 — header/bar background
 
 # VERSION is imported from shared.py — single source of truth (shared.VERSION)
 STALE_THRESHOLD = 1800  # 30 min — Claude Code emits no events during idle
@@ -664,11 +666,7 @@ def _env_float(name, default):
         return default
 
 
-WARN_BRN = _env_float("CLAUDE_WARN_BRN", 3.0)
 # WARN_PCT/CRIT_PCT imported from shared.py (SSoT; previously parsed per module)
-
-# Reset-countdown color flip — 50% of window remaining (NOT the warn threshold)
-RESET_HALFWAY_PCT = 50.0
 
 
 def truncate(s, maxw):
@@ -796,12 +794,7 @@ def mkbar(pct, color=None, show_pct=True):
     """Returns colored [████░░░░░]  XX.X%"""
     pct = max(0.0, min(100.0, pct))
     if color is None:
-        if pct >= CRIT_PCT:
-            color = C_RED
-        elif pct >= WARN_PCT:
-            color = C_YEL
-        else:
-            color = C_GRN
+        color = level_color(pct)
     filled = round(pct * BAR_W / 100)
     empty = BAR_W - filled
     bar = (
@@ -824,28 +817,6 @@ _RL_ROWS = (
     ("fable", "FBL", SECONDS_7D, "Fable Weekly Pool"),
     ("seven_day", "7DL", SECONDS_7D, "7-Day Rate Limit"),
 )
-
-
-def _limit_color(pct):
-    """Dynamic color for rate limit metrics — yellow base, red >= CRIT_PCT."""
-    if pct >= CRIT_PCT:
-        return C_RED
-    return C_YEL
-
-
-def _reset_color(resets_epoch, window_secs):
-    """Color for reset countdown — green=close to reset, red=far from reset."""
-    if resets_epoch <= 0:
-        return C_DIM
-    remaining = resets_epoch - time.time()
-    if remaining <= 0:
-        return C_GRN  # just reset
-    pct_remaining = remaining / window_secs * 100
-    if pct_remaining > RESET_HALFWAY_PCT:
-        return C_RED
-    if pct_remaining > 20:
-        return C_YEL
-    return C_GRN
 
 
 # ---------------------------------------------------------------------------
@@ -1186,7 +1157,7 @@ def list_sessions():
                 continue
             sessions.append({
                 "id": sid, "mtime": mt, "age": age,
-                "stale": age > STALE_THRESHOLD,
+                "stale": age > STALE_THRESHOLD and sid not in live_session_ids(),
                 "model": display_name,
                 "session_name": _sanitize(d.get("session_name", "")),
                 "ai_title": _scan_ai_title(d.get("transcript_path")) or "",
@@ -1233,12 +1204,12 @@ def load_state(sid):
 # across all sessions instead — the only account-correct value. CAVEAT: snapshots
 # carry no account identifier, so with multiple accounts running concurrently this
 # may surface another account's limits; single-account (the common case) is exact.
-_rl_fresh_cache = {"t": -1.0, "rl": None}  # main-thread only; mirrors cached_list_sessions
+_rl_fresh_cache = {"t": -1.0, "rl": None, "mt": None}  # main-thread only; mirrors cached_list_sessions
 # Last scan that found a non-None rate_limits value.  Prevents the dashboard
 # from blinking back to None when CC temporarily emits a snapshot without
 # rate_limits (e.g. idle session, partial write).  Limits are account-wide so
 # any session's last-known value is the right one to show.  (F-03 / RL-002)
-_rl_last_good = {"rl": None}
+_rl_last_good = {"rl": None, "mt": None}  # mt: wall-clock mtime of its snapshot
 
 
 def cached_freshest_rate_limits(fallback, ttl=0.5):
@@ -1284,10 +1255,99 @@ def cached_freshest_rate_limits(fallback, ttl=0.5):
     # Persist any newly-found value so future scans that return None (e.g. a
     # snapshot written without rate_limits) can still serve a non-stale value.
     if best_rl is not None:
-        _rl_last_good["rl"] = best_rl
-    result = best_rl if best_rl is not None else (_rl_last_good["rl"] or fallback)
-    _rl_fresh_cache.update({"t": now, "rl": result})
+        _rl_last_good.update({"rl": best_rl, "mt": best_mt})
+    if best_rl is not None:
+        result, mt = best_rl, best_mt
+    elif _rl_last_good["rl"]:
+        result, mt = _rl_last_good["rl"], _rl_last_good.get("mt")
+    else:
+        result, mt = fallback, None  # the caller's own value — age unknown here
+    _rl_fresh_cache.update({"t": now, "rl": result, "mt": mt})
     return result
+
+
+# Claude Code's session registry: <config>/sessions/<pid>.json, one per running
+# interactive session, removed on exit (observed with Claude Code 2.1.325; not
+# documented). A session listed there with a running process is open, so its
+# numbers are current even after STALE_THRESHOLD without a change.
+_SESSION_REGISTRY_DIR = _CLAUDE_DIR.parent / "sessions"
+_SESSION_REGISTRY_MAX_FILES = 64
+_SESSION_REGISTRY_MAX_BYTES = 64 * 1024
+_live_cache = {"t": -1.0, "ids": frozenset()}
+
+
+def _pid_alive(pid):
+    """True while process `pid` runs. Never signals: on Windows os.kill(pid, 0)
+    would send CTRL_C_EVENT, so the process is queried instead."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                return bool(k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+            finally:
+                k32.CloseHandle(handle)
+        except (AttributeError, OSError, ValueError):
+            return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except OSError:
+        return False
+    return True
+
+
+def live_session_ids(ttl=2.0):
+    """IDs of the sessions Claude Code has open (registry entry + running
+    process). Empty on any problem — callers then keep the mtime rule."""
+    now = time.monotonic()
+    if now - _live_cache["t"] < ttl:
+        return _live_cache["ids"]
+    ids = set()
+    d = pathlib.Path(_SESSION_REGISTRY_DIR)
+    try:
+        files = list(d.glob("*.json"))[:_SESSION_REGISTRY_MAX_FILES] if is_safe_dir(d) else []
+    except OSError:
+        files = []
+    for f in files:
+        try:
+            if not stat.S_ISREG(f.lstat().st_mode):
+                continue
+        except OSError:
+            continue
+        raw = safe_read(f, _SESSION_REGISTRY_MAX_BYTES)
+        rec = json_object(raw) if raw is not None else None
+        if not isinstance(rec, dict):
+            continue
+        sid = rec.get("sessionId")
+        if isinstance(sid, str) and _SID_RE.match(sid) and _pid_alive(rec.get("pid")):
+            ids.add(sid)
+    _live_cache.update({"t": now, "ids": frozenset(ids)})
+    return _live_cache["ids"]
+
+
+def cached_rate_limits_mtime():
+    """Wall-clock mtime of the snapshot behind the last
+    cached_freshest_rate_limits() value, or None when unknown."""
+    mt = _rl_fresh_cache.get("mt")
+    return mt if isinstance(mt, (int, float)) and not isinstance(mt, bool) and mt > 0 else None
+
+
+def _f_age(seconds):
+    """Compact age: 45m, 13h, 3d."""
+    seconds = max(0, int(seconds))
+    if seconds < SECONDS_1H:
+        return f"{seconds // 60}m"
+    if seconds < 2 * SECONDS_1D:
+        return f"{seconds // SECONDS_1H}h"
+    return f"{seconds // SECONDS_1D}d"
 
 
 # Thin wrapper — shared.load_history is the single source of truth (v1.10.5+).
@@ -1375,13 +1435,15 @@ def _complete_lines(raw, *, drop_first=False):
 
 def _transcript_meta(path, st):
     """Picker metadata from the transcript head and tail: entrypoint, title,
-    cwd and the most recent assistant model. Cached per (mtime, size)."""
+    cwd, the most recent assistant model and effort, and the permission mode
+    of the latest prompt. Cached per (mtime, size)."""
     key = str(path)
     cached = _desktop_meta_cache.get(key)
     if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
         _desktop_meta_cache.move_to_end(key)
         return cached[2]
-    meta = {"entrypoint": "", "title": "", "cwd": "", "model": ""}
+    meta = {"entrypoint": "", "title": "", "cwd": "", "model": "",
+            "effort": "", "permission_mode": ""}
     fh = _open_checked(path, st)
     if fh is None:
         return None
@@ -1411,6 +1473,11 @@ def _transcript_meta(path, st):
             meta["entrypoint"] = rec["entrypoint"]
         if isinstance(rec.get("cwd"), str) and rec["cwd"]:
             meta["cwd"] = _sanitize(rec["cwd"])
+        if not rec.get("isSidechain"):
+            if rtype == "user" and isinstance(rec.get("permissionMode"), str) and rec["permissionMode"]:
+                meta["permission_mode"] = rec["permissionMode"]
+            elif rtype == "assistant" and isinstance(rec.get("effort"), str) and rec["effort"]:
+                meta["effort"] = rec["effort"]
         if rtype == "custom-title" and isinstance(rec.get("customTitle"), str) and rec["customTitle"].strip():
             meta["title"] = _sanitize(rec["customTitle"].strip())
         elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str) and rec["aiTitle"].strip():
@@ -1490,7 +1557,7 @@ def list_desktop_sessions(exclude=()):
         age = now - st.st_mtime
         found[sid] = {
             "id": sid, "mtime": st.st_mtime, "age": age,
-            "stale": age > STALE_THRESHOLD,
+            "stale": age > STALE_THRESHOLD and sid not in live_session_ids(),
             "model": _sanitize(_model_label(meta["model"])),
             "session_name": meta["title"],
             "ai_title": "",
@@ -1521,7 +1588,8 @@ def _new_desktop_state(path, st):
         "path": str(path), "ident": (st.st_ino, st.st_dev), "offset": 0,
         "msgs": OrderedDict(), "first_t": 0.0, "last_t": 0.0,
         "title": "", "ai_title": "", "cwd": "", "entrypoint": "",
-        "requested": "", "built_at": -1, "built": None,
+        "requested": "", "effort": "", "permission_mode": "",
+        "built_at": -1, "built": None,
     }
 
 
@@ -1538,11 +1606,16 @@ def _ingest_desktop_record(state, rec):
         state["cwd"] = rec["cwd"]
     if isinstance(rec.get("requestedModel"), str):
         state["requested"] = rec["requestedModel"]
+    if (rtype == "user" and not rec.get("isSidechain")
+            and isinstance(rec.get("permissionMode"), str) and rec["permissionMode"]):
+        state["permission_mode"] = rec["permissionMode"]
     if rtype == "custom-title" and isinstance(rec.get("customTitle"), str):
         state["title"] = rec["customTitle"].strip()
     elif rtype == "ai-title" and isinstance(rec.get("aiTitle"), str):
         state["ai_title"] = rec["aiTitle"].strip()
     elif rtype == "assistant" and not rec.get("isSidechain"):
+        if isinstance(rec.get("effort"), str) and rec["effort"]:
+            state["effort"] = rec["effort"]
         msg = as_dict(rec.get("message"))
         model = msg.get("model")
         if not isinstance(model, str) or not model or model.startswith("<"):
@@ -1629,6 +1702,13 @@ def _build_desktop_snapshot(sid, state, mtime):
             },
         },
         "cost": {"total_cost_usd": cost, "total_duration_ms": dur_ms},
+        # Same shape as the statusline field; permission_mode has no statusline
+        # counterpart and comes from the latest prompt record.
+        "effort": {"level": _sanitize(state["effort"])} if state["effort"] else {},
+        # The statusline field's meaning, taken from the last request's speed
+        # (None when the transcript does not say).
+        "fast_mode": (last["speed"] == "fast") if last["speed"] else None,
+        "permission_mode": _sanitize(state["permission_mode"]),
         "_source": "desktop",
         "_origin": _origin_tag(state["entrypoint"]),
         "_mtime": mtime,
@@ -1716,13 +1796,15 @@ def _snapshot_mtime(data):
 
 
 # ---------------------------------------------------------------------------
-# Spinners
+# Session indicator / RLS spinner
 # ---------------------------------------------------------------------------
-# Session spinner — braille dots, 10 frames, 80ms
-_SPIN_SESSION = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-_spin_session_idx = 0
-_spin_session_last = 0.0
-_SPIN_SESSION_INTERVAL = 0.08
+# Session indicator — a dot that breathes: it grows and brightens, then shrinks
+# and dims. The cosine curve holds briefly at the smallest and largest size.
+SESSION_DOT = "●"  # static marker of an inactive session
+_BREATH_DOTS = ("·", "∙", "•", "●")  # small → large, all one cell wide
+_BREATH_PERIOD = 2.0  # seconds per full small → large → small cycle
+_BREATH_HI = (163, 190, 140)  # C_GRN
+_BREATH_LO = (72, 86, 66)  # dark green, still readable on a dark terminal
 
 # RLS spinner — pulse dot, 4 frames, 500ms
 _SPIN_RLS = ["∙", "○", "●", "○"]
@@ -1731,14 +1813,13 @@ _spin_rls_last = 0.0
 _SPIN_RLS_INTERVAL = 0.5
 
 
-def spin_session():
-    """Return 1-char braille spinner frame for session status."""
-    global _spin_session_idx, _spin_session_last
-    now = time.monotonic()
-    if now - _spin_session_last >= _SPIN_SESSION_INTERVAL:
-        _spin_session_idx += 1
-        _spin_session_last = now
-    return _SPIN_SESSION[_spin_session_idx % len(_SPIN_SESSION)]
+def breath_dot(now=None):
+    """Return (truecolor SGR, glyph) of the breathing session dot at monotonic time `now`."""
+    t = time.monotonic() if now is None else now
+    v = 0.5 - 0.5 * math.cos(2 * math.pi * (t % _BREATH_PERIOD) / _BREATH_PERIOD)
+    r, g, b = (round(lo + (hi - lo) * v) for lo, hi in zip(_BREATH_LO, _BREATH_HI))
+    glyph = _BREATH_DOTS[min(len(_BREATH_DOTS) - 1, int(v * len(_BREATH_DOTS)))]
+    return f"{E}38;2;{r};{g};{b}m", glyph
 
 
 def spin_rls():
@@ -1790,6 +1871,11 @@ _modal_scroll = 0  # vertical scroll offset for the active modal (clamped in _wi
 _MODAL_HEADER_LINES = 3  # sep + title bar + sep — every modal opens with these
 
 
+def _hk(key):
+    """Hotkey chip: dim brackets around a Frost key."""
+    return f"{C_DIM}[{R}{C_LABEL}{key}{R}{C_DIM}]{R}"
+
+
 def _scroll_indicator(off, vis, total):
     """One-line scroll hint at the bottom of a windowed modal: a direction arrow
     (more above ↑ / below ↓), the visible range, and how to scroll. No
@@ -1797,7 +1883,7 @@ def _scroll_indicator(off, vis, total):
     max_off = max(0, total - vis)
     up = "↑" if off > 0 else " "
     dn = "↓" if off < max_off else " "
-    return (f"{C_DIM}{up}{dn} {off + 1}-{off + vis}/{total}"
+    return (f"{C_MUT}{up}{dn} {off + 1}-{off + vis}/{total}"
             f"   ↑↓/jk · PgUp/Dn · Home/End{R}")
 
 
@@ -1871,7 +1957,7 @@ def _apply_scroll(off, k, rows):
 # ---------------------------------------------------------------------------
 # Render — main dashboard
 # ---------------------------------------------------------------------------
-def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False, rate_limits=None, fable=None):
+def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, show_cost=False, stale=False, show_agents=False, agents_active_only=False, rate_limits=None, fable=None, rate_limits_mtime=None):
     if show_menu:
         return render_menu(cols, rows)
     if show_cost:
@@ -1924,10 +2010,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     session_label = sname or ai_title or (sid_str[:16] if _SID_RE.match(sid_str) else "default")
 
     buf.append(sep(SW))
-    hp_plain = f"CC AIO MON {VERSION}  {model_str}"
-    hp_pad = max(0, SW - len(hp_plain))
-    hp_text = f"{C_WHT}{B}CC AIO MON {VERSION}{R}{BG_BAR}  {C_CYN}{model_str}{R}{BG_BAR}"
-    buf.append(f"{BG_BAR}{hp_text}{' ' * hp_pad}{R}")
+    title = f"CC AIO MON {VERSION}"
+    buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * max(0, SW - len(title))}{R}")
+    effort, perm = _session_settings(data)
+    buf.append(_settings_line(model_str, effort, perm, SW, c, _settings_flags(data)))
 
     # ── Session status line (always visible) ────────────────
     # Desktop app sessions are read from the transcript: tag them so every
@@ -1939,11 +2025,12 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         if upd_mt is not None:
             _idle = int(time.time() - upd_mt)
             _stale_age = f" ({_idle // 60}m)" if _idle >= 60 else f" ({_idle}s)"
-        prefix = f"{C_RED}{B}{spin_session()} Session Inactive{R}{_stale_age}  "
-        label_color = c(C_FG)
+        prefix = f"{C_YEL}{B}{SESSION_DOT} Session Inactive{R}{_stale_age}  "
+        label_color = c(C_TXT)
     else:
-        prefix = f"{C_GRN}{B}{spin_session()} Session Active{R} "
-        label_color = C_FG
+        dot_color, dot = breath_dot()
+        prefix = f"{dot_color}{B}{dot}{R} "
+        label_color = C_TXT
     # In a narrow terminal the tag shortens and the name is cut with '…', so
     # the line never loses its end to the terminal edge.
     room = SW - _vis_width(prefix)
@@ -1953,7 +2040,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         if _vis_width(session_label) + len(tag) > room:
             tag = "  est."
     label = _ellipsize(session_label, room - len(tag))
-    src_tag = f"{C_DIM}{tag}{R}" if tag else ""
+    src_tag = f"{C_MUT}{tag}{R}" if tag else ""
     buf.append(f"{prefix}{label_color}{label}{R}{src_tag}")
 
     buf.append(sep(SW))
@@ -1961,7 +2048,7 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # ── Smart warnings (suppressed when stale, blink 500ms) ──
     _warns = [] if stale else collect_warnings(data, cpm, xpm)
     if _warns:
-        wc = f"{C_RED}{B}" if _rls_blink() else C_DIM
+        wc = f"{C_YEL}{B}" if _rls_blink() else C_MUT
         warn_parts = [f"{wc}{w}{R}" for w in _warns]
         buf.append(f"{'   '.join(warn_parts)}")
         buf.append(sep(SW))
@@ -1974,38 +2061,43 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # ── APR — API Ratio ──
     if is_desktop:
         # The transcript records no API time, so the ratio is unknown.
-        buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
-        buf.append(f"    {C_DIM}DUR:{R} {c(C_WHT)}{f_dur(dur) if dur > 0 else '--'}{R} {C_DIM}API: n/a{R}")
+        buf.append(f"{c(C_LABEL)}{B}APR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"    {c(C_MUT)}DUR:{R} {c(C_WHT)}{f_dur(dur) if dur > 0 else '--'}{R} {c(C_MUT)}API: n/a{R}")
     elif dur > 0:
         apr_pct = min(100.0, round(api_dur / dur * 100, 1))
-        buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(apr_pct, c(C_GRN))}")
-        buf.append(f"    {C_DIM}DUR:{R} {c(C_WHT)}{f_dur(dur)}{R} {C_DIM}API:{R} {c(C_GRN)}{f_dur(api_dur)}{R}")
+        buf.append(f"{c(C_LABEL)}{B}APR{R} {mkbar(apr_pct, c(C_INFO))}")
+        buf.append(f"    {c(C_MUT)}DUR:{R} {c(C_WHT)}{f_dur(dur)}{R} {c(C_MUT)}API:{R} {c(C_WHT)}{f_dur(api_dur)}{R}")
     else:
-        buf.append(f"{c(C_GRN)}{B}APR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"{c(C_LABEL)}{B}APR{R} {mkbar(0, C_DIM)}")
     buf.append(sep(SW))
 
     # ── CHR — Cache Hit Rate ──
+    inp = _num(usage.get("input_tokens", 0))
     if any([cr, cwt]):
-        total_cache = cr + cwt
-        chr_pct = round(cr / total_cache * 100, 1) if total_cache > 0 else 0
-        buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(chr_pct, c(C_GRN))}")
-        buf.append(f"    {C_DIM}CRD:{R} {c(C_GRN)}{f_tok(cr)}{R} {C_DIM}CWR:{R} {c(C_GRN)}{f_tok(cwt)}{R}")
+        # Last request's cache reads over all its input tokens — Claude Code's
+        # own hit-ratio definition (prompt_cache.hit_ratio, session-wide there).
+        total_in = inp + cr + cwt
+        chr_pct = round(cr / total_in * 100, 1) if total_in > 0 else 0
+        # More hits is better: judge the miss rate against the shared thresholds.
+        buf.append(f"{c(C_LABEL)}{B}CHR{R} {mkbar(chr_pct, c(level_color(100 - chr_pct)))}")
+        buf.append(f"    {c(C_MUT)}CRD:{R} {c(C_WHT)}{f_tok(cr)}{R} {c(C_MUT)}CWR:{R} {c(C_WHT)}{f_tok(cwt)}{R}"
+                   f"{_cache_miss_tag(data.get('prompt_cache'), c)}")
     else:
-        buf.append(f"{c(C_GRN)}{B}CHR{R} {mkbar(0, C_DIM)}")
+        buf.append(f"{c(C_LABEL)}{B}CHR{R} {mkbar(0, C_DIM)}")
     buf.append(sep(SW))
 
     # ── CTX ──
     ctx_used = int(ctx_total * ctx_pct / 100) if ctx_total else 0
-    buf.append(f"{c(C_CYN)}{B}CTX{R} {mkbar(ctx_pct, c(C_CYN))}")
+    buf.append(f"{c(C_LABEL)}{B}CTX{R} {mkbar(ctx_pct, c(level_color(ctx_pct)))}")
     warn = f" {c(C_RED)}{B}!CTX>{int(CRIT_PCT)}%{R}" if ctx_pct >= CRIT_PCT else ""
     if any([inp, out]):
         buf.append(
-            f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn} "
-            f"{C_DIM}INP:{R} {c(C_CYN)}{f_tok(inp)}{R} "
-            f"{C_DIM}OUT:{R} {c(C_CYN)}{f_tok(out)}{R}"
+            f"    {c(C_WHT)}{f_tok(ctx_used)}{R}{warn} "
+            f"{c(C_MUT)}INP:{R} {c(C_WHT)}{f_tok(inp)}{R} "
+            f"{c(C_MUT)}OUT:{R} {c(C_WHT)}{f_tok(out)}{R}"
         )
     else:
-        buf.append(f"    {c(C_CYN)}{f_tok(ctx_used)}{R}{warn}")
+        buf.append(f"    {c(C_WHT)}{f_tok(ctx_used)}{R}{warn}")
     buf.append(sep(SW))
 
     # ── 5HL / FBL / 7DL ──
@@ -2013,7 +2105,14 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     # no Fable pool); fable_display_state() hides a too-old or expired cache.
     fable_state = fable_display_state(fable)
     if rl is not None or fable_state != "hidden":
-        def _render_rate_limit(data_obj, label, window_sec, tag=""):
+        # Limits come from the freshest snapshot of any CLI session; past
+        # STALE_DIM_SEC they render dim with their age (the statusline rule for
+        # 5HL), so an old number never passes for a live one.
+        rl_age = time.time() - rate_limits_mtime if rate_limits_mtime else None
+        old_tag = (f"  {C_MUT}(~{_f_age(rl_age)} old){R}"
+                   if rl_age is not None and rl_age > STALE_DIM_SEC else "")
+
+        def _render_rate_limit(data_obj, label, window_sec, tag="", dim=False):
             """SIZE-002: shared renderer for every rate-limit block in
             _RL_ROWS. Rows differ only in the data source, label and reset
             window length; rendering logic (pct, expired tag, color,
@@ -2026,11 +2125,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             expired = resets > 0 and resets < time.time()
             if expired:
                 pct = 0.0
-            lc = c(_limit_color(pct))
-            expired_tag = f"  {C_DIM}(expired){R}" if expired else tag
-            buf.append(f"{lc}{B}{label}{R} {mkbar(pct, lc)}{expired_tag}")
-            rc = c(_reset_color(resets, window_sec))
-            buf.append(f"    {C_DIM}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
+            lc = C_DIM if dim else c(level_color(pct))
+            expired_tag = f"  {C_MUT}(expired){R}" if expired else tag
+            buf.append(f"{c(C_LABEL)}{B}{label}{R} {mkbar(pct, lc)}{expired_tag}")
+            rc = c(C_WHT) if resets > 0 else C_DIM
+            buf.append(f"    {c(C_MUT)}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
             return True
 
         src = dict(rl) if isinstance(rl, dict) else {}
@@ -2040,20 +2139,22 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         else:
             src["fable"] = fable
             if fable_state == "stale":
-                fable_tag = f"  {C_DIM}(stale {int(_num(fable.get('age_s'))) // 60}m){R}"
+                fable_tag = f"  {C_MUT}(stale {int(_num(fable.get('age_s'))) // 60}m){R}"
         shown = [
-            _render_rate_limit(as_dict(src.get(key)), label, window, fable_tag if key == "fable" else "")
+            _render_rate_limit(as_dict(src.get(key)), label, window,
+                               fable_tag if key == "fable" else old_tag,
+                               dim=bool(old_tag) and key != "fable")
             for key, label, window, _legend in _RL_ROWS
         ]
         if not any(shown) and is_desktop:
             # Limits arrive only through the statusline; a CLI session (any
             # one — they are per account) supplies them via
             # cached_freshest_rate_limits.
-            buf.append(f"{C_DIM}Rate limits: n/a (desktop app){R}")
+            buf.append(f"{C_MUT}Rate limits: n/a (desktop app){R}")
         elif not any(shown):
-            buf.append(f"{C_DIM}Rate limits: no data{R}")
+            buf.append(f"{C_MUT}Rate limits: no data{R}")
     else:
-        buf.append(f"{C_DIM}Rate limits: subscription data unavailable{R}")
+        buf.append(f"{C_MUT}Rate limits: subscription data unavailable{R}")
 
     buf.append(sep(SW))
 
@@ -2068,27 +2169,29 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         age_s = "?"
     # ── BRN — burn rate bar (scales to BRN_MAX $/min) ──────
     brn_pct = min(100, cpm / BRN_MAX * 100) if cpm and cpm > 0 else 0
-    buf.append(f"{c(C_ORN)}{B}BRN{R} {mkbar(brn_pct, c(C_ORN))}")
-    buf.append(f"    {C_DIM}RTE:{R} {c(C_ORN)}{brn_val}{R}")
+    brn_c = c(brn_color(cpm) if cpm and cpm > 0.0001 else C_MUT)
+    buf.append(f"{c(C_LABEL)}{B}BRN{R} {mkbar(brn_pct, brn_c)}")
+    buf.append(f"    {c(C_MUT)}RTE:{R} {brn_c}{brn_val}{R}")
     # ── CTR — context rate bar (scales to CTR_MAX %/min) ───
     ctr_pct = min(100, xpm / CTR_MAX * 100) if xpm and xpm > 0 else 0
-    buf.append(f"{c(C_YEL)}{B}CTR{R} {mkbar(ctr_pct, c(C_YEL))}")
-    buf.append(f"    {C_DIM}RTE:{R} {c(C_YEL)}{ctr_val}{R}")
+    ctr_c = c(level_color(ctr_pct) if xpm and xpm > 0.001 else C_MUT)
+    buf.append(f"{c(C_LABEL)}{B}CTR{R} {mkbar(ctr_pct, ctr_c)}")
+    buf.append(f"    {c(C_MUT)}RTE:{R} {ctr_c}{ctr_val}{R}")
     # ── CST — session cost bar (scales to CST_MAX $) ───────
     cst_pct = min(100, usd / CST_MAX * 100) if usd > 0 else 0
-    buf.append(f"{c(C_ORN)}{B}CST{R} {mkbar(cst_pct, c(C_ORN))}")
+    buf.append(f"{c(C_LABEL)}{B}CST{R} {mkbar(cst_pct, c(C_MONEY))}")
     reported_cost = f_cost_value(as_dict(data.get("cost")).get("total_cost_usd"))
-    est_tag = f" {C_DIM}est.{R}" if is_desktop else ""
-    buf.append(f"    {C_DIM}CST:{R} {c(C_ORN)}{reported_cost}{R}{est_tag}")
+    est_tag = f" {C_MUT}est.{R}" if is_desktop else ""
+    buf.append(f"    {c(C_MUT)}CST:{R} {c(C_MONEY)}{reported_cost}{R}{est_tag}")
     # ── Cross-session cost (TDY / WEK) ─────────────────────
     tdy, wek = cached_cross_session_costs()
     tdy_s = f_cost(tdy) if tdy > 0 else "--"
     wek_s = f_cost(wek) if wek > 0 else "--"
-    buf.append(f"    {C_DIM}TDY:{R} {c(C_ORN)}{tdy_s}{R} {C_DIM}WEK:{R} {c(C_ORN)}{wek_s}{R}")
+    buf.append(f"    {c(C_MUT)}TDY:{R} {c(C_MONEY)}{tdy_s}{R} {c(C_MUT)}WEK:{R} {c(C_MONEY)}{wek_s}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}NOW:{R} {c(C_WHT)}{now}{R} {C_DIM}UPD:{R} {c(C_WHT)}{age_s}{R}")
+    buf.append(f"{c(C_MUT)}NOW:{R} {c(C_WHT)}{now}{R} {c(C_MUT)}UPD:{R} {c(C_WHT)}{age_s}{R}")
     if added or removed:
-        buf.append(f"{C_DIM}LNS:{R} {c(C_GRN)}{added:,}{R} {c(C_RED)}{removed:,}{R}")
+        buf.append(f"{c(C_MUT)}LNS:{R} {c(C_GRN)}+{added:,}{R} {c(C_RED)}-{removed:,}{R}")
 
     # ── RLS (release check) ──
     # NOTE: _rls_maybe_check() is invoked from the main event loop, NOT here.
@@ -2101,18 +2204,18 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
     if rls_s == "update" and rls["remote_ver"]:
         rv = rls["remote_ver"]
         if _rls_blink():
-            buf.append(f"{c(C_RED)}{B}RLS{R} {c(C_RED)}{B}{spin_rls()} v{rv} available{R}")
+            buf.append(f"{c(C_LABEL)}{B}RLS{R} {c(C_YEL)}{B}{spin_rls()} v{rv} available{R}")
         else:
-            buf.append(f"{c(C_RED)}{B}RLS{R} {C_DIM}{spin_rls()} v{rv} available{R}")
+            buf.append(f"{c(C_LABEL)}{B}RLS{R} {C_MUT}{spin_rls()} v{rv} available{R}")
     elif rls_s == "ok":
-        buf.append(f"{c(C_GRN)}RLS{R} {c(C_GRN)}{spin_rls()} Up to date{R}")
+        buf.append(f"{c(C_LABEL)}{B}RLS{R} {c(C_GRN)}{spin_rls()} Up to date{R}")
     elif rls_s is None:
-        buf.append(f"{C_DIM}RLS {spin_rls()} Checking...{R}")
+        buf.append(f"{c(C_LABEL)}{B}RLS{R} {C_MUT}{spin_rls()} Checking...{R}")
     # error/no_git/timeout — silent, render nothing
 
     # ── Footer ──
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}] menu   [{R}{C_WHT}l{R}{C_DIM}] legend   [{R}{C_WHT}q{R}{C_DIM}] quit{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}m{R}{C_DIM}]{C_MUT} menu   [{R}{C_WHT}l{R}{C_DIM}]{C_MUT} legend   [{R}{C_WHT}q{R}{C_DIM}]{C_MUT} quit{R}")
 
     _fit_buf_height(buf, rows, clip_tail=False)
     return buf
@@ -2124,96 +2227,104 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
 def render_legend(cols, rows):
     SW = cols
     buf = []
-    buf.append(sep(SW))
-    lg_pad = max(0, SW - 6)  # "LEGEND" = 6 chars
-    buf.append(f"{BG_BAR}{C_WHT}{B}LEGEND{R}{BG_BAR}{' ' * lg_pad}{R}")
-    buf.append(sep(SW))
+
+    def section(title):
+        buf.append(sep(SW))
+        buf.append(f"{BG_BAR}{C_WHT}{B}{title}{R}{BG_BAR}{' ' * max(0, SW - len(title))}{R}")
+        buf.append(sep(SW))
+
+    def key(k, desc, gap="   "):
+        buf.append(f"{_hk(k)}{gap}{C_TXT}{desc}{R}")
+
+    def code(*pairs):
+        buf.append(" ".join(f"{C_LABEL}{c_}{R} {C_TXT}{d}{R}" for c_, d in pairs))
+
+    def sub(text):
+        buf.append(f"{C_MUT} {text}{R}")
+
+    section("LEGEND")
     # ── Hotkeys (most-used — kept at the top) ──
-    hp = max(0, SW - 7)
-    buf.append(f"{BG_BAR}{C_WHT}{B}HOTKEYS{R}{BG_BAR}{' ' * hp}{R}")
+    buf.append(f"{BG_BAR}{C_WHT}{B}HOTKEYS{R}{BG_BAR}{' ' * max(0, SW - 7)}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R}   {C_DIM}Quit{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}m{R}{C_DIM}]{R}   {C_DIM}Menu{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R}   {C_DIM}Refresh{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}1-3{R}{C_DIM}]{R} {C_DIM}Token Stats Period{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
+    key("q", "Quit")
+    key("m", "Menu")
+    key("r", "Refresh")
+    key("s", "Session Picker")
+    key("t", "Token Stats")
+    key("a", "Agents (fan-out)")
+    key("c", "Cost Breakdown")
+    key("p", "Anthropic Pulse")
+    buf.append(f"{_hk('u')}   {C_TXT}Update Manager{R} {C_MUT}a=apply{R}")
+    key("l", "Legend")
+    key("1-3", "Token Stats Period", gap=" ")
+    buf.append(f"{_hk('f')}   {C_TXT}Agents: {R}{C_GRN}●{R}{C_TXT} active {R}{C_DIM}○{R}{C_TXT} idle, toggle filter{R}")
     buf.extend(_pack_items(
-        [f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal / move picker{R}",
-         f"{C_DIM}PgUp/Dn Home/End{R}"],
+        [f"{_hk('↑↓ jk')} {C_TXT}Scroll modal / move picker{R}",
+         f"{C_MUT}PgUp/Dn Home/End{R}"],
         SW, gap=" ", indent=" " * 8))
-    buf.append(f"{C_DIM}[{R}{C_WHT}enter{R}{C_DIM}]{R} {C_DIM}Open Session (picker){R}")
+    key("enter", "Open Session (picker)", gap=" ")
+    # ── Colors: one meaning per color, shared by every screen ──
+    section("COLORS")
+    buf.extend(_pack_items(
+        [f"{C_GRN}●{R} {C_TXT}ok{R}", f"{C_YEL}●{R} {C_TXT}warning{R}",
+         f"{C_ORN}●{R} {C_TXT}elevated{R}", f"{C_RED}●{R} {C_TXT}critical{R}",
+         f"{C_MONEY}●{R} {C_TXT}money{R}", f"{C_INFO}●{R} {C_TXT}no threshold{R}"],
+        SW, gap="   "))
+    sub(f"CTX 5HL FBL 7DL CTR: yellow from {WARN_PCT:g} %, red from {CRIT_PCT:g} %")
+    sub(f"CHR: yellow at {100 - WARN_PCT:g} % or less, red at {100 - CRIT_PCT:g} % or less")
+    sub(f"BRN: yellow above {WARN_BRN:g} $/min")
     # ── Dashboard metrics ──
-    buf.append(sep(SW))
-    dp = max(0, SW - 9)  # "DASHBOARD" = 9 chars
-    buf.append(f"{BG_BAR}{C_WHT}{B}DASHBOARD{R}{BG_BAR}{' ' * dp}{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_GRN}APR{R} {C_DIM}API Ratio{R}")
-    buf.append(f"{C_DIM} DUR  Duration - API  API Time{R}")
-    buf.append(f"{C_GRN}CHR{R} {C_DIM}Cache Hit Rate{R}")
-    buf.append(f"{C_DIM} CRD  Cache Read - CWR  Cache Write{R}")
-    buf.append(f"{C_CYN}CTX{R} {C_DIM}Context Window{R}")
-    buf.append(f"{C_DIM} INP  Input Tokens - OUT  Output Tokens{R}")
+    section("DASHBOARD")
+    buf.append(f"{C_MUT} model │ effort │ fast │ thinking off │ permission mode  under the title; {R}"
+               f"{C_ORN}bypass{R}{C_MUT} = permission prompts skipped{R}")
+    code(("APR", "API Ratio"))
+    sub("DUR  Duration - API  API Time")
+    code(("CHR", "Cache Hit Rate"))
+    sub("CRD  Cache Read - CWR  Cache Write - MISS  Cache misses + last cause (CLI)")
+    code(("CTX", "Context Window"))
+    sub("INP  Input Tokens - OUT  Output Tokens")
     for _key, label, _window, legend in _RL_ROWS:
-        buf.append(f"{C_YEL}{label}{R} {C_DIM}{legend}{R}")
-    buf.append(f"{C_DIM} RST  Reset Countdown{R}")
-    buf.append(f"{C_ORN}BRN{R} {C_DIM}Burn Rate{R} {C_DIM}0-{BRN_MAX} $/min{R}")
-    buf.append(f"{C_YEL}CTR{R} {C_DIM}Context Rate{R} {C_DIM}0-{CTR_MAX} %/min{R}")
-    buf.append(f"{C_DIM} RTE  Rate Value{R}")
-    buf.append(f"{C_ORN}CST{R} {C_DIM}Session Cost{R} {C_DIM}0-{CST_MAX:.0f} ${R}")
-    buf.append(f"{C_ORN}TDY{R} {C_DIM}Today Cost{R} {C_ORN}WEK{R} {C_DIM}7-Day Cost{R}")
-    buf.append(f"{C_WHT}LNS{R} {C_DIM}Lines Changed{R} {C_GRN}+{R}{C_DIM}added{R} {C_RED}-{R}{C_DIM}removed{R}")
-    buf.append(f"{C_WHT}NOW{R} {C_DIM}Current Time{R} {C_WHT}UPD{R} {C_DIM}Last Update{R}")
-    buf.append(f"{C_WHT}RLS{R} {C_DIM}Release Status{R}")
+        code((label, legend))
+    sub("RST  Reset Countdown")
+    buf.append(f"{C_LABEL}BRN{R} {C_TXT}Burn Rate{R} {C_MUT}0-{BRN_MAX} $/min{R}")
+    buf.append(f"{C_LABEL}CTR{R} {C_TXT}Context Rate{R} {C_MUT}0-{CTR_MAX} %/min{R}")
+    sub("RTE  Rate Value")
+    buf.append(f"{C_LABEL}CST{R} {C_TXT}Session Cost{R} {C_MUT}0-{CST_MAX:.0f} ${R}")
+    sub("TDY  Today Cost - WEK  7-Day Cost")
+    sub("NOW  Current Time - UPD  Last Update")
+    buf.append(f"{C_MUT} LNS  Lines Changed{R} {C_GRN}+{R}{C_TXT}added{R} {C_RED}-{R}{C_TXT}removed{R}")
+    code(("RLS", "Release Status"))
     # ── Desktop app sessions ──
-    buf.append(sep(SW))
-    dk = max(0, SW - 11)  # "DESKTOP APP" = 11 chars
-    buf.append(f"{BG_BAR}{C_WHT}{B}DESKTOP APP{R}{BG_BAR}{' ' * dk}{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_DIM}Read from the session transcript; marked {R}{C_WHT}desktop app, estimated{R}{C_DIM} (narrow: {R}{C_WHT}est.{R}{C_DIM}){R}")
-    buf.append(f"{C_ORN}CST{R} {C_DIM}Estimated from token prices{R} {C_CYN}CTX{R} {C_DIM}From the last request{R}")
-    buf.append(f"{C_DIM} APR and LNS: n/a, not in the transcript{R}")
-    buf.append(f"{C_DIM} 5HL / 7DL: shown only while a CLI session reports them{R}")
-    buf.append(f"{C_DIM} desk  Desktop app; other tags name the Claude Code entrypoint{R}")
+    section("DESKTOP APP")
+    buf.append(f"{C_TXT}Read from the session transcript; marked {R}{C_MUT}desktop app, estimated{R}"
+               f"{C_TXT} (narrow: {R}{C_MUT}est.{R}{C_TXT}){R}")
+    code(("CST", "Estimated from token prices"), ("CTX", "From the last request"))
+    sub("APR and LNS: n/a, not in the transcript")
+    sub("5HL / 7DL: from the latest CLI session; dim with their age past 30 min")
+    sub("desk  Desktop app; other tags name the Claude Code entrypoint")
     # ── Token Stats ──
-    buf.append(sep(SW))
-    tp = max(0, SW - 11)
-    buf.append(f"{BG_BAR}{C_WHT}{B}TOKEN STATS{R}{BG_BAR}{' ' * tp}{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_WHT}SES{R} {C_DIM}Sessions{R} {C_WHT}DAY{R} {C_DIM}Active Days{R}")
-    buf.append(f"{C_WHT}STK{R} {C_DIM}Streak{R} {C_WHT}LSS{R} {C_DIM}Longest Session{R}")
-    buf.append(f"{C_WHT}PEAK{R} {C_DIM}Most Active Day (peak tokens){R}")
-    buf.append(f"{C_DIM} INP  Input - OUT  Output - CLS  Calls{R}")
+    section("TOKEN STATS")
+    code(("SES", "Sessions"), ("DAY", "Active Days"))
+    code(("STK", "Streak"), ("LSS", "Longest Session"))
+    code(("PEAK", "Most Active Day (peak tokens)"))
+    sub("INP  Input - OUT  Output - CLS  Calls")
     # ── Cost Breakdown ──
-    buf.append(sep(SW))
-    cp = max(0, SW - 14)
-    buf.append(f"{BG_BAR}{C_WHT}{B}COST BREAKDOWN{R}{BG_BAR}{' ' * cp}{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_DIM} LAST REQUEST — current message tokens{R}")
-    buf.append(f"{C_ORN}INP{R} {C_DIM}Input Cost{R} {C_ORN}OUT{R} {C_DIM}Output Cost{R}")
-    buf.append(f"{C_ORN}CRD{R} {C_DIM}Cache Read Cost{R} {C_ORN}CWR{R} {C_DIM}Cache Write Cost{R}")
-    buf.append(f"{C_GRN}SAV{R} {C_DIM}Cache Savings{R}")
-    buf.append(f"{C_DIM} SESSION BREAKDOWN — whole session, aggregated from transcript{R}")
-    buf.append(f"{C_DIM} SUM  Sum of estimates (delta warn if >15% off CST){R}")
-    buf.append(f"{C_WHT}CIN{R} {C_DIM}Total Input{R} {C_WHT}COUT{R} {C_DIM}Total Output{R}")
-    buf.append(f"{C_ORN}CPM{R} {C_DIM}Cost/Min{R}")
-    buf.append(f"{C_WHT}WSR{R} {C_DIM}Web Search Reqs{R} {C_WHT}WFR{R} {C_DIM}Web Fetch Reqs{R}")
-    buf.append(f"{C_WHT}TIE{R} {C_DIM}Cache 1h-TTL{R} {C_WHT}T5M{R} {C_DIM}Cache 5m-TTL{R}")
-    buf.append(f"{C_ORN}ERL{R} {C_DIM}Early 1/3{R} {C_ORN}MID{R} {C_DIM}Mid 1/3{R} {C_ORN}LAT{R} {C_DIM}Late 1/3{R}")
+    section("COST BREAKDOWN")
+    sub("LAST REQUEST — current message tokens")
+    code(("INP", "Input Cost"), ("OUT", "Output Cost"))
+    code(("CRD", "Cache Read Cost"), ("CWR", "Cache Write Cost"))
+    code(("SAV", "Cache Savings"))
+    sub("SESSION BREAKDOWN — whole session, aggregated from transcript")
+    sub("SUM  Sum of estimates (delta warn if >15% off CST)")
+    sub("CIN  Total Input - COUT  Total Output - CPM  Cost/Min")
+    sub("WSR  Web Search Reqs - WFR  Web Fetch Reqs")
+    sub("TIE  Cache 1h-TTL - T5M  Cache 5m-TTL")
+    code(("ERL", "Early 1/3"), ("MID", "Mid 1/3"), ("LAT", "Late 1/3"))
     # ── Update ──
+    section("UPDATE")
+    code(("CUR", "Local Version"), ("REM", "Remote Version"))
     buf.append(sep(SW))
-    up = max(0, SW - 6)
-    buf.append(f"{BG_BAR}{C_WHT}{B}UPDATE{R}{BG_BAR}{' ' * up}{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_GRN}CUR{R} {C_DIM}Local Version{R} {C_WHT}REM{R} {C_DIM}Remote Version{R}")
-    buf.append(sep(SW))
-    buf.append(f"{C_DIM}press any key to close{R}")
+    buf.append(f"{C_MUT}press any key to close{R}")
 
     buf[:] = [part for ln in buf for part in _wrap_ansi(ln, SW)]
     _window_buf(buf, rows)
@@ -2423,7 +2534,7 @@ def _safe_transcript_path(tp):
         return None
 
 
-_AI_TITLE_CACHE = OrderedDict()  # LRU: {sid: (ts, mtime, title_or_None)}
+_AI_TITLE_CACHE = OrderedDict()  # LRU: {sid: (ts, mtime, meta_or_None)}
 _AI_TITLE_CACHE_MAX = 64
 _AI_TITLE_TTL = 30.0
 
@@ -2432,9 +2543,86 @@ def _scan_ai_title(transcript_path):
     """Return the session's sanitized title from its transcript, or None.
 
     A rename (`custom-title`) wins over the generated `ai-title`; the last
-    non-empty record of a kind wins. Only the head and tail of the file are
-    read, so this stays fast on multi-megabyte transcripts called per render
-    tick. Path containment via _safe_transcript_path.
+    non-empty record of a kind wins.
+    """
+    return (_scan_transcript_meta(transcript_path) or {}).get("title") or None
+
+
+# Permission modes as Claude Code records them → header label.
+_PERMISSION_LABELS = {
+    "default": "default",
+    "acceptEdits": "accept edits",
+    "plan": "plan",
+    "auto": "auto",
+    "dontAsk": "don't ask",
+    "bypassPermissions": "bypass",
+}
+
+
+def _session_settings(data):
+    """(effort, permission mode) for the header, '' when unknown. Snapshot
+    fields win (statusline `effort.level`, desktop `permission_mode`); the
+    transcript's latest records fill the gaps — the statusline JSON carries
+    no permission mode."""
+    effort = as_dict(data.get("effort")).get("level")
+    perm = data.get("permission_mode")
+    effort = effort if isinstance(effort, str) and effort else ""
+    perm = perm if isinstance(perm, str) and perm else ""
+    if not (effort and perm):
+        meta = _scan_transcript_meta(data.get("transcript_path")) or {}
+        effort = effort or meta.get("effort", "")
+        perm = perm or meta.get("permission_mode", "")
+    return _sanitize(effort)[:12], _sanitize(perm)
+
+
+def _settings_flags(data):
+    """Session switches worth a word in the settings line: fast mode on,
+    extended thinking off (on is the default)."""
+    flags = []
+    if data.get("fast_mode") is True:
+        flags.append("fast")
+    if as_dict(data.get("thinking")).get("enabled") is False:
+        flags.append("thinking off")
+    return flags
+
+
+def _settings_line(model, effort, perm, width, c, flags=()):
+    """`model │ effort │ flags │ permission mode` under the title, separated
+    like the statusline. On a narrow terminal flags drop first, then the
+    permission mode, then the effort; bypass mode is orange (elevated)."""
+    parts = [(model, C_WHT, 0)]  # (text, color, drop rank — higher drops first)
+    if effort:
+        parts.append((effort, C_WHT, 1))
+    parts.extend((f, C_WHT, 3) for f in flags)
+    if perm:
+        label = _PERMISSION_LABELS.get(perm, perm[:16])
+        parts.append((label, C_ORN if perm == "bypassPermissions" else C_WHT, 2))
+    while len(parts) > 1 and sum(_vis_width(v) for v, _, _ in parts) + 3 * (len(parts) - 1) > width:
+        parts.remove(max(reversed(parts), key=lambda p: p[2]))  # rightmost of the highest rank
+    if len(parts) == 1:
+        parts[0] = (_ellipsize(model, max(1, width)), C_WHT, 0)
+    return f" {c(C_DIM)}│{R} ".join(f"{c(col)}{v}{R}" for v, col, _ in parts)
+
+
+def _cache_miss_tag(prompt_cache, c):
+    """`  MISS: 2 ttl_expired_5m` from the statusline's prompt_cache stats
+    (Claude Code v2.1.251+); '' when there were no misses or no data."""
+    pc = as_dict(prompt_cache)
+    misses = pc.get("misses")
+    if not isinstance(misses, (int, float)) or isinstance(misses, bool) or misses <= 0:
+        return ""
+    causes = as_dict(pc.get("last_miss_cause")).get("causes")
+    cause = causes[0] if isinstance(causes, list) and causes and isinstance(causes[0], str) else ""
+    cause_s = f" {c(C_MUT)}{_sanitize(cause)[:24]}{R}" if cause else ""
+    return f" {c(C_MUT)}MISS:{R} {c(C_WHT)}{int(misses)}{R}{cause_s}"
+
+
+def _scan_transcript_meta(transcript_path):
+    """Head/tail metadata of the session's transcript (_transcript_meta), or None.
+
+    Only the head and tail of the file are read, so this stays fast on
+    multi-megabyte transcripts called per render tick. Path containment via
+    _safe_transcript_path.
     """
     path = _safe_transcript_path(transcript_path)
     if path is None:
@@ -2460,12 +2648,11 @@ def _scan_ai_title(transcript_path):
     # Claude Code repeats ai-title records through the session (the first one
     # can sit hundreds of KiB in), and a rename writes custom-title, which wins.
     meta = _transcript_meta(path, st)
-    title = (meta or {}).get("title") or None
 
     while len(_AI_TITLE_CACHE) >= _AI_TITLE_CACHE_MAX:
         _AI_TITLE_CACHE.popitem(last=False)
-    _AI_TITLE_CACHE[sid] = (now, st.st_mtime, title)
-    return title
+    _AI_TITLE_CACHE[sid] = (now, st.st_mtime, meta)
+    return meta
 
 
 def _aggregate_session_cost(data):
@@ -2666,9 +2853,13 @@ def render_cost_breakdown(data, hist, cols, rows):
     cw = as_dict(data.get("context_window"))
     usage = as_dict(cw.get("current_usage"))
     model_id = as_dict(data.get("model")).get("id", "")
-    # Statusline current_usage carries no `speed` field, so per-request CST cannot
-    # detect fast mode — standard rates only. Session breakdown (transcript) does.
-    pricing = _get_pricing(model_id)
+    # Rates for the last request: `fast_mode` is the session setting from the
+    # statusline (a desktop snapshot derives it from the last request's
+    # usage.speed); the prompt size selects a model's long-prompt tier.
+    fast = data.get("fast_mode")
+    prompt = sum(nonnegative_number(usage.get(k)) or 0
+                 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    pricing = _get_pricing(model_id, "fast" if fast is True else None, prompt_tokens=prompt)
 
     # A missing cache count cannot establish a savings estimate.
     cr = nonnegative_number(usage.get("cache_read_input_tokens")) or 0
@@ -2678,9 +2869,9 @@ def render_cost_breakdown(data, hist, cols, rows):
     model_name = _sanitize(as_dict(data.get("model")).get("display_name", "?"))
     # Strip verbose context suffix: "Opus 4.6 (1M context)" → "Opus 4.6 1M"
     model_short = compact_context_suffix(model_name)
-    buf.append(f"{C_ORN}{B}CST{R} {C_ORN}{B}{f_cost_value(reported_usd)}{R} {C_DIM}{f_dur(dur)} - {model_short}{R}")
+    buf.append(f"{C_LABEL}{B}CST{R} {C_MONEY}{B}{f_cost_value(reported_usd)}{R} {C_MUT}{f_dur(dur)} - {model_short}{R}")
     if reported_usd is None:
-        buf.append(f"{C_DIM}Claude Code has not supplied a valid session cost.{R}")
+        buf.append(f"{C_MUT}Claude Code has not supplied a valid session cost.{R}")
 
     # Cost estimates per token type
     cr_cost = cr * pricing["cache_read"] / 1_000_000
@@ -2692,7 +2883,12 @@ def render_cost_breakdown(data, hist, cols, rows):
     buf.append(sep(SW))
     _entry = _MODELS.get(_model_base(model_id))
     _has_fast = bool(_entry and _entry.get("pricing_fast"))
-    tc_title = "LAST REQUEST (est., std rates)" if _has_fast else "LAST REQUEST (est.)"
+    if _has_fast and fast is True:
+        tc_title = "LAST REQUEST (est., fast rates)"
+    elif _has_fast and fast is not False:
+        tc_title = "LAST REQUEST (est., std rates)"  # fast mode unknown
+    else:
+        tc_title = "LAST REQUEST (est.)"
     tc_pad = max(0, SW - len(tc_title))
     buf.append(f"{BG_BAR}{C_WHT}{B}{tc_title}{R}{BG_BAR}{' ' * tc_pad}{R}")
     buf.append(sep(SW))
@@ -2705,13 +2901,13 @@ def render_cost_breakdown(data, hist, cols, rows):
         count = nonnegative_number(usage.get(key))
         tokens = "n/a" if count is None else (f_tok(count) if count else "0")
         amount = count * price / 1_000_000 if count is not None else None
-        buf.append(f"{C_ORN}{label}{R} {C_WHT}{tokens}{R} {C_DIM}~{f_cost_value(amount)}{R}")
+        buf.append(f"{C_LABEL}{label}{R} {C_WHT}{tokens}{R} {C_MONEY}~{f_cost_value(amount)}{R}")
     if not usage:
-        buf.append(f"{C_DIM}Last-request usage is unavailable from Claude Code.{R}")
+        buf.append(f"{C_MUT}Last-request usage is unavailable from Claude Code.{R}")
 
     if cache_savings > 0.001:
         sav_pct = round(cache_savings / (cache_savings + cr_cost) * 100) if (cache_savings + cr_cost) > 0 else 0
-        buf.append(f"{C_GRN}SAV{R} {C_GRN}~{f_cost(cache_savings)}{R} {C_DIM}({sav_pct}% vs uncached){R}")
+        buf.append(f"{C_LABEL}SAV{R} {C_GRN}~{f_cost(cache_savings)}{R} {C_MUT}({sav_pct}% vs uncached){R}")
 
     # Session-wide breakdown (aggregates transcript)
     sess = _aggregate_session_cost(data)
@@ -2725,7 +2921,7 @@ def render_cost_breakdown(data, hist, cols, rows):
                            ("CRD", "cache_read"), ("CWR", "cache_write")):
             tokens = f_tok(sess[key]) if sess[key] else "0"
             amount = f_cost_value(sess["cost_" + key])
-            buf.append(f"{C_ORN}{label}{R} {C_WHT}{tokens}{R} {C_DIM}~{amount}{R}")
+            buf.append(f"{C_LABEL}{label}{R} {C_WHT}{tokens}{R} {C_MONEY}~{amount}{R}")
         delta = sess["cost_total"] - usd if usd > 0 else 0
         if usd > 0:
             pct_diff = abs(delta) / usd * 100 if usd > 0 else 0
@@ -2733,16 +2929,16 @@ def render_cost_breakdown(data, hist, cols, rows):
             cst_cost = f_cost(usd)
             if pct_diff > 15:
                 buf.append(
-                    f"{C_DIM}SUM ~{sum_cost} vs CST {cst_cost} — "
+                    f"{C_MUT}SUM ~{sum_cost} vs CST {cst_cost} — "
                     f"{C_YEL}delta {pct_diff:.0f}%{R}"
                 )
             else:
-                buf.append(f"{C_DIM}SUM ~{sum_cost} (~= CST {cst_cost}){R}")
+                buf.append(f"{C_MUT}SUM ~{sum_cost} (~= CST {cst_cost}){R}")
         else:
-            buf.append(f"{C_DIM}SUM ~{f_cost_value(sess['cost_total'])} (transcript estimate){R}")
+            buf.append(f"{C_MUT}SUM ~{f_cost_value(sess['cost_total'])} (transcript estimate){R}")
     else:
-        buf.append(f"{C_DIM}Session estimate unavailable: no usable transcript data.{R}")
-        buf.append(f"{C_DIM}Check transcript access and the {TRANSCRIPT_MAX_BYTES // (1024 * 1024)} MiB file limit.{R}")
+        buf.append(f"{C_MUT}Session estimate unavailable: no usable transcript data.{R}")
+        buf.append(f"{C_MUT}Check transcript access and the {TRANSCRIPT_MAX_BYTES // (1024 * 1024)} MiB file limit.{R}")
 
     buf.append(sep(SW))
     st_title = "CONTEXT WINDOW"
@@ -2751,10 +2947,10 @@ def render_cost_breakdown(data, hist, cols, rows):
     buf.append(sep(SW))
     # total_input_tokens/total_output_tokens are the CURRENT context window
     # (Claude Code v2.1.132+), not cumulative session totals — label accordingly.
-    buf.append(f"{C_DIM}CIN:{R} {C_WHT}{f_tok(total_in)}{R} {C_DIM}COUT:{R} {C_WHT}{f_tok(total_out)}{R}")
+    buf.append(f"{C_MUT}CIN:{R} {C_WHT}{f_tok(total_in)}{R} {C_MUT}COUT:{R} {C_WHT}{f_tok(total_out)}{R}")
     if dur > 0 and reported_usd is not None:
         cpm_val = usd / (dur / 60000)
-        buf.append(f"{C_DIM}CPM:{R} {C_ORN}{cpm_val:.4f} $/min{R}")
+        buf.append(f"{C_MUT}CPM:{R} {brn_color(cpm_val)}{cpm_val:.4f} $/min{R}")
 
     # Server-side tool calls + cache TTL split (only if non-zero)
     if sess:
@@ -2764,13 +2960,13 @@ def render_cost_breakdown(data, hist, cols, rows):
         c5m_v = int(sess.get("cache_5m", 0))
         if wsr_v or wfr_v:
             buf.append(
-                f"{C_DIM}WSR:{R} {C_WHT}{wsr_v}{R}    "
-                f"{C_DIM}WFR:{R} {C_WHT}{wfr_v}{R}"
+                f"{C_MUT}WSR:{R} {C_WHT}{wsr_v}{R}    "
+                f"{C_MUT}WFR:{R} {C_WHT}{wfr_v}{R}"
             )
         if c1h_v or c5m_v:
             buf.append(
-                f"{C_DIM}TIE:{R} {C_WHT}{f_tok(c1h_v)}{R}  "
-                f"{C_DIM}T5M:{R} {C_WHT}{f_tok(c5m_v)}{R}"
+                f"{C_MUT}TIE:{R} {C_WHT}{f_tok(c1h_v)}{R}  "
+                f"{C_MUT}T5M:{R} {C_WHT}{f_tok(c5m_v)}{R}"
             )
 
     # Burn rate over time — 3 equal time slices, bar scaled to BRN_MAX
@@ -2785,11 +2981,11 @@ def render_cost_breakdown(data, hist, cols, rows):
         for label, cost, rate in thirds:
             pct = min(100.0, rate / BRN_MAX * 100) if BRN_MAX > 0 else 0
             code = _COT_LABELS.get(label, label.upper()[:3])
-            buf.append(f"{C_ORN}{B}{code}{R} {mkbar(pct, C_ORN)}")
-            buf.append(f"    {C_DIM}RTE:{R} {C_ORN}{rate:.4f} $/min{R} {C_DIM}CST:{R} {C_ORN}{f_cost(cost)}{R}")
+            buf.append(f"{C_LABEL}{B}{code}{R} {mkbar(pct, brn_color(rate))}")
+            buf.append(f"    {C_MUT}RTE:{R} {brn_color(rate)}{rate:.4f} $/min{R} {C_MUT}CST:{R} {C_MONEY}{f_cost(cost)}{R}")
 
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}press any key to close{R}")
+    buf.append(f"{C_MUT}press any key to close{R}")
 
     _window_buf(buf, rows)
     return buf
@@ -2810,8 +3006,35 @@ _PULSE_COMPONENT_COLOR = {
     "degraded_performance":    C_YEL,
     "partial_outage":          C_ORN,
     "major_outage":            C_RED,
-    "under_maintenance":       C_CYN,
+    "under_maintenance":       C_INFO,
 }
+
+
+def _pulse_indicator_color(indicator):
+    """Status color of a Statuspage indicator; an unknown future value stays
+    neutral rather than alarming red."""
+    if indicator == "none":
+        return C_GRN
+    if indicator in ("minor", "maintenance"):
+        return C_YEL
+    if indicator in ("major", "critical"):
+        return C_RED
+    return C_DIM
+
+
+def _pulse_window(start, end):
+    """Local 'DD.MM. HH:MM–HH:MM' of a maintenance window; '' when unknown."""
+    try:
+        start, end = float(start or 0), float(end or 0)
+        if start <= 0:
+            return ""
+        a = datetime.fromtimestamp(start)
+        if end <= start:
+            return a.strftime("%d.%m. %H:%M")
+        b = datetime.fromtimestamp(end)
+        return a.strftime("%d.%m. %H:%M") + "–" + b.strftime("%H:%M" if b.date() == a.date() else "%d.%m. %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def _pulse_age(snap):
@@ -2854,48 +3077,44 @@ def render_pulse_modal(cols, rows):
     buf.append("")
     buf.append(f"{color}{B}>> {verdict} <<{R}")
     if reason:
-        buf.append(f"{C_DIM}reason: {reason}{R}")
+        buf.append(f"{C_MUT}reason: {reason}{R}")
 
     buf.append(sep(SW))
-    # Details
-    indicator = snap.get("indicator")
-    if indicator:
-        ind_label = pulse.indicator_label(indicator)
-        if indicator == "none":
-            ind_color = C_GRN
-        elif indicator in ("minor", "maintenance"):
-            ind_color = C_YEL
-        elif indicator in ("major", "critical"):
-            ind_color = C_RED
+    # Details — CODING is what the score uses (Claude API + Claude Code);
+    # INDICATOR is the whole status page.
+    for label, ind in (("CODING    ", snap.get("scope_indicator")),
+                       ("INDICATOR ", snap.get("indicator"))):
+        if ind:
+            buf.append(f"{C_MUT}{label}{R} {_pulse_indicator_color(ind)}{_sanitize(ind)}{R}"
+                       f" {C_MUT}({_sanitize(pulse.indicator_label(ind))}){R}")
         else:
-            # Unknown indicator from a future status schema — stay neutral rather than alarming red
-            ind_color = C_DIM
-        buf.append(f"{C_DIM}INDICATOR {R} {ind_color}{_sanitize(indicator)}{R} {C_DIM}({_sanitize(ind_label)}){R}")
-    else:
-        buf.append(f"{C_DIM}INDICATOR {R} {C_DIM}--{R}")
+            buf.append(f"{C_MUT}{label}{R} {C_DIM}--{R}")
 
     incidents = snap.get("incidents") or []
-    inc_color = C_GRN if not incidents else (C_YEL if len(incidents) < 3 else C_RED)
-    buf.append(f"{C_DIM}INCIDENTS {R} {inc_color}{len(incidents)}{R}")
+    scored = [inc for inc in incidents if inc.get("relevant", True)]
+    elsewhere = len(incidents) - len(scored)
+    inc_color = C_GRN if not scored else (C_YEL if len(scored) < 3 else C_RED)
+    other_s = f" {C_DIM}/{R} {C_TXT}{elsewhere}{R} {C_MUT}elsewhere{R}" if elsewhere else ""
+    buf.append(f"{C_MUT}INCIDENTS {R} {inc_color}{len(scored)}{R} {C_MUT}coding{R}{other_s}")
 
-    # Per-model rollup — any model mentioned in any active incident = affected.
-    # Silent when no incidents mention models.
+    # Per-model rollup — any model mentioned in a scored incident = affected.
+    # Silent when no scored incident exists.
     affected = set()
-    for inc in incidents:
+    for inc in scored:
         for m in (inc.get("affected_models") or []):
             affected.add(m)
-    if affected or incidents:
+    if affected or scored:
         parts = []
         for m in pulse.MODEL_FAMILIES:
             if m in affected:
                 parts.append(f"{C_RED}{B}{m}{R}")
             else:
                 parts.append(f"{C_GRN}{m}{R}")
-        buf.append(f"{C_DIM}MODELS    {R} " + f" {C_DIM}/{R} ".join(parts))
+        buf.append(f"{C_MUT}MODELS    {R} " + f" {C_DIM}/{R} ".join(parts))
 
     latency = snap.get("latency_ms")
     if latency is None:
-        buf.append(f"{C_DIM}LATENCY   {R} {C_RED}timeout{R}")
+        buf.append(f"{C_MUT}LATENCY   {R} {C_RED}timeout{R}")
     else:
         if latency < 300:
             lc = C_GRN
@@ -2903,26 +3122,26 @@ def render_pulse_modal(cols, rows):
             lc = C_YEL
         else:
             lc = C_RED
-        buf.append(f"{C_DIM}LATENCY   {R} {lc}{int(latency)} ms{R}")
+        buf.append(f"{C_MUT}LATENCY   {R} {lc}{int(latency)} ms{R}")
 
     # p50 / p95 — appears once we have >=3 samples
     p50 = snap.get("latency_p50_ms")
     p95 = snap.get("latency_p95_ms")
     if p50 is not None and p95 is not None:
-        buf.append(f"{C_DIM}P50 / P95 {R} {C_WHT}{p50} ms{R} {C_DIM}/{R} {C_WHT}{p95} ms{R}")
+        buf.append(f"{C_MUT}P50 / P95 {R} {C_WHT}{p50} ms{R} {C_DIM}/{R} {C_WHT}{p95} ms{R}")
 
     # Raw (instant) score — shown when it diverges from smoothed by > 5 points
     raw_score = snap.get("raw_score")
     if score is not None and raw_score is not None and abs(int(raw_score) - int(score)) > 5:
-        buf.append(f"{C_DIM}INSTANT   {R} {C_DIM}{int(raw_score)}% (smoothed: {int(score)}%){R}")
+        buf.append(f"{C_MUT}INSTANT   {R} {C_TXT}{int(raw_score)}% (smoothed: {int(score)}%){R}")
 
-    buf.append(f"{C_DIM}UPDATED   {R} {C_WHT}{_pulse_age(snap)}{R}")
+    buf.append(f"{C_MUT}UPDATED   {R} {C_WHT}{_pulse_age(snap)}{R}")
 
     # Error detail (if any)
     err = snap.get("error")
     if err:
         buf.append(sep(SW))
-        buf.append(f"{C_RED}{B}ERROR{R} {C_DIM}{_sanitize(err)}{R}")
+        buf.append(f"{C_RED}{B}ERROR{R} {C_TXT}{_sanitize(err)}{R}")
 
     # Active incidents (first 3)
     if incidents:
@@ -2931,15 +3150,37 @@ def render_pulse_modal(cols, rows):
         ih_pad = max(0, SW - len(ih))
         buf.append(f"{BG_BAR}{C_WHT}{B}{ih}{R}{BG_BAR}{' ' * ih_pad}{R}")
         buf.append(sep(SW))
-        for inc in incidents[:3]:
-            name = _sanitize(inc.get("name") or "?")[:SW - 8]
+        # Scored incidents first; the others are dimmed and name their service.
+        ordered = scored + [inc for inc in incidents if not inc.get("relevant", True)]
+        for inc in ordered[:3]:
+            relevant = inc.get("relevant", True)
+            name = _sanitize(inc.get("name") or "?")
             impact = _sanitize(inc.get("impact") or "minor")
-            ic = C_RED if impact in ("major", "critical") else C_YEL
+            ic = (C_RED if impact in ("major", "critical") else C_YEL) if relevant else C_MUT
             models = inc.get("affected_models") or []
             tag = ""
-            if models:
+            if models and relevant:
                 tag = f" {C_DIM}[{R}{C_ORN}{','.join(models)}{R}{C_DIM}]{R}"
-            buf.append(f"{ic}{impact.upper()[:4]:<4}{R} {C_WHT}{name}{R}{tag}")
+            buf.append(truncate(f"{ic}{impact.upper()[:4]:<4}{R} {C_WHT if relevant else C_MUT}{name}{R}{tag}", SW))
+            meta = [_sanitize(x) for x in [inc.get("status") or ""] + list(inc.get("components") or []) if x]
+            if meta:
+                buf.append(truncate(f"     {C_MUT}{', '.join(meta)}{R}", SW))
+
+    # Scheduled maintenance (shown, not scored — an active window already marks
+    # its components under_maintenance)
+    maintenances = snap.get("maintenances") or []
+    if maintenances:
+        buf.append(sep(SW))
+        mh = "SCHEDULED MAINTENANCE"
+        buf.append(f"{BG_BAR}{C_WHT}{B}{mh}{R}{BG_BAR}{' ' * max(0, SW - len(mh))}{R}")
+        buf.append(sep(SW))
+        for m in maintenances[:3]:
+            relevant = m.get("relevant", True)
+            when = _pulse_window(m.get("scheduled_for"), m.get("scheduled_until"))
+            buf.append(truncate(f"{C_INFO if relevant else C_MUT}{_sanitize(m.get('status') or '?')}{R}"
+                                f" {C_TXT if relevant else C_MUT}{_sanitize(m.get('name') or '?')}{R}", SW))
+            meta = [when] + [_sanitize(x) for x in (m.get("components") or [])]
+            buf.append(truncate(f"     {C_MUT}{', '.join(x for x in meta if x)}{R}", SW))
 
     # Components
     components = snap.get("components") or []
@@ -2957,14 +3198,15 @@ def render_pulse_modal(cols, rows):
             name = re.sub(r"\s*\([^)]*\)?\s*$", "", name).strip() or name
             cstatus = _sanitize(c.get("status") or "unknown")
             cc = _PULSE_COMPONENT_COLOR.get(cstatus, C_DIM)
-            buf.append(f"{C_WHT}{name[:name_w]:<{name_w}}{R} {cc}{cstatus.replace('_', ' ')}{R}")
+            nc = C_WHT if c.get("relevant") else C_TXT
+            buf.append(f"{nc}{name[:name_w]:<{name_w}}{R} {cc}{cstatus.replace('_', ' ')}{R}")
 
     buf.append(sep(SW))
     footer = "source: status.claude.com + api.anthropic.com ping"
     if len(footer) > SW:
         footer = "source: status.claude.com + api ping"
-    buf.append(f"{C_DIM}{footer[:SW]}{R}")
-    buf.append(f"{C_DIM}press any key to close{R}")
+    buf.append(f"{C_MUT}{footer[:SW]}{R}")
+    buf.append(f"{C_MUT}press any key to close{R}")
 
     _window_buf(buf, rows)
     return buf
@@ -2980,34 +3222,34 @@ def render_menu(cols, rows):
     mn_pad = max(0, SW - 6)  # "≡ MENU" = 6 chars
     buf.append(f"{BG_BAR}{C_WHT}{B}\u2261 MENU{R}{BG_BAR}{' ' * mn_pad}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}]{R}   {C_DIM}Quit{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}r{R}{C_DIM}]{R}   {C_DIM}Refresh{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}s{R}{C_DIM}]{R}   {C_DIM}Session Picker{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}q{R}{C_DIM}]{R}   {C_TXT}Quit{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}r{R}{C_DIM}]{R}   {C_TXT}Refresh{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}s{R}{C_DIM}]{R}   {C_TXT}Session Picker{R}")
     buf.append(sep(SW))
     vp = max(0, SW - 5)
     buf.append(f"{BG_BAR}{C_WHT}{B}VIEWS{R}{BG_BAR}{' ' * vp}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}t{R}{C_DIM}]{R}   {C_DIM}Token Stats{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}]{R}   {C_DIM}Agents (fan-out){R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}c{R}{C_DIM}]{R}   {C_DIM}Cost Breakdown{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}p{R}{C_DIM}]{R}   {C_DIM}Anthropic Pulse{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}t{R}{C_DIM}]{R}   {C_TXT}Token Stats{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}a{R}{C_DIM}]{R}   {C_TXT}Agents (fan-out){R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}c{R}{C_DIM}]{R}   {C_TXT}Cost Breakdown{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}p{R}{C_DIM}]{R}   {C_TXT}Anthropic Pulse{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}l{R}{C_DIM}]{R}   {C_TXT}Legend{R}")
     buf.append(sep(SW))
     sp = max(0, SW - 6)
     buf.append(f"{BG_BAR}{C_WHT}{B}SYSTEM{R}{BG_BAR}{' ' * sp}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}u{R}{C_DIM}]{R}   {C_DIM}Update Manager{R} {C_DIM}a=apply{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}u{R}{C_DIM}]{R}   {C_TXT}Update Manager{R} {C_MUT}a=apply{R}")
     buf.append(sep(SW))
     np = max(0, SW - 10)  # "NAVIGATION" = 10 chars
     buf.append(f"{BG_BAR}{C_WHT}{B}NAVIGATION{R}{BG_BAR}{' ' * np}{R}")
     buf.append(sep(SW))
     buf.extend(_pack_items(
-        [f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll{R}",
-         f"{C_DIM}[{R}{C_WHT}PgUp/Dn{R}{C_DIM}]{R} {C_DIM}Page{R}",
-         f"{C_DIM}[{R}{C_WHT}Home/End{R}{C_DIM}]{R} {C_DIM}Jump{R}"],
+        [f"{C_DIM}[{R}{C_LABEL}↑↓ jk{R}{C_DIM}]{R} {C_TXT}Scroll{R}",
+         f"{C_DIM}[{R}{C_LABEL}PgUp/Dn{R}{C_DIM}]{R} {C_TXT}Page{R}",
+         f"{C_DIM}[{R}{C_LABEL}Home/End{R}{C_DIM}]{R} {C_TXT}Jump{R}"],
         SW))
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}press any key to close{R}")
+    buf.append(f"{C_MUT}press any key to close{R}")
 
     _window_buf(buf, rows)
     return buf
@@ -3272,11 +3514,11 @@ def render_update_modal(cols, rows):
     rls_s = rls["status"]
     remote_ver = rls.get("remote_ver")
 
-    buf.append(f"{C_GRN}CUR{R} {C_GRN}v{VERSION}{R}")
+    buf.append(f"{C_LABEL}CUR{R} {C_WHT}v{VERSION}{R}")
     if remote_ver:
-        buf.append(f"{C_WHT}REM{R} {C_WHT}v{remote_ver}{R}")
+        buf.append(f"{C_LABEL}REM{R} {C_YEL if rls_s == 'update' else C_WHT}v{remote_ver}{R}")
     else:
-        buf.append(f"{C_DIM}REM{R} {C_DIM}unknown{R}")
+        buf.append(f"{C_LABEL}REM{R} {C_MUT}unknown{R}")
 
     # Last check freshness — show only after worker has actually run.
     # Using status gate (not "t > 0") because time.monotonic() may be small on
@@ -3289,9 +3531,9 @@ def render_update_modal(cols, rows):
             age_str = f"{age_s // 60}m ago"
         else:
             age_str = f"{age_s // SECONDS_1H}h ago"
-        buf.append(f"{C_DIM}Checked {age_str}{R}")
+        buf.append(f"{C_MUT}Checked {age_str}{R}")
 
-    buf.append(f"{C_CYN}github.com/iM3SK/cc-aio-mon{R}")
+    buf.append(f"{C_LABEL}github.com/iM3SK/cc-aio-mon{R}")
 
     if rls_s == "update" and remote_ver:
         # Show new commits — cached so we don't spam git subprocess every 50ms tick
@@ -3301,7 +3543,7 @@ def render_update_modal(cols, rows):
             buf.append(f"{C_WHT}{B}NEW COMMITS{R}")
             buf.append(sep(SW))
             for c_line in commits:
-                buf.append(f"{C_DIM}{_sanitize(c_line)}{R}")
+                buf.append(f"{C_TXT}{_sanitize(c_line)}{R}")
 
         # Changelog preview — cached
         cl = _cached_get_remote_changelog_preview(remote_ver)
@@ -3310,16 +3552,16 @@ def render_update_modal(cols, rows):
             buf.append(f"{C_WHT}{B}CHANGELOG{R}")
             buf.append(sep(SW))
             for c_line in cl:
-                buf.append(f"{C_DIM}{_sanitize(c_line)}{R}")
+                buf.append(f"{C_TXT}{_sanitize(c_line)}{R}")
 
         # Safety warnings — cached (3 git subprocess calls inside)
         warns = _cached_update_checks()
         if warns:
             buf.append("")
-            buf.append(f"{C_RED}{B}WARNINGS{R}")
+            buf.append(f"{C_YEL}{B}WARNINGS{R}")
             buf.append(sep(SW))
             for w in [_sanitize(x) for x in warns]:
-                buf.append(f"{C_RED}{w}{R}")
+                buf.append(f"{C_YEL}{w}{R}")
 
         ur = _get_update_result()
         if ur:
@@ -3329,39 +3571,39 @@ def render_update_modal(cols, rows):
             else:
                 buf.append(f"{C_RED}{B}{ur}{R}")
             buf.append(sep(SW))
-            buf.append(f"{C_DIM}press any key to close{R}")
+            buf.append(f"{C_MUT}press any key to close{R}")
         elif warns:
             buf.append(sep(SW))
-            buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (blocked by warnings above){R}")
-            buf.append(f"{C_DIM}press any key to close{R}")
+            buf.append(f"{C_DIM}[{R}{C_LABEL}a{R}{C_DIM}]{C_MUT} apply (blocked by warnings above){R}")
+            buf.append(f"{C_MUT}press any key to close{R}")
         else:
             buf.append(sep(SW))
-            buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply{R}")
-            buf.append(f"{C_DIM}press any key to close{R}")
+            buf.append(f"{C_DIM}[{R}{C_LABEL}a{R}{C_DIM}]{C_MUT} apply{R}")
+            buf.append(f"{C_MUT}press any key to close{R}")
 
     elif rls_s == "ok":
         buf.append(f"{C_GRN}{spin_rls()} Up to date{R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (no update available){R}")
-        buf.append(f"{C_DIM}press any key to close{R}")
+        buf.append(f"{C_DIM}[{R}{C_LABEL}a{R}{C_DIM}]{C_MUT} apply (no update available){R}")
+        buf.append(f"{C_MUT}press any key to close{R}")
 
     elif rls_s is None:
-        buf.append(f"{C_DIM}{spin_rls()} Checking for updates...{R}")
+        buf.append(f"{C_MUT}{spin_rls()} Checking for updates...{R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (checking...){R}")
-        buf.append(f"{C_DIM}press any key to close{R}")
+        buf.append(f"{C_DIM}[{R}{C_LABEL}a{R}{C_DIM}]{C_MUT} apply (checking...){R}")
+        buf.append(f"{C_MUT}press any key to close{R}")
 
     else:
-        buf.append(f"{C_DIM}Could not check for updates.{R}")
+        buf.append(f"{C_YEL}Could not check for updates.{R}")
         if rls_s == "no_git":
-            buf.append(f"{C_DIM}Git is not installed or not on PATH.{R}")
+            buf.append(f"{C_MUT}Git is not installed or not on PATH.{R}")
         elif rls_s == "timeout":
-            buf.append(f"{C_DIM}Network timeout — check your connection.{R}")
+            buf.append(f"{C_MUT}Network timeout — check your connection.{R}")
         else:
-            buf.append(f"{C_DIM}Unknown error during check.{R}")
+            buf.append(f"{C_MUT}Unknown error during check.{R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}[{R}{C_WHT}a{R}{C_DIM}] apply (check failed){R}")
-        buf.append(f"{C_DIM}press any key to close{R}")
+        buf.append(f"{C_DIM}[{R}{C_LABEL}a{R}{C_DIM}]{C_MUT} apply (check failed){R}")
+        buf.append(f"{C_MUT}press any key to close{R}")
 
     _window_buf(buf, rows)
     return buf
@@ -3438,7 +3680,7 @@ def _model_code(model_id):
 
 
 # Bar colors per model (consistent mapping)
-_MODEL_COLORS = [C_CYN, C_GRN, C_YEL, C_ORN, C_RED]
+_MODEL_COLORS = [C_CYN, C_TEAL, C_BLU, C_NAV, C_TXT]  # Frost: identity, not status
 
 
 def _total_tokens(m):
@@ -3503,15 +3745,15 @@ def render_stats(cols, rows, period="all"):
         buf.append(f"{C_YEL}Refresh failed; showing previous results. Retrying shortly.{R}")
     if not models:
         if cached is None:
-            buf.append(f"{C_DIM}Loading token stats in the background...{R}")
+            buf.append(f"{C_MUT}Loading token stats in the background...{R}")
         elif cached.get("error"):
             buf.append(f"{C_YEL}Unable to load token stats. Retrying shortly.{R}")
         else:
-            buf.append(f"{C_DIM}No transcript data found in ~/.claude/projects/{R}")
-            buf.append(f"{C_DIM}(stats appear after at least one CC session){R}")
+            buf.append(f"{C_MUT}No transcript data found in ~/.claude/projects/{R}")
+            buf.append(f"{C_MUT}(stats appear after at least one CC session){R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
-        buf.append(f"{C_DIM}press any key to close{R}")
+        buf.append(f"{C_DIM}[{R}{C_LABEL}1{R}{C_DIM}]{C_MUT}all [{R}{C_WHT}2{R}{C_DIM}]{C_MUT}7d [{R}{C_WHT}3{R}{C_DIM}]{C_MUT}30d{R}")
+        buf.append(f"{C_MUT}press any key to close{R}")
         _window_buf(buf, rows)
         return buf
 
@@ -3533,12 +3775,12 @@ def render_stats(cols, rows, period="all"):
         if overview.get("truncated") else ""
     )
     buf.append(
-        f"{C_WHT}SES{R} {C_WHT}{n_sessions}{R} "
-        f"{C_WHT}DAY{R} {C_WHT}{n_days}{R} "
-        f"{C_WHT}STK{R} {C_WHT}{current_streak}d{R}"
-        f"{C_DIM}/{longest_streak}d{R}{trunc_tag}"
+        f"{C_LABEL}SES{R} {C_WHT}{n_sessions}{R} "
+        f"{C_LABEL}DAY{R} {C_WHT}{n_days}{R} "
+        f"{C_LABEL}STK{R} {C_WHT}{current_streak}d{R}"
+        f"{C_MUT}/{longest_streak}d{R}{trunc_tag}"
     )
-    buf.append(f"{C_WHT}LSS{R} {C_WHT}{f_dur(longest_ms)}{R} {C_WHT}PEAK{R} {C_WHT}{most_active}{R}")
+    buf.append(f"{C_LABEL}LSS{R} {C_WHT}{f_dur(longest_ms)}{R} {C_LABEL}PEAK{R} {C_WHT}{most_active}{R}")
 
     # -- Models section --
     total_all = sum(_total_tokens(m) for m in models.values())
@@ -3557,17 +3799,17 @@ def render_stats(cols, rows, period="all"):
         code, ver = _model_code(mid)
         total_m = _total_tokens(st)
         pct = total_m / total_all * 100 if total_all else 0
-        ver_tag = f" {C_DIM}{ver}{R}" if ver else ""
+        ver_tag = f" {C_MUT}{ver}{R}" if ver else ""
         buf.append(f"{color}{B}{code}{R}{ver_tag} {mkbar(pct, color)}")
         buf.append(
-            f"    {C_DIM}INP:{R} {color}{f_tok(st['input'])}{R}"
-            f" {C_DIM}OUT:{R} {color}{f_tok(st['output'])}{R}"
-            f" {C_DIM}CLS:{R} {color}{st['calls']:,}{R}"
+            f"    {C_MUT}INP:{R} {color}{f_tok(st['input'])}{R}"
+            f" {C_MUT}OUT:{R} {color}{f_tok(st['output'])}{R}"
+            f" {C_MUT}CLS:{R} {color}{st['calls']:,}{R}"
         )
         if st.get("cache_read", 0) or st.get("cache_write", 0):
             buf.append(
-                f"    {C_DIM}CRD:{R} {color}{f_tok(st.get('cache_read', 0))}{R}"
-                f" {C_DIM}CWR:{R} {color}{f_tok(st.get('cache_write', 0))}{R}"
+                f"    {C_MUT}CRD:{R} {color}{f_tok(st.get('cache_read', 0))}{R}"
+                f" {C_MUT}CWR:{R} {color}{f_tok(st.get('cache_write', 0))}{R}"
             )
 
     buf.append(sep(SW))
@@ -3579,20 +3821,20 @@ def render_stats(cols, rows, period="all"):
     total_cw = sum(m.get("cache_write", 0) for m in models.values())
     total_calls = sum(m["calls"] for m in models.values())
     buf.append(
-        f"{C_WHT}{B}ALL{R}"
-        f" {C_DIM}INP:{R} {C_WHT}{f_tok(total_in)}{R}"
-        f" {C_DIM}OUT:{R} {C_WHT}{f_tok(total_out)}{R}"
-        f" {C_DIM}CLS:{R} {C_WHT}{total_calls:,}{R}"
+        f"{C_LABEL}{B}ALL{R}"
+        f" {C_MUT}INP:{R} {C_WHT}{f_tok(total_in)}{R}"
+        f" {C_MUT}OUT:{R} {C_WHT}{f_tok(total_out)}{R}"
+        f" {C_MUT}CLS:{R} {C_WHT}{total_calls:,}{R}"
     )
     if total_cr or total_cw:
         buf.append(
-            f"    {C_DIM}CRD:{R} {C_WHT}{f_tok(total_cr)}{R}"
-            f" {C_DIM}CWR:{R} {C_WHT}{f_tok(total_cw)}{R}"
+            f"    {C_MUT}CRD:{R} {C_WHT}{f_tok(total_cr)}{R}"
+            f" {C_MUT}CWR:{R} {C_WHT}{f_tok(total_cw)}{R}"
         )
 
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}1{R}{C_DIM}]all [{R}{C_WHT}2{R}{C_DIM}]7d [{R}{C_WHT}3{R}{C_DIM}]30d{R}")
-    buf.append(f"{C_DIM}press any key to close{R}")
+    buf.append(f"{C_DIM}[{R}{C_LABEL}1{R}{C_DIM}]{C_MUT}all [{R}{C_WHT}2{R}{C_DIM}]{C_MUT}7d [{R}{C_WHT}3{R}{C_DIM}]{C_MUT}30d{R}")
+    buf.append(f"{C_MUT}press any key to close{R}")
 
     _window_buf(buf, rows)
     return buf
@@ -3840,30 +4082,30 @@ def render_agents(data, cols, rows, active_only=False):
         info = cached["data"] if cached else None
         if info is None:
             # Scan in flight, nothing cached yet (first open this TTL).
-            buf.append(f"{C_DIM}Scanning subagents…{R}")
+            buf.append(f"{C_MUT}Scanning subagents…{R}")
             buf.append(sep(SW))
-            buf.append(f"{C_DIM}press any key to close{R}")
+            buf.append(f"{C_MUT}press any key to close{R}")
             _window_buf(buf, rows)
             return buf
     if not info or not info["total"]:
-        buf.append(f"{C_DIM}No subagents for this session.{R}")
-        buf.append(f"{C_DIM}(populated when Task or Workflow agents run){R}")
+        buf.append(f"{C_MUT}No subagents for this session.{R}")
+        buf.append(f"{C_MUT}(populated when Task or Workflow agents run){R}")
         buf.append(sep(SW))
-        buf.append(f"{C_DIM}press any key to close{R}")
+        buf.append(f"{C_MUT}press any key to close{R}")
         _window_buf(buf, rows)
         return buf
 
     buf.append(
-        f"{C_GRN}{B}{info['active']}{R}{C_DIM} active{R} "
-        f"{C_DIM}/{R} {C_WHT}{B}{info['total']}{R}{C_DIM} total{R}    "
-        f"{C_DIM}TOK{R} {C_WHT}{f_tok(info['total_tokens'])}{R}"
+        f"{C_GRN}{B}{info['active']}{R}{C_MUT} active{R} "
+        f"{C_DIM}/{R} {C_WHT}{B}{info['total']}{R}{C_MUT} total{R}    "
+        f"{C_MUT}TOK{R} {C_WHT}{f_tok(info['total_tokens'])}{R}"
     )
     buf.append(sep(SW))
 
     shown = [a for a in info["agents"] if a["active"]] if active_only else info["agents"]
     if active_only and not shown:
         idle = info["total"] - info["active"]
-        buf.append(f"{C_DIM}No active agents ({idle} idle hidden).{R}")
+        buf.append(f"{C_MUT}No active agents ({idle} idle hidden).{R}")
     # Emit every agent; _window_buf provides the scrollable window (the old
     # rows-8 cap + "+N more" is gone — the list is now scrollable instead).
     for a in shown:
@@ -3878,13 +4120,13 @@ def render_agents(data, cols, rows, active_only=False):
         # A too-large transcript is skipped for token-summing — show "  >cap"
         # instead of a misleading 0 so the count isn't silently undercounted.
         tok_str = f"{'>cap' if a.get('too_large') else f_tok(a['tokens']):>7}"
-        line = (f"{dot} {C_DIM}{disp}{R}  "
-                f"{C_WHT}{tok_str}{R} {C_DIM}tok{R}   {C_CYN}{tool}{R}")
+        line = (f"{dot} {C_TXT}{disp}{R}  "
+                f"{C_WHT}{tok_str}{R} {C_MUT}tok{R}   {C_LABEL}{tool}{R}")
         buf.append(truncate(line, SW))
 
     buf.append(sep(SW))
-    filt = f"{C_WHT}all{R}{C_DIM}/active" if not active_only else f"{C_DIM}all/{R}{C_WHT}active{R}"
-    buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}] {filt}{C_DIM}   ·   press any key to close{R}")
+    filt = f"{C_WHT}all{R}{C_MUT}/active" if not active_only else f"{C_MUT}all/{R}{C_WHT}active{R}"
+    buf.append(f"{C_DIM}[{R}{C_LABEL}f{R}{C_DIM}]{C_MUT} {filt}{C_MUT}   ·   press any key to close{R}")
     _window_buf(buf, rows)
     return buf
 
@@ -3937,19 +4179,19 @@ def _picker_move(idx, k, n, page):
 
 
 def _picker_line(s, is_cursor, W):
-    tag = f"{C_RED}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
+    tag = f"{C_MUT}stale{R}" if s["stale"] else f"{C_GRN}live{R}"
     nm = _sanitize(s.get("session_name") or s.get("ai_title") or s["id"][:8])
     # Short model: "Opus 4.6 (1M context)" → "OP 4.6" via single source of truth
     code, ver = _model_code_from_label(s.get("model", ""))
     model_short = f"{code} {ver}".strip() if ver else code
-    origin = f" {C_DIM}{s['origin']}{R}" if s.get("source") == "desktop" else ""
+    origin = f" {C_MUT}{s['origin']}{R}" if s.get("source") == "desktop" else ""
     # Cut the name, not the tags, when the row is wider than the terminal.
     tail = _vis_width(f" {model_short}{origin} {tag}")
     nm = _ellipsize(nm, max(1, W - 2 - tail))
     if is_cursor:
-        line = f"{C_CYN}{B}▸{R} {C_WHT}{B}{nm}{R} {C_DIM}{model_short}{R}{origin} {tag}"
+        line = f"{C_LABEL}{B}▸{R} {C_WHT}{B}{nm}{R} {C_MUT}{model_short}{R}{origin} {tag}"
     else:
-        line = f"  {C_FG}{nm}{R} {C_DIM}{model_short}{R}{origin} {tag}"
+        line = f"  {C_TXT}{nm}{R} {C_MUT}{model_short}{R}{origin} {tag}"
     return truncate(line, W)
 
 
@@ -3971,10 +4213,10 @@ def render_picker(sessions, cols, rows, desktop=None, selected=None, loading=Fal
                if loading else
                ["Waiting for Claude Code session...", "Start a session, then come back here."])
         buf = head + [
-            f"{C_DIM}{msg[0]}{R}",
-            f"{C_DIM}{msg[1]}{R}",
+            f"{C_TXT}{msg[0]}{R}",
+            f"{C_MUT}{msg[1]}{R}",
             sep(W),
-            f"{C_DIM}[{R}{C_WHT}q{R}{C_DIM}] quit{R}",
+            f"{C_DIM}[{R}{C_LABEL}q{R}{C_DIM}]{C_MUT} quit{R}",
         ]
         _picker_scroll = 0
         return buf[:max(1, rows)]
@@ -3994,11 +4236,11 @@ def render_picker(sessions, cols, rows, desktop=None, selected=None, loading=Fal
         if n:
             body.append(sep(W))
         # The note is optional context: drop it rather than cut it mid-word.
-        note_s = f"  {C_DIM}{note}{R}" if note and len(title) + 2 + len(note) <= W else ""
+        note_s = f"  {C_MUT}{note}{R}" if note and len(title) + 2 + len(note) <= W else ""
         body.append(truncate(f"{C_WHT}{B}{title}{R}{note_s}", W))
         body.append(sep(W))
         if not group:
-            body.append(f"  {C_DIM}{empty}{R}")
+            body.append(f"  {C_MUT}{empty}{R}")
         for s in group:
             if idx == cur:
                 cursor_line = len(body)
@@ -4007,8 +4249,8 @@ def render_picker(sessions, cols, rows, desktop=None, selected=None, loading=Fal
 
     foot = [
         sep(W),
-        f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}] move   [{R}{C_WHT}enter{R}{C_DIM}] open   "
-        f"[{R}{C_WHT}q{R}{C_DIM}] quit{R}",
+        f"{C_DIM}[{R}{C_LABEL}↑↓ jk{R}{C_DIM}]{C_MUT} move   [{R}{C_WHT}enter{R}{C_DIM}]{C_MUT} open   "
+        f"[{R}{C_WHT}q{R}{C_DIM}]{C_MUT} quit{R}",
     ]
     try:
         rows = max(1, int(rows))
@@ -4029,7 +4271,7 @@ def render_picker(sessions, cols, rows, desktop=None, selected=None, loading=Fal
     win = body[off:off + visible]
     up = "↑" if off > 0 else " "
     dn = "↓" if off + visible < len(body) else " "
-    hint = f"{C_DIM}{up}{dn} {cur + 1}/{len(order)}{R}"
+    hint = f"{C_MUT}{up}{dn} {cur + 1}/{len(order)}{R}"
     buf = head + win + [hint] + foot
     return buf[:rows]
 
@@ -4529,7 +4771,8 @@ def main():
             if sid_path is not None:
                 # Desktop session: staleness follows the transcript's mtime.
                 upd = _snapshot_mtime(last_data)
-                is_stale = upd is not None and (time.time() - upd) > STALE_THRESHOLD
+                is_stale = (upd is not None and (time.time() - upd) > STALE_THRESHOLD
+                            and sid not in live_session_ids())
             else:
                 # Only reload history when file has changed
                 try:
@@ -4540,7 +4783,8 @@ def main():
                     # Always replace (even []) so BRN/CTR don't stay stale when jsonl is cleared/truncated
                     last_hist = load_history(sid)
                     last_hist_mt = hmt
-                is_stale = (time.monotonic() - last_seen) > STALE_THRESHOLD if last_seen else False
+                is_stale = (bool(last_seen) and (time.monotonic() - last_seen) > STALE_THRESHOLD
+                            and sid not in live_session_ids())
             # A-P2-1: release-check trigger lives in the event loop, not in
             # render_frame. _rls_maybe_check is rate-limited internally
             # (_RLS_TTL) so per-tick invocation here is cheap.
@@ -4552,6 +4796,7 @@ def main():
                         show_legend, show_menu, show_cost, stale=is_stale,
                         show_agents=show_agents, agents_active_only=agents_active_only,
                         rate_limits=cached_freshest_rate_limits(last_data.get("rate_limits")),
+                        rate_limits_mtime=cached_rate_limits_mtime(),
                         fable=last_fable,
                     ),
                     cols,

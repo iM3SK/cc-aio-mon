@@ -76,12 +76,12 @@ that refreshes Claude Code's usage cache for FBL (`_maybe_refresh_fable`). On Wi
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~4 500 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~4 800 LOC. Owns the event
 loop, all `render_*` functions, the two-section session picker (CLI /
 desktop app), the desktop-session transcript reader, the model pricing table
 (`_MODELS`), and the daemon worker threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
-otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4700 LOC.
+otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4900 LOC.
 
 **pulse.py** — Daemon thread module. Fetches `status.claude.com/api/v2/summary.json`
 and probes `api.anthropic.com/v1/messages` (any HTTP response counts as liveness).
@@ -104,8 +104,9 @@ safety checks. In-app update
 daemon thread).
 
 **shared.py** — The shared kernel. Single source of truth for: `VERSION`,
-`SCHEMA_VERSION`, `PY_FILES`, `DATA_DIR`, ANSI color palette, `WARN_PCT` /
-`CRIT_PCT` thresholds, `calc_rates()` (BRN/CTR computation from JSONL history),
+`SCHEMA_VERSION`, `PY_FILES`, `DATA_DIR`, the Nord ANSI palette with its role
+aliases and status colors (`level_color()`, `brn_color()`), `WARN_PCT` /
+`CRIT_PCT` / `WARN_BRN` thresholds, `calc_rates()` (BRN/CTR computation from JSONL history),
 `load_history()`, `safe_read()`, `is_safe_dir()`, `ensure_data_dir()`,
 `run_git()` (minimal env whitelist), `acquire_singleton_lock()`,
 `rotate_crash_log()`, `check_syntax_after_pull()`, and `parse_ahead_behind()`.

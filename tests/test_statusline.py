@@ -32,7 +32,10 @@ from shared import (
     C_ORN,
     C_CYN,
     C_DIM,
+    C_LABEL,
+    C_MONEY,
     STALE_DIM_SEC,
+    WARN_BRN,
 )
 
 from statusline import (
@@ -45,7 +48,6 @@ from statusline import (
     seg_cost,
     seg_brn,
     build_line,
-    cpc_base,
     _last_known_rate_limits,
     _last_known_rate_limits_at,
     seg_fable,
@@ -163,9 +165,16 @@ class TestSeg5hl(unittest.TestCase):
         self.assertEqual(vl, _vlen(text))
         self.assertIn("5HL", _ANSI_RE.sub("", text))
 
-    def test_low_usage_yellow(self):
+    def test_low_usage_green(self):
         d = _full_data()
         d["rate_limits"]["five_hour"]["used_percentage"] = 20
+        text, _ = seg_5hl(d)
+        self.assertIn(C_GRN, text)
+        self.assertNotIn(C_YEL, text)
+
+    def test_mid_usage_yellow(self):
+        d = _full_data()
+        d["rate_limits"]["five_hour"]["used_percentage"] = 55
         text, _ = seg_5hl(d)
         self.assertIn(C_YEL, text)
 
@@ -217,7 +226,8 @@ class TestSeg5hl(unittest.TestCase):
         d["rate_limits"]["five_hour"]["used_percentage"] = 20
         for age in (None, 0, STALE_DIM_SEC):
             text, _ = seg_5hl(d, age_s=age)
-            self.assertTrue(text.startswith(C_YEL), age)
+            self.assertTrue(text.startswith(C_LABEL), age)
+            self.assertIn(C_GRN, text, age)
             self.assertNotIn("~", _ANSI_RE.sub("", text))
 
     def test_absent_resets_at_no_arrow(self):
@@ -240,11 +250,13 @@ class TestSeg7dl(unittest.TestCase):
         self.assertEqual(vl, _vlen(text))
         self.assertIn("7DL", _ANSI_RE.sub("", text))
 
-    def test_base_color_yellow(self):
+    def test_low_usage_green(self):
         d = _full_data()
         d["rate_limits"]["seven_day"]["used_percentage"] = 10
         text, _ = seg_7dl(d)
-        self.assertIn(C_YEL, text)  # base is now yellow, not green
+        self.assertTrue(text.startswith(C_LABEL))
+        self.assertIn(C_GRN, text)
+        self.assertNotIn(C_YEL, text)
 
     def test_none(self):
         self.assertIsNone(seg_7dl({}))
@@ -276,9 +288,9 @@ class TestSegCost(unittest.TestCase):
         self.assertIn("CST", _ANSI_RE.sub("", text))
         self.assertIn("1.23", _ANSI_RE.sub("", text))
 
-    def test_uses_orange(self):
+    def test_amount_is_money_colored(self):
         text, _ = seg_cost(_full_data())
-        self.assertIn(C_ORN, text)
+        self.assertIn(C_MONEY, text)
 
     def test_zero_cost(self):
         d = _full_data()
@@ -300,9 +312,13 @@ class TestSegBrn(unittest.TestCase):
         self.assertEqual(vl, _vlen(text))
         self.assertIn("BRN", _ANSI_RE.sub("", text))
 
-    def test_uses_orange(self):
+    def test_below_warn_is_green(self):
         text, _ = seg_brn(0.05)
-        self.assertIn(C_ORN, text)
+        self.assertIn(C_GRN, text)
+
+    def test_above_warn_is_yellow(self):
+        text, _ = seg_brn(WARN_BRN + 0.01)
+        self.assertIn(C_YEL, text)
 
     def test_none(self):
         self.assertIsNone(seg_brn(None))
@@ -723,24 +739,6 @@ class TestLoadHistoryForRates(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # calc_cross_session_costs
 # ---------------------------------------------------------------------------
-class TestCpcBase(unittest.TestCase):
-
-    def test_below_warn_returns_base(self):
-        self.assertEqual(cpc_base(30, C_CYN), C_CYN)
-
-    def test_at_warn_returns_yellow(self):
-        self.assertEqual(cpc_base(50, C_CYN), C_YEL)
-
-    def test_above_warn_returns_yellow(self):
-        self.assertEqual(cpc_base(70, C_GRN), C_YEL)
-
-    def test_at_crit_returns_red(self):
-        self.assertEqual(cpc_base(80, C_CYN), C_RED)
-
-    def test_above_crit_returns_red(self):
-        self.assertEqual(cpc_base(95, C_GRN), C_RED)
-
-
 # ---------------------------------------------------------------------------
 # TestListSessions — monitor.list_sessions
 # ---------------------------------------------------------------------------
@@ -1023,7 +1021,8 @@ class TestSegFable(unittest.TestCase):
     def test_keeps_color_until_stale_dim_threshold(self):
         # Same threshold as 5HL: 20 min old is still a live-looking number.
         text, _ = seg_fable(_fbl(age_s=1200), now=_NOW, ttl=300)
-        self.assertTrue(text.startswith(C_YEL))
+        self.assertTrue(text.startswith(C_LABEL))
+        self.assertIn(C_GRN, text)
         self.assertNotIn("~", _ANSI_RE.sub("", text))
 
     def test_threshold_colors(self):

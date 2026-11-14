@@ -18,9 +18,14 @@ Snapshot schema (keys may be None during warm-up or on errors):
     verdict         str     human-readable verdict line
     level           str     "ok" | "degraded" | "bad" | "error"
     reason          str     short reason string
-    indicator       str     none|minor|major|critical|maintenance; None on error
-    incidents       list    [{"name", "impact", "affected_models": [..]}]
-    components      list    [{"name", "status"}]
+    indicator       str     page-wide none|minor|major|critical|maintenance; None on error
+    scope_indicator str     the same scale for the coding components only (Claude API,
+                            Claude Code) — what the score uses; None on error
+    incidents       list    [{"name", "impact", "status", "components": [..],
+                              "relevant", "affected_models": [..]}]
+    components      list    [{"name", "status", "relevant"}]
+    maintenances    list    [{"name", "status", "scheduled_for", "scheduled_until",
+                              "components": [..], "relevant"}]
     latency_ms      float   last HTTPS probe round-trip; None on timeout
     latency_p50_ms  int     median latency over recent window; None if <3 samples
     latency_p95_ms  int     p95 latency over recent window; None if <3 samples
@@ -40,7 +45,7 @@ from collections import deque
 from typing import List, Optional, TypedDict
 
 from shared import (DATA_DIR, MAX_FILE_SIZE, SECONDS_1D, atomic_write_text,
-                    ensure_data_dir, safe_read, VERSION)
+                    ensure_data_dir, iso_to_epoch, safe_read, VERSION)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -96,6 +101,22 @@ _IMPACT_DEDUCT = {
     "critical": 60,
 }
 
+# Components coding with Claude Code depends on, matched as a case-insensitive
+# name prefix ("Claude API (api.anthropic.com)", "Claude Code"). The verdict is
+# scored on these only; other products (claude.ai, Console, cloud platforms)
+# are shown but do not lower it.
+CODING_COMPONENTS = ("claude api", "claude code")
+
+# Statuspage component status → the indicator scale compute_score uses.
+_COMPONENT_INDICATOR = {
+    "operational": "none",
+    "under_maintenance": "maintenance",
+    "degraded_performance": "minor",
+    "partial_outage": "major",
+    "major_outage": "critical",
+}
+_INDICATOR_RANK = ("none", "maintenance", "minor", "major", "critical")
+
 # Score weights
 _W_INDICATOR = 0.50
 _W_INCIDENTS = 0.30
@@ -117,8 +138,10 @@ class PulseSnapshot(TypedDict):
     level: str
     reason: str
     indicator: Optional[str]
+    scope_indicator: Optional[str]
     incidents: List[dict]
     components: List[dict]
+    maintenances: List[dict]
     latency_ms: Optional[float]
     latency_p50_ms: Optional[int]
     latency_p95_ms: Optional[int]
@@ -134,8 +157,10 @@ _snapshot: PulseSnapshot = {
     "level": "error",
     "reason": "no data yet",
     "indicator": None,
+    "scope_indicator": None,
     "incidents": [],
     "components": [],
+    "maintenances": [],
     "latency_ms": None,
     "latency_p50_ms": None,
     "latency_p95_ms": None,
@@ -179,6 +204,26 @@ def indicator_label(indicator: Optional[str]) -> str:
         "critical": "critical outage",
     }
     return m.get(indicator or "", "unknown")
+
+
+def is_coding_component(name) -> bool:
+    """True for a status-page component that coding depends on."""
+    n = str(name or "").strip().lower()
+    return any(n.startswith(prefix) for prefix in CODING_COMPONENTS)
+
+
+def scope_indicator(components, page_indicator):
+    """Worst indicator among the coding components. Falls back to the page-wide
+    indicator when the summary lists none of them (renamed products, schema
+    change). An unknown component status counts as minor."""
+    worst = None
+    for c in components or []:
+        if not isinstance(c, dict) or not c.get("relevant"):
+            continue
+        ind = _COMPONENT_INDICATOR.get(c.get("status"), "minor")
+        if worst is None or _INDICATOR_RANK.index(ind) > _INDICATOR_RANK.index(worst):
+            worst = ind
+    return worst if worst is not None else page_indicator
 
 
 def _score_to_verdict(score):
@@ -254,8 +299,12 @@ def compute_score(raw: dict) -> dict:
             "reason": err,
         }
 
-    indicator = raw.get("indicator") or "none"
-    incidents = raw.get("incidents") or []
+    # Score the coding components only; raw dicts without scope data (older
+    # callers) score every incident against the page-wide indicator.
+    indicator = raw.get("scope_indicator") or raw.get("indicator") or "none"
+    all_incidents = raw.get("incidents") or []
+    incidents = [i for i in all_incidents if not isinstance(i, dict) or i.get("relevant", True)]
+    elsewhere = len(all_incidents) - len(incidents)
     latency_ms = raw.get("latency_ms")
 
     ind_score = _INDICATOR_SCORE.get(indicator, 50)
@@ -284,6 +333,8 @@ def compute_score(raw: dict) -> dict:
         reasons.append(f"status: {indicator_label(indicator)}")
     if incidents:
         reasons.append(f"{len(incidents)} active incident(s)")
+    if elsewhere:
+        reasons.append(f"{elsewhere} elsewhere, not scored")
     if latency_ms is None:
         reasons.append("API ping failed")
     elif latency_ms >= 2000:
@@ -411,19 +462,51 @@ def _extract(summary):
             continue
         name = str(c.get("name") or "?")[:40]
         cstatus = str(c.get("status") or "unknown")[:24]
-        components.append({"name": name, "status": cstatus})
+        components.append({"name": name, "status": cstatus, "relevant": is_coding_component(name)})
     incidents = []
     for inc in summary.get("incidents") or []:
         if not isinstance(inc, dict):
             continue
         name = str(inc.get("name") or "?")[:80]
         impact = str(inc.get("impact") or "minor")[:16]
+        comps = _component_names(inc)
         incidents.append({
             "name": name,
             "impact": impact,
+            "status": str(inc.get("status") or "")[:24],
+            "components": comps,
+            # No component listed = unknown scope: scored (conservative).
+            "relevant": not comps or any(is_coding_component(c) for c in comps),
             "affected_models": _tag_models_from_incident(inc),
         })
     return indicator, components, incidents
+
+
+def _component_names(item):
+    return [str(c.get("name") or "?")[:40]
+            for c in (item.get("components") or []) if isinstance(c, dict)]
+
+
+def _extract_maintenances(summary):
+    """Scheduled and in-progress maintenance windows from summary.json. Shown,
+    not scored: an active window already marks its components
+    under_maintenance."""
+    out = []
+    if not isinstance(summary, dict):
+        return out
+    for m in summary.get("scheduled_maintenances") or []:
+        if not isinstance(m, dict):
+            continue
+        comps = _component_names(m)
+        out.append({
+            "name": str(m.get("name") or "?")[:80],
+            "status": str(m.get("status") or "")[:24],
+            "scheduled_for": iso_to_epoch(m.get("scheduled_for")),
+            "scheduled_until": iso_to_epoch(m.get("scheduled_until")),
+            "components": comps,
+            "relevant": not comps or any(is_coding_component(c) for c in comps),
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -532,8 +615,10 @@ def _refresh_once():
     if fetch_err:
         raw = {
             "indicator": None,
+            "scope_indicator": None,
             "incidents": [],
             "components": [],
+            "maintenances": [],
             "latency_ms": latency,
             "error": fetch_err,
         }
@@ -543,16 +628,20 @@ def _refresh_once():
         except (KeyError, TypeError, ValueError) as e:
             raw = {
                 "indicator": None,
+                "scope_indicator": None,
                 "incidents": [],
                 "components": [],
+                "maintenances": [],
                 "latency_ms": latency,
                 "error": f"parse: {type(e).__name__}",
             }
         else:
             raw = {
                 "indicator": indicator,
+                "scope_indicator": scope_indicator(components, indicator),
                 "incidents": incidents,
                 "components": components,
+                "maintenances": _extract_maintenances(summary),
                 "latency_ms": latency,
                 "error": None,
             }
@@ -586,8 +675,10 @@ def _refresh_once():
         "level": level,
         "reason": scored["reason"],
         "indicator": raw["indicator"],
+        "scope_indicator": raw["scope_indicator"],
         "incidents": raw["incidents"],
         "components": raw["components"],
+        "maintenances": raw["maintenances"],
         "latency_ms": raw["latency_ms"],
         "latency_p50_ms": p50,
         "latency_p95_ms": p95,
@@ -617,8 +708,10 @@ def _crash_snapshot() -> PulseSnapshot:
         "level": "error",
         "reason": "worker crashed",
         "indicator": None,
+        "scope_indicator": None,
         "incidents": [],
         "components": [],
+        "maintenances": [],
         "latency_ms": None,
         "latency_p50_ms": None,
         "latency_p95_ms": None,

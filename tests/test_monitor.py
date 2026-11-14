@@ -35,6 +35,9 @@ from shared import (
     C_ORN,
     C_CYN,
     C_DIM,
+    C_MUT,
+    C_LABEL,
+    C_MONEY,
 )
 
 import monitor
@@ -47,8 +50,6 @@ from monitor import (
     f_dur,
     f_cd,
     _num,
-    _limit_color,
-    _reset_color,
     collect_warnings,
     truncate,
     mkbar,
@@ -75,9 +76,11 @@ from monitor import (
     _rls_check_worker,
     _rls_maybe_check,
     _RLS_TTL,
-    spin_session,
+    breath_dot,
+    SESSION_DOT,
+    _BREATH_DOTS,
+    char_width,
     spin_rls,
-    _SPIN_SESSION,
     _SPIN_RLS,
     render_update_modal,
     list_sessions,
@@ -202,40 +205,176 @@ class TestFitBufHeight(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _limit_color / _reset_color (monitor)
+# Dashboard color roles — status follows the value, labels/money/info keep one role
 # ---------------------------------------------------------------------------
-class TestLimitColor(unittest.TestCase):
+class TestAuditRemediation20261114(unittest.TestCase):
+    """AUD-20261114-cc-aio-mon-data-sources: F-001, F-003, F-004, N-001."""
 
-    def test_low_usage_yellow(self):
-        self.assertEqual(_limit_color(20), C_YEL)
+    def _frame(self, data, **kw):
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            return monitor.render_frame(data, [], 80, 60, **kw)
 
-    def test_mid_usage_yellow(self):
-        self.assertEqual(_limit_color(55), C_YEL)
+    def _cost(self, data):
+        with patch.object(monitor, "_aggregate_session_cost", return_value=None):
+            return _strip_ansi(monitor.render_cost_breakdown(data, [], 70, 60))
 
-    def test_high_usage_red(self):
-        self.assertEqual(_limit_color(85), C_RED)
+    # F-001 — last-request estimate uses the long-prompt tier and fast mode
+    def test_last_request_uses_long_prompt_tier(self):
+        d = {"model": {"id": "claude-haiku-5-5", "display_name": "Haiku 5.5"},
+             "context_window": {"current_usage": {"input_tokens": 1000, "output_tokens": 2000,
+                                                  "cache_read_input_tokens": 150000,
+                                                  "cache_creation_input_tokens": 0}}}
+        lines = self._cost(d)
+        self.assertIn("CRD 150k ~0.0075 $", lines)  # 150k x $0.05/M long tier
+        self.assertIn("OUT 2.0k ~0.0050 $", lines)
+
+    def test_last_request_short_prompt_keeps_standard_tier(self):
+        d = {"model": {"id": "claude-haiku-5-5", "display_name": "Haiku 5.5"},
+             "context_window": {"current_usage": {"input_tokens": 1000, "output_tokens": 2000,
+                                                  "cache_read_input_tokens": 50000,
+                                                  "cache_creation_input_tokens": 0}}}
+        self.assertIn("OUT 2.0k ~0.0010 $", self._cost(d))
+
+    def test_last_request_fast_mode(self):
+        base = {"model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"},
+                "context_window": {"current_usage": {"output_tokens": 2000}}}
+        fast = self._cost(dict(base, fast_mode=True))
+        self.assertTrue(any(ln.startswith("LAST REQUEST (est., fast rates)") for ln in fast))
+        self.assertIn("OUT 2.0k ~0.08 $", fast)
+        std = self._cost(dict(base, fast_mode=False))
+        self.assertTrue(any(ln.startswith("LAST REQUEST (est.)") for ln in std))
+        self.assertIn("OUT 2.0k ~0.04 $", std)
+        unknown = self._cost(base)
+        self.assertTrue(any(ln.startswith("LAST REQUEST (est., std rates)") for ln in unknown))
+
+    # F-003 — old rate limits are dimmed and carry their age
+    def _rl_line(self, buf, label):
+        return next(ln for ln in buf if _ANSI_RE.sub("", ln).startswith(label))
+
+    def test_old_rate_limits_dimmed_with_age(self):
+        d = _full_data()
+        buf = self._frame(d, rate_limits=d["rate_limits"], rate_limits_mtime=time.time() - 2 * 3600)
+        line = self._rl_line(buf, "7DL")
+        self.assertIn("(~2h old)", _ANSI_RE.sub("", line))
+        self.assertNotIn(C_GRN, line)
+
+    def test_fresh_rate_limits_untagged(self):
+        d = _full_data()
+        buf = self._frame(d, rate_limits=d["rate_limits"], rate_limits_mtime=time.time() - 60)
+        line = self._rl_line(buf, "5HL")
+        self.assertNotIn("old)", _ANSI_RE.sub("", line))
+        self.assertIn(C_GRN, line)
+
+    def test_rate_limits_mtime_follows_scan(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = pathlib.Path(td) / "abc-1.json"
+            p.write_text(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 5}}}), encoding="utf-8")
+            os.utime(p, (time.time() - 7200, time.time() - 7200))
+            orig = (dict(monitor._rl_fresh_cache), dict(monitor._rl_last_good))
+            try:
+                monitor._rl_fresh_cache.update({"t": -1.0, "rl": None, "mt": None})
+                monitor._rl_last_good.update({"rl": None, "mt": None})
+                with patch.object(monitor, "DATA_DIR", pathlib.Path(td)):
+                    monitor.cached_freshest_rate_limits(None, ttl=0)
+                self.assertAlmostEqual(time.time() - monitor.cached_rate_limits_mtime(), 7200, delta=5)
+            finally:
+                monitor._rl_fresh_cache.clear(); monitor._rl_fresh_cache.update(orig[0])
+                monitor._rl_last_good.clear(); monitor._rl_last_good.update(orig[1])
+
+    def test_age_format(self):
+        self.assertEqual([monitor._f_age(x) for x in (300, 13 * 3600, 3 * 86400)], ["5m", "13h", "3d"])
+
+    # N-001 — CHR counts uncached input like Claude Code's hit ratio
+    def test_chr_counts_uncached_input(self):
+        cw = {"used_percentage": 10, "context_window_size": 1000000,
+              "current_usage": {"input_tokens": 50000, "cache_read_input_tokens": 50000,
+                                "cache_creation_input_tokens": 0}}
+        line = _ANSI_RE.sub("", self._rl_line(self._frame(_full_data(context_window=cw)), "CHR"))
+        self.assertTrue(line.endswith("50.0%"), line)
+
+    # F-004.1 — fast mode, thinking off and cache misses are shown
+    def test_settings_flags_and_drop_order(self):
+        d = _full_data(fast_mode=True, thinking={"enabled": False}, effort={"level": "high"})
+        self.assertEqual(monitor._settings_flags(d), ["fast", "thinking off"])
+        line = _ANSI_RE.sub("", monitor._settings_line("Opus 5.5", "high", "", 80, lambda x: x, ["fast", "thinking off"]))
+        self.assertEqual(line, "Opus 5.5 │ high │ fast │ thinking off")
+        narrow = _ANSI_RE.sub("", monitor._settings_line("Opus 5.5", "high", "", 24, lambda x: x, ["fast", "thinking off"]))
+        self.assertEqual(narrow, "Opus 5.5 │ high │ fast")
+        self.assertEqual(monitor._settings_flags(_full_data(thinking={"enabled": True})), [])
+
+    def test_cache_miss_tag(self):
+        tag = _ANSI_RE.sub("", monitor._cache_miss_tag(
+            {"misses": 2, "last_miss_cause": {"causes": ["ttl_expired_5m"]}}, lambda x: x))
+        self.assertEqual(tag, " MISS: 2 ttl_expired_5m")
+        self.assertEqual(monitor._cache_miss_tag({"misses": 0}, lambda x: x), "")
+        self.assertEqual(monitor._cache_miss_tag(None, lambda x: x), "")
+
+    # F-004.2 — Claude Code's session registry keeps an open session live
+    def test_live_session_ids_from_registry(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            (d / "1.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": "live-1"}), encoding="utf-8")
+            (d / "2.json").write_text(json.dumps({"pid": 999999999, "sessionId": "gone-2"}), encoding="utf-8")
+            (d / "3.json").write_text("not json", encoding="utf-8")
+            with patch.object(monitor, "_SESSION_REGISTRY_DIR", d), \
+                    patch.dict(monitor._live_cache, {"t": -1.0, "ids": frozenset()}):
+                self.assertEqual(monitor.live_session_ids(ttl=0), frozenset({"live-1"}))
+
+    def test_pid_alive(self):
+        self.assertTrue(monitor._pid_alive(os.getpid()))
+        self.assertFalse(monitor._pid_alive(0))
+        self.assertFalse(monitor._pid_alive("123"))
+        self.assertFalse(monitor._pid_alive(True))
 
 
-class TestResetColor(unittest.TestCase):
+class TestDashboardColorRoles(unittest.TestCase):
 
-    def test_lots_of_time_red(self):
-        # Reset in 4h out of 5h window = 80% remaining → red (far from reset)
-        self.assertEqual(_reset_color(time.time() + 14400, 18000), C_RED)
+    def _frame(self, stale=False, **overrides):
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            return monitor.render_frame(_full_data(**overrides), [], 80, 60, stale=stale)
 
-    def test_some_time_yellow(self):
-        # Reset in 1.5h out of 5h window = 30% remaining → yellow
-        self.assertEqual(_reset_color(time.time() + 5400, 18000), C_YEL)
+    def _line(self, buf, prefix):
+        return next(ln for ln in buf if _ANSI_RE.sub("", ln).startswith(prefix))
 
-    def test_little_time_green(self):
-        # Reset in 15min out of 5h window = 5% remaining → green (close to reset)
-        self.assertEqual(_reset_color(time.time() + 900, 18000), C_GRN)
+    def test_ctx_bar_follows_thresholds(self):
+        for pct, color in ((20, C_GRN), (60, C_YEL), (90, C_RED)):
+            cw = {"used_percentage": pct, "context_window_size": 200000}
+            line = self._line(self._frame(context_window=cw), "CTX")
+            self.assertTrue(line.startswith(C_LABEL), pct)
+            self.assertIn(color, line, pct)
 
-    def test_just_reset_green(self):
-        # Reset epoch in the past → just reset
-        self.assertEqual(_reset_color(time.time() - 10, 18000), C_GRN)
+    def test_low_rate_limit_is_green_not_yellow(self):
+        line = self._line(self._frame(), "5HL")
+        self.assertIn(C_GRN, line)
+        self.assertNotIn(C_YEL, line)
 
-    def test_no_data_dim(self):
-        self.assertEqual(_reset_color(0, 18000), C_DIM)
+    def test_low_cache_hit_rate_is_red(self):
+        cw = {"used_percentage": 42, "context_window_size": 200000,
+              "current_usage": {"cache_read_input_tokens": 1000,
+                                "cache_creation_input_tokens": 9000}}
+        line = self._line(self._frame(context_window=cw), "CHR")
+        self.assertIn(C_RED, line)
+
+    def test_high_cache_hit_rate_is_green(self):
+        cw = {"used_percentage": 42, "context_window_size": 200000,
+              "current_usage": {"cache_read_input_tokens": 9000,
+                                "cache_creation_input_tokens": 1000}}
+        line = self._line(self._frame(context_window=cw), "CHR")
+        self.assertIn(C_GRN, line)
+
+    def test_cost_is_money_colored(self):
+        buf = self._frame()
+        self.assertIn(C_MONEY, self._line(buf, "CST ["))
+        self.assertIn(C_MONEY, self._line(buf, "    CST:"))
+
+    def test_lines_changed_carry_signs(self):
+        line = _ANSI_RE.sub("", self._line(self._frame(), "LNS:"))
+        self.assertEqual(line, "LNS: +150 -30")
+
+    def test_stale_frame_dims_placeholders(self):
+        line = self._line(self._frame(stale=True), "    RTE: collecting")
+        self.assertIn(C_DIM, line)
+        self.assertNotIn(C_MUT, line)
 
 
 # ---------------------------------------------------------------------------
@@ -1477,7 +1616,7 @@ class TestRenderLegend(unittest.TestCase):
             self.assertIn(label, plain)
 
     def test_contains_usage_stats_section(self):
-        buf = render_legend(80, 60)
+        buf = render_legend(80, 200)
         plain = _ANSI_RE.sub("", "\n".join(buf))
         for label in ["SES", "DAY", "STK", "LSS", "PEAK"]:
             self.assertIn(label, plain)
@@ -2282,32 +2421,44 @@ class TestRlsMaybeCheck(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # TestUpdate — update.py
 # ---------------------------------------------------------------------------
-class TestSpinSession(unittest.TestCase):
+class TestBreathDot(unittest.TestCase):
 
-    def setUp(self):
-        import monitor
-        self._orig_idx = monitor._spin_session_idx
-        self._orig_last = monitor._spin_session_last
+    def test_cycle_starts_small_and_dark(self):
+        self.assertEqual(breath_dot(0.0), ("[38;2;72;86;66m", "·"))
 
-    def tearDown(self):
-        import monitor
-        monitor._spin_session_idx = self._orig_idx
-        monitor._spin_session_last = self._orig_last
+    def test_cycle_peak_is_large_palette_green(self):
+        self.assertEqual(breath_dot(1.0), (C_GRN, "●"))
 
-    def test_returns_valid_char(self):
-        result = spin_session()
-        self.assertIn(result, _SPIN_SESSION)
+    def test_grows_then_shrinks(self):
+        sizes = [_BREATH_DOTS.index(breath_dot(t / 10)[1]) for t in range(21)]
+        peak = sizes.index(max(sizes))
+        self.assertEqual(sizes[:peak + 1], sorted(sizes[:peak + 1]))
+        self.assertEqual(sizes[peak:], sorted(sizes[peak:], reverse=True))
+        self.assertEqual(set(sizes), set(range(len(_BREATH_DOTS))))
 
-    def test_advances(self):
-        import monitor
-        monitor._spin_session_last = 0.0
-        monitor._spin_session_idx = 0
-        first = spin_session()
-        idx_after_first = monitor._spin_session_idx
-        monitor._spin_session_last = 0.0
-        spin_session()
-        idx_after_second = monitor._spin_session_idx
-        self.assertGreater(idx_after_second, idx_after_first)
+    def test_repeats_every_two_seconds(self):
+        self.assertEqual(breath_dot(0.5), breath_dot(2.5))
+
+    def test_default_uses_monotonic_clock(self):
+        with patch("monitor.time.monotonic", return_value=1.0):
+            self.assertEqual(breath_dot(), (C_GRN, "●"))
+
+    def test_every_size_is_one_cell(self):
+        for glyph in _BREATH_DOTS:
+            self.assertEqual(char_width(glyph), 1, glyph)
+
+    def _status_line(self, stale):
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            lines = _strip_ansi(render_frame(_full_data(), [], 70, 40, stale=stale))
+        return lines[3]  # separator, title, settings line, session line
+
+    def test_active_line_is_dot_and_name_only(self):
+        line = self._status_line(False)
+        self.assertIn(line[0], _BREATH_DOTS)
+        self.assertEqual(line[1:], " default")
+
+    def test_stale_line_keeps_inactive_label(self):
+        self.assertTrue(self._status_line(True).startswith(f"{SESSION_DOT} Session Inactive"))
 
 
 # ---------------------------------------------------------------------------
@@ -2419,7 +2570,7 @@ import json
 
 
 # ---------------------------------------------------------------------------
-# TestCpcBase — statusline.cpc_base
+# TestListSessions — monitor.list_sessions
 # ---------------------------------------------------------------------------
 class TestListSessions(unittest.TestCase):
 
@@ -3775,9 +3926,13 @@ class TestAuditRegressionV1105(unittest.TestCase):
         # Raised 4500 → 4700: the 2026-11 audit fixes add per-request usage
         # dedup, current-model pricing tiers, the two-pass desktop scan and
         # narrow-terminal fitting (~60 lines) to the same single consumer.
+        # Raised 4700 → 4900: the Nord color roles (legend COLORS section,
+        # hotkey chip), the session settings line, the Pulse coding scope with
+        # scheduled maintenance, rate-limit age marking and the Claude Code
+        # session registry add ~250 lines, all rendered or read only here.
         self.assertLess(
-            loc, 4700,
-            f"monitor.py is {loc} LOC, past the 4700-line maintainability trigger. "
+            loc, 4900,
+            f"monitor.py is {loc} LOC, past the 4900-line maintainability trigger. "
             f"Reduce the file or raise this trigger with a technical rationale."
         )
 
@@ -5433,7 +5588,7 @@ class TestDesktopSessions(unittest.TestCase):
         data["session_name"] = "A very long desktop session name ľščťž"
         with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
             lines = _strip_ansi(render_frame(data, hist, 40, 60))
-        status = next(ln for ln in lines if "Session" in ln)
+        status = next(ln for ln in lines if "A very long" in ln)
         self.assertTrue(status.endswith("est."), status)   # short tag kept
         self.assertIn("…", status)                          # name cut instead
         self.assertLessEqual(monitor._vis_width(status), 40)
@@ -5444,6 +5599,52 @@ class TestDesktopSessions(unittest.TestCase):
             plain = _ANSI_RE.sub("", "\n".join(render_frame(_full_data(), [], 100, 60)))
         self.assertNotIn("desktop app", plain)
         self.assertNotIn("est.", plain)
+
+    @staticmethod
+    def _with(rec_json, **extra):
+        rec = json.loads(rec_json)
+        rec.update(extra)
+        return json.dumps(rec)
+
+    def _settings_transcript(self, sid):
+        return self._write(sid, [
+            _desk_rec("user", permissionMode="default"),
+            self._with(_desk_assistant("m1", "2026-11-13T20:00:00.000Z", input_tokens=5), effort="high"),
+            _desk_rec("user", permissionMode="bypassPermissions"),
+            self._with(_desk_assistant("m2", "2026-11-13T20:01:00.000Z", input_tokens=5), effort="xhigh"),
+            # Subagent records inside the main transcript do not change the session.
+            _desk_rec("user", permissionMode="plan", isSidechain=True),
+            self._with(_desk_assistant("m3", "2026-11-13T20:02:00.000Z", input_tokens=5),
+                       effort="low", isSidechain=True),
+        ])
+
+    def test_desktop_snapshot_carries_effort_and_permission_mode(self):
+        p = self._settings_transcript("desk-3")
+        data, _ = monitor.load_desktop_state("desk-3", str(p))
+        self.assertEqual(data["effort"], {"level": "xhigh"})
+        self.assertEqual(data["permission_mode"], "bypassPermissions")
+
+    def test_cli_settings_fill_permission_mode_from_transcript(self):
+        p = self._settings_transcript("cli-3")
+        monitor._AI_TITLE_CACHE.clear()
+        data = {"transcript_path": str(p), "effort": {"level": "medium"}}
+        # The statusline effort wins; the permission mode comes from the transcript.
+        self.assertEqual(monitor._session_settings(data), ("medium", "bypassPermissions"))
+        self.assertEqual(monitor._session_settings({}), ("", ""))
+
+    def test_header_title_and_settings_line(self):
+        p = self._settings_transcript("desk-4")
+        data, hist = monitor.load_desktop_state("desk-4", str(p))
+        with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
+            wide = render_frame(data, hist, 80, 60)
+            narrow = _strip_ansi(render_frame(data, hist, 20, 60))
+            tiny = _strip_ansi(render_frame(data, hist, 12, 60))
+        plain = _strip_ansi(wide)
+        self.assertEqual(plain[1].rstrip(), f"CC AIO MON {monitor.VERSION}")
+        self.assertEqual(plain[2], "Opus 5.5 │ xhigh │ bypass")
+        self.assertIn(f"{monitor.C_ORN}bypass", wide[2])
+        self.assertEqual(narrow[2], "Opus 5.5 │ xhigh")
+        self.assertEqual(tiny[2], "Opus 5.5")
 
 
 class TestTwoSectionPicker(unittest.TestCase):
