@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.19.1 — 2026-11-14
+
+**Fixes — narrow terminals:**
+- **The age tag of a rate-limit row stays visible.** `(~14h old)`,
+  `(stale 83m)` and `(expired)` now follow the reset countdown on the short
+  `RST:` line. After the full-width bar a narrow terminal cut them off
+  (`(~14h ol`).
+- **The Pulse modal shortens names instead of cutting statuses.** Long
+  incident and maintenance titles and their detail lines end in `…`, so the
+  affected-model tag stays visible. The component list sizes its name column
+  to the longest name, and a status such as `degraded performance` is always
+  shown whole.
+
+**Documentation:**
+- **The legend and the README explain the blinking warnings under the session
+  line:** `CTF <Nm` (context full in under 30 minutes at the current CTR) and
+  `BRN` (burn rate above `CLAUDE_WARN_BRN`). The README's CHR row gives the
+  formula used since v1.19.0, cache read / (input + cache read + cache write).
+
+**Tests:** 987 passing (+2).
+
 ## v1.19.0 — 2026-11-14
 
 **Header and session line:**

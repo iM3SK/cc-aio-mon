@@ -1357,10 +1357,13 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             if expired:
                 pct = 0.0
             lc = C_DIM if dim else c(level_color(pct))
+            # The tag rides on the short RST line: after the full-width bar it
+            # was cut off on a narrow terminal ("(~14h ol").
             expired_tag = f"  {C_MUT}(expired){R}" if expired else tag
-            buf.append(f"{c(C_LABEL)}{B}{label}{R} {mkbar(pct, lc)}{expired_tag}")
+            buf.append(f"{c(C_LABEL)}{B}{label}{R} {mkbar(pct, lc)}")
             rc = c(C_WHT) if resets > 0 else C_DIM
-            buf.append(f"    {c(C_MUT)}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}")
+            buf.append(f"    {c(C_MUT)}RST:{R} {rc}{f_cd(resets if resets > 0 else None)}{R}"
+                       f"{expired_tag}")
             return True
 
         src = dict(rl) if isinstance(rl, dict) else {}
@@ -1508,6 +1511,10 @@ def render_legend(cols, rows):
     section("DASHBOARD")
     buf.append(f"{C_MUT} model │ effort │ fast │ thinking off │ permission mode  under the title; {R}"
                f"{C_ORN}bypass{R}{C_MUT} = permission prompts skipped{R}")
+    sub("Warnings blink under the session line:")
+    buf.append(f"{C_YEL}CTF <Nm{R} {C_TXT}Context full in N min at the current CTR{R} "
+               f"{C_MUT}(below 30 min){R}")
+    buf.append(f"{C_YEL}BRN{R} {C_TXT}Burn rate above {WARN_BRN:g} $/min{R}")
     code(("APR", "API Ratio"))
     sub("DUR  Duration - API  API Time")
     code(("CHR", "Cache Hit Rate"))
@@ -1989,12 +1996,16 @@ def render_pulse_modal(cols, rows):
             ic = (C_RED if impact in ("major", "critical") else C_YEL) if relevant else C_MUT
             models = inc.get("affected_models") or []
             tag = ""
+            tag_w = 0
             if models and relevant:
                 tag = f" {C_DIM}[{R}{C_ORN}{','.join(models)}{R}{C_DIM}]{R}"
+                tag_w = _vis_width(_ANSI_RE.sub("", tag))
+            # Shorten the title with '…' so a narrow terminal keeps the model tag.
+            name = _ellipsize(name, SW - 5 - tag_w)
             buf.append(truncate(f"{ic}{impact.upper()[:4]:<4}{R} {C_WHT if relevant else C_MUT}{name}{R}{tag}", SW))
             meta = [_sanitize(x) for x in [inc.get("status") or ""] + list(inc.get("components") or []) if x]
             if meta:
-                buf.append(truncate(f"     {C_MUT}{', '.join(meta)}{R}", SW))
+                buf.append(f"     {C_MUT}{_ellipsize(', '.join(meta), SW - 5)}{R}")
 
     # Scheduled maintenance (shown, not scored — an active window already marks
     # its components under_maintenance)
@@ -2007,10 +2018,12 @@ def render_pulse_modal(cols, rows):
         for m in maintenances[:3]:
             relevant = m.get("relevant", True)
             when = _pulse_window(m.get("scheduled_for"), m.get("scheduled_until"))
-            buf.append(truncate(f"{C_INFO if relevant else C_MUT}{_sanitize(m.get('status') or '?')}{R}"
-                                f" {C_TXT if relevant else C_MUT}{_sanitize(m.get('name') or '?')}{R}", SW))
+            mstatus = _sanitize(m.get("status") or "?")
+            mname = _ellipsize(_sanitize(m.get("name") or "?"), SW - _vis_width(mstatus) - 1)
+            buf.append(truncate(f"{C_INFO if relevant else C_MUT}{mstatus}{R}"
+                                f" {C_TXT if relevant else C_MUT}{mname}{R}", SW))
             meta = [when] + [_sanitize(x) for x in (m.get("components") or [])]
-            buf.append(truncate(f"     {C_MUT}{', '.join(x for x in meta if x)}{R}", SW))
+            buf.append(f"     {C_MUT}{_ellipsize(', '.join(x for x in meta if x), SW - 5)}{R}")
 
     # Components
     components = snap.get("components") or []
@@ -2020,16 +2033,23 @@ def render_pulse_modal(cols, rows):
         ch_pad = max(0, SW - len(ch))
         buf.append(f"{BG_BAR}{C_WHT}{B}{ch}{R}{BG_BAR}{' ' * ch_pad}{R}")
         buf.append(sep(SW))
-        # Longest possible status label ("partial outage" = 14). Reserve sep + label.
-        name_w = max(18, SW - 16)
+        rows_c = []
         for c in components[:10]:
             name = _sanitize(c.get("name") or "?")
             # Strip parenthetical suffixes (e.g. "Claude API (api.anthropic.com)" → "Claude API")
             name = re.sub(r"\s*\([^)]*\)?\s*$", "", name).strip() or name
             cstatus = _sanitize(c.get("status") or "unknown")
+            rows_c.append((name, cstatus, C_WHT if c.get("relevant") else C_TXT))
+        # The status column starts after the longest name, or earlier when the
+        # longest status ("degraded performance" = 20) would not fit; names
+        # then end in '…' instead of the status being cut off.
+        status_w = max(_vis_width(s.replace("_", " ")) for _, s, _ in rows_c)
+        name_w = max(8, min(max(_vis_width(n) for n, _, _ in rows_c), SW - status_w - 1))
+        for name, cstatus, nc in rows_c:
             cc = _PULSE_COMPONENT_COLOR.get(cstatus, C_DIM)
-            nc = C_WHT if c.get("relevant") else C_TXT
-            buf.append(f"{nc}{name[:name_w]:<{name_w}}{R} {cc}{cstatus.replace('_', ' ')}{R}")
+            shown = _ellipsize(name, name_w)
+            pad = " " * max(0, name_w - _vis_width(shown))
+            buf.append(f"{nc}{shown}{pad}{R} {cc}{cstatus.replace('_', ' ')}{R}")
 
     buf.append(sep(SW))
     footer = "source: status.claude.com + api.anthropic.com ping"

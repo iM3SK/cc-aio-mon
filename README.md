@@ -76,7 +76,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Two-tier architecture** — `statusline.py` (single-line status bar, triggered per Claude Code event) + `monitor.py` (fullscreen TUI, polls temp files independently).
 - **Temp file IPC** — atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/`. No sockets, no databases, no shared memory. Works across terminal sessions.
 - **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, FBL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/FBL/7DL segments also show a reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
-- **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
+- **Smart warnings** — blinking alerts under the session line: `CTF <Nm` when the context would fill in under 30 minutes at the current context rate (CTR), and `BRN` when the burn rate exceeds `CLAUDE_WARN_BRN`.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
 - **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Initial loading and period changes run in the background so the modal remains responsive. Model bars and daily peak (PEAK) count all token types: input + output + cache_read + cache_write.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
@@ -137,7 +137,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 |--------|--------------|-------|-------|
 | **APR** | API time / total session time | 0-100% | dashboard |
 | **DUR** | Session duration (sub-stat of APR) | — | dashboard |
-| **CHR** | Cache read tokens / total cache | 0-100% | dashboard |
+| **CHR** | Cache hit rate: cache read / (input + cache read + cache write) | 0-100% | dashboard |
 | **CTX** | Context window usage | 0-100% | statusline + dashboard |
 | **CCH** | Prompt-cache countdown — time until the cached conversation goes cold (shown from 50 min down), then `cold` + the tokens the next message re-caches; Claude Code v2.1.251+ (see below) | — | statusline |
 | **5HL** | 5-hour rate limit usage + reset countdown (`→ 2h 15m`) | 0-100% | statusline + dashboard |
@@ -145,6 +145,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **7DL** | 7-day rate limit usage + reset countdown (`→ 6d 12h`) | 0-100% | statusline + dashboard |
 | **BRN** | Cost burn rate | 0-10.0 $/min (env: `CC_MON_BRN_MAX`) | statusline + dashboard |
 | **CTR** | Context consumption rate | 0-10.0 %/min (env: `CC_MON_CTR_MAX`) | dashboard |
+| **CTF** | Context-full warning: minutes until the context fills at the current CTR, shown under 30 min (`CTF <25m`) | — | dashboard |
 | **CST** | Session cost | 0-$1000 (env: `CC_MON_CST_MAX`) | statusline + dashboard |
 | **TDY** | Today's cost (all sessions) | — | dashboard |
 | **WEK** | Rolling 7-day cost (all sessions) | — | dashboard |

@@ -26,7 +26,7 @@ import shared
 from shared import _ANSI_RE
 
 import pulse
-from monitor import render_pulse_modal
+from monitor import render_pulse_modal, _vis_width
 
 class TestPulseScore(unittest.TestCase):
 
@@ -1075,6 +1075,29 @@ class TestPulseCodingScope(unittest.TestCase):
         self.assertIn("     investigating, claude.ai", plain)
         inc = next(ln for ln in buf if "Apple sign-up" in ln)
         self.assertNotIn(shared.C_RED, inc)
+
+    def test_modal_fits_a_narrow_terminal(self):
+        # At 46 columns a long title and "degraded performance" used to be cut
+        # off mid-word; names now end in '…' and every status stays whole.
+        s = self._summary()
+        s["components"].append({"name": "Claude Models on Google Cloud",
+                                "status": "degraded_performance", "group": False})
+        s["incidents"][0]["name"] = "Some users are unable to sign up with Apple on iOS devices"
+        raw = self._raw(s)
+        snap = dict(raw, score=100, raw_score=100, verdict="SAFE TO CODE", level="ok",
+                    reason="", latency_p50_ms=None, latency_p95_ms=None,
+                    wall_t=time.time(), t=0)
+        with patch.object(pulse, "get_pulse_snapshot", return_value=snap):
+            buf = render_pulse_modal(46, 80)
+        plain = [_ANSI_RE.sub("", ln).rstrip() for ln in buf]
+        self.assertTrue(all(_vis_width(ln) <= 46 for ln in plain))
+        title = next(ln for ln in plain if ln.startswith("MAJO "))
+        self.assertTrue(title.endswith("…"))
+        google = next(ln for ln in plain if ln.startswith("Claude Models on"))
+        self.assertTrue(google.endswith("degraded performance"))
+        self.assertIn("…", google)
+        api = next(ln for ln in plain if ln.startswith("Claude API"))
+        self.assertTrue(api.endswith("operational"))
 
 
 if __name__ == "__main__":
