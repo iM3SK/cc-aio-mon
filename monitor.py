@@ -63,11 +63,12 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     SECONDS_1H, SECONDS_1D,
                     HISTORY_RATE_SAMPLES,
                     WARN_PCT, CRIT_PCT,
-                    DATA_DIR, VERSION_RE, VERSION, SCHEMA_VERSION,
+                    DATA_DIR, VERSION, SCHEMA_VERSION,
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     badge_context_suffix,
-                    extract_changelog_entry,
-                    check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
+                    check_syntax_after_pull, verify_origin_remote,
+                    git_current_branch, git_tracked_changes, git_ahead_behind, git_remote_version,
+                    git_new_commits, git_remote_changelog_entry, git_head_commit, git_pull_ff_only,
                     rotate_crash_log, acquire_singleton_lock,
                     read_fable_weekly, fable_display_state, STALE_DIM_SEC,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_TEAL, C_CYN, C_BLU, C_NAV,
@@ -618,16 +619,11 @@ def _rls_check_worker():
         if r.returncode != 0:
             _rls_write("error")
             return
-        r = run_git(["show", "origin/main:shared.py"], cwd=_REPO_ROOT, timeout=15)
-        if r.returncode != 0:
-            _rls_write("error")
-            return
-        m = VERSION_RE.search(r.stdout)
-        if not m:
-            _rls_write("error")
-            return
+        # A git failure raises RuntimeError -> "error"; a missing git or a
+        # timeout keeps its own status (run_git raises, no _git_cmd mapping).
         # SEC: origin/main content is shown in the RLS line and update modal.
-        remote_ver = _sanitize(m.group(1))
+        remote_ver = _sanitize(git_remote_version(
+            lambda args: run_git(args, cwd=_REPO_ROOT, timeout=15)))
         local_t = _parse_version(VERSION)
         remote_t = _parse_version(remote_ver)
         status = "update" if remote_t > local_t else "ok"
@@ -2145,45 +2141,48 @@ _UPDATE_MODAL_TTL = 30.0
 
 
 def _git_cmd(args, timeout=15):
-    """Run git command in repo root, return (returncode, stdout, stderr).
-    Uses module-level run_git for consistent env whitelist + mockable patch target."""
+    """Run git in the repo root for the shared.git_* queries. Never raises: a
+    missing git becomes returncode -1 and a timeout -2, so the update modal
+    and the apply worker treat them like any failed git command. Goes through
+    module-level run_git (env whitelist + mockable patch target)."""
     try:
-        r = run_git(args, cwd=_REPO_ROOT, timeout=timeout)
-        return r.returncode, r.stdout.strip(), r.stderr.strip()
+        return run_git(args, cwd=_REPO_ROOT, timeout=timeout)
     except FileNotFoundError:
-        return -1, "", "git not found"
+        return subprocess.CompletedProcess(args, -1, "", "git not found")
     except OSError:
-        return -1, "", "git unavailable"
+        return subprocess.CompletedProcess(args, -1, "", "git unavailable")
     except subprocess.TimeoutExpired:
-        return -2, "", "timeout"
+        return subprocess.CompletedProcess(args, -2, "", "timeout")
 
 
 def _update_checks():
-    """Return list of warning strings for update safety."""
+    """Return list of warning strings for update safety. The git queries are
+    the CLI's (shared.git_*); the rules block the same states as update.py,
+    which TestUpdateGuardParity pins."""
     warns = []
-    rc, out, _ = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"])
-    if rc != 0:
+    try:
+        branch = git_current_branch(_git_cmd)
+    except RuntimeError:
         warns.append("Could not verify current branch")
-    elif out != "main":
-        warns.append(f"Not on main branch (current: {out})")
-    rc, out, _ = _git_cmd(["status", "--porcelain", "-uno"])
-    if rc != 0:
-        warns.append("Could not verify working tree")
-    elif out:
-        warns.append("Uncommitted changes in working tree")
-    rc, out, _ = _git_cmd(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
-    if rc == 0:
-        try:
-            ahead, behind = parse_ahead_behind(out)
-        except ValueError:
-            warns.append("Invalid commit comparison")
-        else:
-            if ahead > 0 and behind > 0:
-                warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
-            elif ahead > 0:
-                warns.append(f"Local has {ahead} commits ahead of origin/main")
     else:
+        if branch != "main":
+            warns.append(f"Not on main branch (current: {branch})")
+    try:
+        if git_tracked_changes(_git_cmd).strip():
+            warns.append("Uncommitted changes in working tree")
+    except RuntimeError:
+        warns.append("Could not verify working tree")
+    try:
+        ahead, behind = git_ahead_behind(_git_cmd)
+    except RuntimeError:
         warns.append("Could not compare commits")
+    except ValueError:
+        warns.append("Invalid commit comparison")
+    else:
+        if ahead > 0 and behind > 0:
+            warns.append(f"Diverged: {ahead} ahead, {behind} behind origin/main")
+        elif ahead > 0:
+            warns.append(f"Local has {ahead} commits ahead of origin/main")
     # SEC: pin self-update to the canonical repo (same guard as update.py CLI).
     remote_problem = verify_origin_remote(_REPO_ROOT)
     if remote_problem:
@@ -2193,21 +2192,19 @@ def _update_checks():
 
 def _get_new_commits(max_lines=10):
     """Return list of oneline commit strings from HEAD to origin/main."""
-    rc, out, _ = _git_cmd(["log", "--oneline", f"--max-count={max_lines}", "HEAD..origin/main"])
-    if rc != 0 or not out:
+    try:
+        return git_new_commits(_git_cmd, max_count=max_lines)
+    except RuntimeError:
         return []
-    return out.split("\n")
 
 
 def _get_remote_changelog_preview(version, max_lines=15):
     """Extract changelog section for a version from origin/main."""
-    rc, out, _ = _git_cmd(["show", "origin/main:CHANGELOG.md"])
-    if rc != 0:
+    try:
+        entry = git_remote_changelog_entry(_git_cmd, version, max_lines=max_lines)
+    except RuntimeError:
         return []
-    entry = extract_changelog_entry(out, version, max_lines=max_lines)
-    if not entry:
-        return []
-    return entry.split("\n")
+    return entry.split("\n") if entry else []
 
 
 def _cached_get_new_commits(remote_ver, max_lines=10):
@@ -2318,13 +2315,8 @@ def _apply_update_worker():
         if warns:
             _set_update_result("Update blocked: " + "; ".join(_sanitize(w) for w in warns))
             return
-        rc, out, _ = _git_cmd(["rev-parse", "--verify", "HEAD"])
-        if rc != 0:
-            raise RuntimeError("Could not read recovery commit")
-        recovery = parse_commit_id(out)
-        rc, _, _ = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
-        if rc != 0:
-            raise RuntimeError("git pull failed")
+        recovery = git_head_commit(_git_cmd)
+        git_pull_ff_only(lambda args: _git_cmd(args, timeout=30))
         _invalidate_update_modal_cache()
         bad = check_syntax_after_pull(_REPO_ROOT)
         if bad:
