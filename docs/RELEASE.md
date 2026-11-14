@@ -259,7 +259,7 @@ gh run watch "$(gh run list --workflow=release-smoke.yml --branch=main --limit=1
 
 # 5. Sync local main to the merge commit, THEN tag it (after it is on main)
 git switch main && git pull --ff-only origin main
-git tag vX.Y.Z
+git tag -s vX.Y.Z -m "vX.Y.Z — <one-line summary from CHANGELOG>"
 
 # 6. Push the tag separately
 git push origin vX.Y.Z
@@ -273,15 +273,26 @@ at a commit that is already on `main`; tagging before the merge lands would
 leave the release-check worker blind to the version bump (it only reads
 `origin/main`).
 
-**Signed tags** (`git tag -s vX.Y.Z`) are optional but encouraged for
-releases that touch security-sensitive code paths. The tag message should
-repeat the first line of the CHANGELOG entry:
+**Signed tags.** Release tags are annotated and signed with the maintainer's
+SSH signing key, and the tag message repeats the first line of the CHANGELOG
+entry. The public key is registered on GitHub as a *signing key*
+(Settings → SSH and GPG keys), so GitHub marks the tags *Verified*. One-time
+setup per clone:
 
 ```bash
-git tag -s vX.Y.Z -m "vX.Y.Z — <one-line summary from CHANGELOG>"
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/<signing-key>.pub
+git config tag.gpgSign true
+# local verification with `git tag -v vX.Y.Z`:
+git config gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
 ```
 
-**Do not reuse or move tags.** If you tagged the wrong commit, see Section 7.
+`~/.ssh/allowed_signers` holds one line:
+`<commit email> namespaces="git" <public key>`.
+
+**Do not reuse or move tags.** The repository's tag ruleset blocks deleting or
+updating `v*` tags for everyone except admins. If you tagged the wrong commit,
+see Section 7.
 
 ---
 
@@ -353,8 +364,8 @@ Instead:
 
 1. Fix the issue in a new commit on a branch.
 2. Merge it to `main` via PR (direct push is blocked — see Section 5).
-3. Create a new patch tag: `git tag vX.Y.Z+1` (e.g. `v1.12.5` if `v1.12.4`
-   was broken), push it.
+3. Create a new signed patch tag: `git tag -s vX.Y.Z+1 -m "..."` (e.g.
+   `v1.12.5` if `v1.12.4` was broken), push it.
 4. Update CHANGELOG with a brief PATCH entry describing the regression and fix.
 
 **Diagnostics for user-reported breakage:** the crash log lives at

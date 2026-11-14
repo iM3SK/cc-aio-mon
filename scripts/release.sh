@@ -103,7 +103,8 @@ main is branch-protected — land the release via PR (docs/RELEASE.md Section 5)
   gh pr create --fill --base main
   gh pr merge --squash --delete-branch
   git switch main && git pull --ff-only origin main
-  git tag v$VERSION && git push origin v$VERSION
+  git tag -s v$VERSION -m "v$VERSION — <one-line summary from CHANGELOG>"
+  git push origin v$VERSION
 
 Then complete the Section 8 post-release checks.
 EOF
