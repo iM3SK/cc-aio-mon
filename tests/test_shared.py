@@ -730,7 +730,7 @@ class TestPyFilesSingleSourceOfTruth(unittest.TestCase):
     """I-2: PY_FILES in shared.py is the single source of truth for syntax-check list."""
 
     def test_shared_py_files_contains_all_modules(self):
-        expected = {"monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py"}
+        expected = {"monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py", "transcripts.py"}
         self.assertEqual(set(shared.PY_FILES), expected)
 
     def test_update_uses_shared_py_files(self):

@@ -98,7 +98,7 @@ Work through these in order before creating any tag.
     "Current baseline" line in this file (Section 2).
   - **`monitor.py` LOC** → `wc -l monitor.py`: `docs/ARCHITECTURE.md` and
     `CONTRIBUTING.md`.
-  - **Model table** → when `monitor._MODELS` gains or loses a *priced* family,
+  - **Model table** → when `transcripts._MODELS` gains or loses a *priced* family,
     update the "Current priced families" line in `README.md` (and any model-ID
     examples in `docs/FILE-IPC-CONTRACT.md`).
   - **Avoid hard-coded line numbers** in docs (`monitor.py:NNN`) — they rot on
@@ -187,13 +187,13 @@ headers, bullet list under each, blank line, trailing test count line.
   `test_pulse.py`, `test_update.py`). The `tests.py` wrapper runs all of
   them via `unittest discover`.
 
-- [ ] **Syntax check covers all five modules.**
+- [ ] **Syntax check covers all six modules.**
   `shared.PY_FILES` (`shared.py`) lists every file the post-pull syntax
   check verifies:
   ```python
-  PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
+  PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py", "transcripts.py")
   ```
-  Confirm your changes compile cleanly in all five:
+  Confirm your changes compile cleanly in all six:
   ```
   py -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
   ```

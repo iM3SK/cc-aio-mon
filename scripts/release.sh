@@ -15,7 +15,7 @@
 # Usage:  scripts/release.sh X.Y.Z
 #
 # Maintainer tool (Linux/macOS bash). Not shipped to end users, not part of the
-# five runtime modules in shared.PY_FILES.
+# six runtime modules in shared.PY_FILES.
 
 set -euo pipefail
 

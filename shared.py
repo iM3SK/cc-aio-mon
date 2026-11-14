@@ -104,6 +104,14 @@ def _env_pct(name, default):
     return default
 
 
+def _env_float(name, default):
+    v = os.environ.get(name, "").strip()
+    try:
+        return float(v) if v else default
+    except ValueError:
+        return default
+
+
 # Percentage thresholds shared by statusline + monitor (SSoT, previously parsed twice).
 WARN_PCT = _env_pct("CLAUDE_STATUS_WARN", 50.0)
 CRIT_PCT = _env_pct("CLAUDE_STATUS_CRIT", 80.0)
@@ -116,7 +124,7 @@ STALE_DIM_SEC = 30 * 60
 
 # Python files that ship with the app — used by syntax-check paths in update flow
 # (monitor.py:_apply_update_worker + update.py:apply_update). Must stay in sync.
-PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
+PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py", "transcripts.py")
 
 # ANSI — Nord truecolor (shared palette for statusline.py + monitor.py).
 # Every color carries one meaning:

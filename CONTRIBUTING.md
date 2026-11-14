@@ -3,7 +3,7 @@
 ## Constraints
 
 - **Stdlib only** — no pip installs, no node_modules.
-- **Five runtime files** — `statusline.py`, `monitor.py`, `shared.py`, `update.py`, and `pulse.py`. No additional runtime modules (test files like `tests.py` are not runtime).
+- **Six runtime files** — `statusline.py`, `monitor.py`, `transcripts.py`, `shared.py`, `update.py`, and `pulse.py`. No additional runtime modules (test files like `tests.py` are not runtime).
 - **Cross-platform** — changes must work on Windows, macOS, and Linux.
 
 ## Code style
@@ -83,7 +83,7 @@ For anything non-trivial — new features, behavior changes, refactors beyond lo
 ## See also
 
 - [README.md](README.md) — feature overview, metrics, keyboard shortcuts, architecture
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~4 800 LOC)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, data-flow diagram, and "where to look for X" guide; read this before opening `monitor.py` (~3 500 LOC; the transcript reader lives in `transcripts.py`)
 - [docs/FILE-IPC-CONTRACT.md](docs/FILE-IPC-CONTRACT.md) — canonical field schema for the statusline→monitor JSON contract and JSONL history entries
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [.github/SECURITY.md](.github/SECURITY.md) — security model and vulnerability reporting

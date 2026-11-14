@@ -41,6 +41,7 @@ from shared import (
 )
 
 import monitor
+import transcripts
 import monitor as _monitor_mod
 from monitor import (
     _fit_buf_height,
@@ -54,16 +55,11 @@ from monitor import (
     truncate,
     mkbar,
     calc_cross_session_costs,
-    _parse_ts,
     _calc_streaks,
-    _model_label,
     _total_tokens,
-    scan_transcript_stats,
     render_stats,
     render_legend,
     render_frame,
-    _CLAUDE_DIR,
-    _usage_cache,
     WARN_BRN,
     BRN_MAX,
     CTR_MAX,
@@ -98,8 +94,15 @@ from monitor import (
     render_menu,
     render_cost_breakdown,
     _model_code,
-    _model_base,
     _cost_thirds,
+)
+from transcripts import (
+    _parse_ts,
+    _model_label,
+    scan_transcript_stats,
+    _CLAUDE_DIR,
+    _usage_cache,
+    _model_base,
     _get_pricing,
     _DEFAULT_PRICING,
     _aggregate_session_cost,
@@ -215,7 +218,7 @@ class TestAuditRemediation20261114(unittest.TestCase):
             return monitor.render_frame(data, [], 80, 60, **kw)
 
     def _cost(self, data):
-        with patch.object(monitor, "_aggregate_session_cost", return_value=None):
+        with patch.object(transcripts, "_aggregate_session_cost", return_value=None):
             return _strip_ansi(monitor.render_cost_breakdown(data, [], 70, 60))
 
     # F-001 — last-request estimate uses the long-prompt tier and fast mode
@@ -316,15 +319,15 @@ class TestAuditRemediation20261114(unittest.TestCase):
             (d / "1.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": "live-1"}), encoding="utf-8")
             (d / "2.json").write_text(json.dumps({"pid": 999999999, "sessionId": "gone-2"}), encoding="utf-8")
             (d / "3.json").write_text("not json", encoding="utf-8")
-            with patch.object(monitor, "_SESSION_REGISTRY_DIR", d), \
-                    patch.dict(monitor._live_cache, {"t": -1.0, "ids": frozenset()}):
-                self.assertEqual(monitor.live_session_ids(ttl=0), frozenset({"live-1"}))
+            with patch.object(transcripts, "_SESSION_REGISTRY_DIR", d), \
+                    patch.dict(transcripts._live_cache, {"t": -1.0, "ids": frozenset()}):
+                self.assertEqual(transcripts.live_session_ids(ttl=0), frozenset({"live-1"}))
 
     def test_pid_alive(self):
-        self.assertTrue(monitor._pid_alive(os.getpid()))
-        self.assertFalse(monitor._pid_alive(0))
-        self.assertFalse(monitor._pid_alive("123"))
-        self.assertFalse(monitor._pid_alive(True))
+        self.assertTrue(transcripts._pid_alive(os.getpid()))
+        self.assertFalse(transcripts._pid_alive(0))
+        self.assertFalse(transcripts._pid_alive("123"))
+        self.assertFalse(transcripts._pid_alive(True))
 
 
 class TestDashboardColorRoles(unittest.TestCase):
@@ -1011,7 +1014,7 @@ class TestAggregateTranscriptGuards(unittest.TestCase):
             jl.write_text("\n".join(lines) + "\n", encoding="utf-8")
             st = jl.lstat()
             models, active_days, daily_tokens, session_times = {}, set(), {}, {}
-            monitor._aggregate_transcript(
+            transcripts._aggregate_transcript(
                 jl, st, "sess", False, 0,
                 models, active_days, daily_tokens, session_times)
             self.assertEqual(list(models), ["m1"])
@@ -1179,16 +1182,16 @@ class TestScanTranscriptStats(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib, monitor
         self.tmpdir = tempfile.mkdtemp()
-        self._orig = monitor._CLAUDE_DIR
-        self._orig_cache = monitor._usage_cache.copy()
-        monitor._CLAUDE_DIR = pathlib.Path(self.tmpdir)
-        monitor._usage_cache.clear()
+        self._orig = transcripts._CLAUDE_DIR
+        self._orig_cache = transcripts._usage_cache.copy()
+        transcripts._CLAUDE_DIR = pathlib.Path(self.tmpdir)
+        transcripts._usage_cache.clear()
 
     def tearDown(self):
         import shutil, monitor
-        monitor._CLAUDE_DIR = self._orig
-        monitor._usage_cache.clear()
-        monitor._usage_cache.update(self._orig_cache)
+        transcripts._CLAUDE_DIR = self._orig
+        transcripts._usage_cache.clear()
+        transcripts._usage_cache.update(self._orig_cache)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_empty_dir(self):
@@ -1475,19 +1478,19 @@ class TestRenderStats(unittest.TestCase):
     def setUp(self):
         import tempfile, pathlib, monitor
         self.tmpdir = tempfile.mkdtemp()
-        self._orig = monitor._CLAUDE_DIR
-        self._orig_cache = monitor._usage_cache.copy()
-        monitor._CLAUDE_DIR = pathlib.Path(self.tmpdir)
-        monitor._usage_cache.clear()
+        self._orig = transcripts._CLAUDE_DIR
+        self._orig_cache = transcripts._usage_cache.copy()
+        transcripts._CLAUDE_DIR = pathlib.Path(self.tmpdir)
+        transcripts._usage_cache.clear()
         self.refresh = patch.object(monitor, "_stats_refresh_async")
         self.refresh.start()
         self.addCleanup(self.refresh.stop)
 
     def tearDown(self):
         import shutil, monitor
-        monitor._CLAUDE_DIR = self._orig
-        monitor._usage_cache.clear()
-        monitor._usage_cache.update(self._orig_cache)
+        transcripts._CLAUDE_DIR = self._orig
+        transcripts._usage_cache.clear()
+        transcripts._usage_cache.update(self._orig_cache)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_no_data_shows_placeholder(self):
@@ -1584,7 +1587,7 @@ class TestRenderStats(unittest.TestCase):
 
         # Verify _total_tokens directly
         import monitor
-        monitor._usage_cache.clear()
+        transcripts._usage_cache.clear()
         models, _ = scan_transcript_stats("all", ttl=0)
         a = models["claude-opus-4-6"]
         b = models["claude-haiku-4-5-20251001"]
@@ -1674,7 +1677,7 @@ class TestRenderMenu(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestStatsLoadingRegression(unittest.TestCase):
     def setUp(self):
-        self.cache = patch.object(monitor, "_usage_cache", {})
+        self.cache = patch.object(transcripts, "_usage_cache", {})
         self.cache.start()
         self.addCleanup(self.cache.stop)
         self.thread = patch.object(monitor, "_stats_scan_thread", None)
@@ -1692,7 +1695,7 @@ class TestStatsLoadingRegression(unittest.TestCase):
                     started.set()
                     release.wait(1)
                     return {}, {"sessions": 0, "active_days": set(), "daily_tokens": {}}
-                with patch.object(monitor, "scan_transcript_stats", side_effect=scan):
+                with patch.object(transcripts, "scan_transcript_stats", side_effect=scan):
                     try:
                         plain = _ANSI_RE.sub("", "\n".join(render_stats(80, 24, period)))
                         self.assertTrue(started.wait(1))
@@ -1706,7 +1709,7 @@ class TestStatsLoadingRegression(unittest.TestCase):
                             worker.join(2)
 
     def test_scan_error_is_visible_and_not_retried_every_frame(self):
-        with patch.object(monitor, "scan_transcript_stats", side_effect=OSError("private path")) as scan:
+        with patch.object(transcripts, "scan_transcript_stats", side_effect=OSError("private path")) as scan:
             render_stats(80, 24, "all")
             worker = monitor._stats_scan_thread
             if worker is not None:
@@ -1723,7 +1726,7 @@ class TestStatsLoadingRegression(unittest.TestCase):
             started.set()
             release.wait(2)
             return {}, {"sessions": 0}
-        with patch.object(monitor, "scan_transcript_stats", side_effect=scan) as scanner:
+        with patch.object(transcripts, "scan_transcript_stats", side_effect=scan) as scanner:
             try:
                 render_stats(80, 24, "all")
                 self.assertTrue(started.wait(1))
@@ -1742,7 +1745,7 @@ class TestStatsLoadingRegression(unittest.TestCase):
             self.assertEqual(scanner.call_count, 2)
 
     def test_missing_directory_result_is_cached_after_completion(self):
-        with patch.object(monitor, "is_safe_dir", return_value=False) as safe:
+        with patch.object(transcripts, "is_safe_dir", return_value=False) as safe:
             render_stats(80, 24, "all")
             monitor._stats_scan_thread.join(2)
             render_stats(80, 24, "all")
@@ -1756,10 +1759,10 @@ class TestStatsLoadingRegression(unittest.TestCase):
         # A runner can have less than 30 seconds of monotonic uptime, so t=0
         # does not guarantee an expired cache. Exercise that case explicitly.
         now = 10.0
-        monitor._usage_cache["all"] = {"t": now - 31.0, "models": models,
+        transcripts._usage_cache["all"] = {"t": now - 31.0, "models": models,
                                        "overview": overview}
         with patch.object(monitor.time, "monotonic", return_value=now), \
-             patch.object(monitor, "scan_transcript_stats", side_effect=ValueError) as scanner:
+             patch.object(transcripts, "scan_transcript_stats", side_effect=ValueError) as scanner:
             render_stats(80, 50, "all")
             worker = monitor._stats_scan_thread
             self.assertIsNotNone(worker)
@@ -1782,7 +1785,7 @@ class TestStatsLoadingRegression(unittest.TestCase):
             clock[0] = 100.0
             return {}, {"sessions": 0}
         with patch.object(monitor.time, "monotonic", side_effect=lambda: clock[0]), \
-             patch.object(monitor, "scan_transcript_stats", side_effect=scan) as scanner:
+             patch.object(transcripts, "scan_transcript_stats", side_effect=scan) as scanner:
             render_stats(80, 24, "all")
             monitor._stats_scan_thread.join(2)
             render_stats(80, 24, "all")
@@ -1791,7 +1794,7 @@ class TestStatsLoadingRegression(unittest.TestCase):
 
 class TestCostDisplayRegression(unittest.TestCase):
     def plain(self, data, session=None):
-        with patch.object(monitor, "_aggregate_session_cost", return_value=session):
+        with patch.object(transcripts, "_aggregate_session_cost", return_value=session):
             return _ANSI_RE.sub("", "\n".join(render_cost_breakdown(data, [], 100, 200)))
 
     def test_missing_cost_and_usage_are_explained(self):
@@ -1909,7 +1912,7 @@ class TestAggregateSessionCost(unittest.TestCase):
             transcript = root / "empty-session.jsonl"
             transcript.write_text(json.dumps({"type": "assistant", "message": {}}) + "\n",
                                   encoding="utf-8")
-            with patch.object(monitor, "CLAUDE_PROJECTS_DIR", root):
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", root):
                 self.assertIsNone(_aggregate_session_cost({
                     "session_id": "empty-session", "transcript_path": str(transcript)}))
 
@@ -1931,7 +1934,7 @@ class TestAggregateSessionCost(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_projects = _pathlib.Path(tmpdir).resolve()
-            with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", fake_projects):
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", fake_projects):
                 _SESSION_COST_CACHE.clear()
                 data = {"session_id": "abcd1234", "transcript_path": str(jl)}
                 result = _aggregate_session_cost(data)
@@ -1962,7 +1965,7 @@ class TestAggregateSessionCost(unittest.TestCase):
             encoding="utf-8",
         )
         fake_projects = _pathlib.Path(tmpdir).resolve()
-        with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", fake_projects):
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", fake_projects):
             _SESSION_COST_CACHE.clear()
             data = {"session_id": "abcd5678"}
             result = _aggregate_session_cost(data)
@@ -1994,7 +1997,7 @@ class TestAggregateSessionCost(unittest.TestCase):
         data = {"session_id": sid, "transcript_path": "/nonexistent/x.jsonl"}
         _SESSION_COST_CACHE.clear()
         import monitor as _monitor
-        with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", "/nonexistent"):
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", "/nonexistent"):
             result = _aggregate_session_cost(data)
         self.assertIsNone(result)
         # Sentinel must have been written.
@@ -2003,7 +2006,7 @@ class TestAggregateSessionCost(unittest.TestCase):
         self.assertIsNone(val)
         self.assertGreater(ts, 0)
         # Second call within TTL must return cached None immediately (no re-scan).
-        with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", "/nonexistent"):
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", "/nonexistent"):
             result2 = _aggregate_session_cost(data)
         self.assertIsNone(result2)
 
@@ -2021,7 +2024,7 @@ class TestAggregateSessionCost(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_projects = _pathlib.Path(tmpdir).resolve()
-            with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", fake_projects):
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", fake_projects):
                 _SESSION_COST_CACHE.clear()
                 data = {"session_id": "cachesid1", "transcript_path": str(jl)}
                 r1 = _aggregate_session_cost(data)
@@ -2046,7 +2049,7 @@ class TestAggregateSessionCost(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_projects = _pathlib.Path(tmpdir).resolve()
-            with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", fake_projects):
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", fake_projects):
                 _SESSION_COST_CACHE.clear()
                 data = _full_data()
                 data["session_id"] = "rendersid1"
@@ -2073,7 +2076,7 @@ class TestAggregateSessionCost(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_projects = _pathlib.Path(tmpdir).resolve()
-            with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", fake_projects):
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", fake_projects):
                 _SESSION_COST_CACHE.clear()
                 data = _full_data()
                 data["session_id"] = "deltasid1"
@@ -3265,9 +3268,9 @@ class TestGetPricing(unittest.TestCase):
 
     def test_5x_labels_and_codes(self):
         self.assertEqual(monitor._model_code("claude-opus-5-5"), ("OP", "5.5"))
-        self.assertEqual(monitor._model_label("claude-opus-5"), "Opus 5")
+        self.assertEqual(transcripts._model_label("claude-opus-5"), "Opus 5")
         self.assertEqual(monitor._model_code("claude-fable-5-1"), ("FBL", "5.1"))
-        self.assertEqual(monitor._model_label("claude-sonnet-5-5"), "Sonnet 5.5")
+        self.assertEqual(transcripts._model_label("claude-sonnet-5-5"), "Sonnet 5.5")
 
     # --- Short-ID fallbacks must not fall back to _DEFAULT_PRICING (F-11) ---
     def test_short_id_haiku_has_real_pricing(self):
@@ -3455,16 +3458,16 @@ class TestScanTranscriptCacheOnly(unittest.TestCase):
     def setUp(self):
         import monitor
         self._tmpdir = tempfile.mkdtemp()
-        self._orig = monitor._CLAUDE_DIR
-        self._orig_cache = monitor._usage_cache.copy()
-        monitor._CLAUDE_DIR = pathlib.Path(self._tmpdir)
-        monitor._usage_cache.clear()
+        self._orig = transcripts._CLAUDE_DIR
+        self._orig_cache = transcripts._usage_cache.copy()
+        transcripts._CLAUDE_DIR = pathlib.Path(self._tmpdir)
+        transcripts._usage_cache.clear()
 
     def tearDown(self):
         import shutil, monitor
-        monitor._CLAUDE_DIR = self._orig
-        monitor._usage_cache.clear()
-        monitor._usage_cache.update(self._orig_cache)
+        transcripts._CLAUDE_DIR = self._orig
+        transcripts._usage_cache.clear()
+        transcripts._usage_cache.update(self._orig_cache)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_cache_read_only_no_input_no_output(self):
@@ -3501,7 +3504,7 @@ class TestAggregateSessionCostSecurity(unittest.TestCase):
     def test_transcript_path_traversal_rejected(self):
         import monitor as _monitor
         # Path outside ~/.claude/projects/ — must return None
-        with patch.object(_monitor, "CLAUDE_PROJECTS_DIR",
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR",
                           pathlib.Path("/nonexistent/projects").resolve()):
             data = {"session_id": "abcd1234", "transcript_path": "/etc/passwd"}
             result = _aggregate_session_cost(data)
@@ -3521,7 +3524,7 @@ class TestAggregateSessionCostSecurity(unittest.TestCase):
             except (OSError, NotImplementedError):
                 self.skipTest("symlinks not supported")
             fake_projects = pathlib.Path(td).resolve()
-            with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", fake_projects):
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", fake_projects):
                 _SESSION_COST_CACHE.clear()
                 data = {"session_id": "abcd1234", "transcript_path": str(link)}
                 result = _aggregate_session_cost(data)
@@ -3546,7 +3549,7 @@ class TestAggregateSessionCostSecurity(unittest.TestCase):
                 link_root.symlink_to(real_root, target_is_directory=True)
             except (OSError, NotImplementedError):
                 self.skipTest("symlinks not supported")
-            with patch.object(_monitor, "CLAUDE_PROJECTS_DIR", link_root):
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", link_root):
                 data = {"session_id": sid, "transcript_path": str(jl)}
                 result = _aggregate_session_cost(data)
         self.assertIsNone(result)
@@ -3736,15 +3739,15 @@ class TestScanTranscriptStatsSafeDir(unittest.TestCase):
 
     def test_unsafe_dir_returns_empty(self):
         import monitor as _m
-        with patch.object(_m, "is_safe_dir", return_value=False):
-            models, overview = _m.scan_transcript_stats(period="all")
+        with patch.object(transcripts, "is_safe_dir", return_value=False):
+            models, overview = transcripts.scan_transcript_stats(period="all")
         self.assertEqual(models, {})
         self.assertEqual(overview["sessions"], 0)
 
     def test_safe_dir_check_called(self):
         import monitor as _m
-        with patch.object(_m, "is_safe_dir", return_value=False) as mock_safe:
-            _m.scan_transcript_stats(period="all")
+        with patch.object(transcripts, "is_safe_dir", return_value=False) as mock_safe:
+            transcripts.scan_transcript_stats(period="all")
         mock_safe.assert_called()
 
 
@@ -3930,9 +3933,12 @@ class TestAuditRegressionV1105(unittest.TestCase):
         # hotkey chip), the session settings line, the Pulse coding scope with
         # scheduled maintenance, rate-limit age marking and the Claude Code
         # session registry add ~250 lines, all rendered or read only here.
+        # Lowered 4900 → 3700: the transcript layer (usage scanner, desktop
+        # sessions, session cost, subagents, pricing, session registry) moved
+        # to transcripts.py; monitor.py keeps the TUI.
         self.assertLess(
-            loc, 4900,
-            f"monitor.py is {loc} LOC, past the 4900-line maintainability trigger. "
+            loc, 3700,
+            f"monitor.py is {loc} LOC, past the 3700-line maintainability trigger. "
             f"Reduce the file or raise this trigger with a technical rationale."
         )
 
@@ -4002,20 +4008,20 @@ class TestAuditRegressionV1105(unittest.TestCase):
             self.assertEqual(kwargs.get("data_dir"), statusline.DATA_DIR)
 
     def test_debt018_max_transcript_files_constant(self):
-        """DEBT-018: monitor.MAX_TRANSCRIPT_FILES is the named constant
+        """DEBT-018: transcripts.MAX_TRANSCRIPT_FILES is the named constant
         (was magic literal 1000 inline before v1.10.5)."""
         import monitor
-        self.assertTrue(hasattr(monitor, "MAX_TRANSCRIPT_FILES"))
-        self.assertIsInstance(monitor.MAX_TRANSCRIPT_FILES, int)
-        self.assertGreaterEqual(monitor.MAX_TRANSCRIPT_FILES, 100)  # sanity
+        self.assertTrue(hasattr(transcripts, "MAX_TRANSCRIPT_FILES"))
+        self.assertIsInstance(transcripts.MAX_TRANSCRIPT_FILES, int)
+        self.assertGreaterEqual(transcripts.MAX_TRANSCRIPT_FILES, 100)  # sanity
 
     def test_debt021_models_dict_has_all_known_families(self):
         """DEBT-021: _MODELS dict consolidates name + code + pricing."""
         import monitor
         for known_id in ("claude-opus-4-7", "claude-sonnet-4-6",
                          "claude-haiku-4-5", "claude-opus-4-1"):
-            self.assertIn(known_id, monitor._MODELS, f"missing {known_id}")
-            entry = monitor._MODELS[known_id]
+            self.assertIn(known_id, transcripts._MODELS, f"missing {known_id}")
+            entry = transcripts._MODELS[known_id]
             self.assertIn("name", entry)
             self.assertIn("code", entry)
             self.assertIn("pricing", entry)
@@ -4068,19 +4074,19 @@ class TestAuditRegressionV1105(unittest.TestCase):
             except (OSError, NotImplementedError):
                 symlinks_supported = False
 
-            orig = monitor._CLAUDE_DIR
-            monitor._CLAUDE_DIR = fake_claude
-            monitor._usage_cache.clear()
+            orig = transcripts._CLAUDE_DIR
+            transcripts._CLAUDE_DIR = fake_claude
+            transcripts._usage_cache.clear()
             try:
-                models, _ov = monitor.scan_transcript_stats(period="all", ttl=0.0)
+                models, _ov = transcripts.scan_transcript_stats(period="all", ttl=0.0)
                 # The real transcript was scanned
                 self.assertIn("claude-opus-4-6", models)
                 # The symlink was NOT scanned (Opus 4.1 token count didn't leak in)
                 if symlinks_supported:
                     self.assertNotIn("claude-opus-4-1", models)
             finally:
-                monitor._CLAUDE_DIR = orig
-                monitor._usage_cache.clear()
+                transcripts._CLAUDE_DIR = orig
+                transcripts._usage_cache.clear()
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -4145,11 +4151,11 @@ class TestScanAiTitle(unittest.TestCase):
         self._proj = pathlib.Path(self._tmpdir) / "proj"
         self._proj.mkdir()
         self._fake_root = pathlib.Path(self._tmpdir).resolve()
-        _monitor._AI_TITLE_CACHE.clear()
+        transcripts._AI_TITLE_CACHE.clear()
 
     def tearDown(self):
         import shutil as _sh
-        self._monitor._AI_TITLE_CACHE.clear()
+        transcripts._AI_TITLE_CACHE.clear()
         _sh.rmtree(self._tmpdir, ignore_errors=True)
 
     def _write(self, sid, lines):
@@ -4161,8 +4167,8 @@ class TestScanAiTitle(unittest.TestCase):
             json.dumps({"type": "ai-title", "aiTitle": "Refactor cost modal"}),
             json.dumps({"type": "assistant", "content": "ok"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            result = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = transcripts._scan_ai_title(str(jl))
         self.assertEqual(result, "Refactor cost modal")
 
     def test_last_title_wins(self):
@@ -4171,8 +4177,8 @@ class TestScanAiTitle(unittest.TestCase):
             json.dumps({"type": "user", "content": "x"}),
             json.dumps({"type": "ai-title", "aiTitle": "New title"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            result = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = transcripts._scan_ai_title(str(jl))
         self.assertEqual(result, "New title")
 
     def test_missing_returns_none(self):
@@ -4180,16 +4186,16 @@ class TestScanAiTitle(unittest.TestCase):
             json.dumps({"type": "user", "content": "no title here"}),
             json.dumps({"type": "assistant", "content": "ok"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            result = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = transcripts._scan_ai_title(str(jl))
         self.assertIsNone(result)
 
     def test_sanitizes_ansi(self):
         jl = self._write("session4", [
             json.dumps({"type": "ai-title", "aiTitle": "Title \x1b[31mred\x1b[0m"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            result = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = transcripts._scan_ai_title(str(jl))
         self.assertNotIn("\x1b", result or "")
         self.assertIn("Title", result or "")
 
@@ -4201,8 +4207,8 @@ class TestScanAiTitle(unittest.TestCase):
             + "{broken\n",
             encoding="utf-8",
         )
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            result = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = transcripts._scan_ai_title(str(jl))
         self.assertEqual(result, "Survived")
 
     def test_recursionerror_line_skipped(self):
@@ -4221,9 +4227,9 @@ class TestScanAiTitle(unittest.TestCase):
                 raise RecursionError("json depth")
             return orig_loads(raw)
 
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root), \
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root), \
              patch("monitor.json.loads", side_effect=flaky_loads):
-            result = self._monitor._scan_ai_title(str(jl))
+            result = transcripts._scan_ai_title(str(jl))
         self.assertEqual(result, "Survived depth")
 
     def test_oversize_file_returns_none(self):
@@ -4233,9 +4239,9 @@ class TestScanAiTitle(unittest.TestCase):
             json.dumps({"type": "ai-title", "aiTitle": "Too large"}) + "\n" + ("x" * 64),
             encoding="utf-8",
         )
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root), \
-             patch.object(self._monitor, "DESKTOP_TRANSCRIPT_MAX_BYTES", 10):
-            result = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root), \
+             patch.object(transcripts, "DESKTOP_TRANSCRIPT_MAX_BYTES", 10):
+            result = transcripts._scan_ai_title(str(jl))
         self.assertIsNone(result)
 
     def test_custom_title_wins_and_tail_is_read(self):
@@ -4245,24 +4251,24 @@ class TestScanAiTitle(unittest.TestCase):
             json.dumps({"type": "ai-title", "aiTitle": "Generated"}),
             json.dumps({"type": "custom-title", "customTitle": "Renamed"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            self.assertEqual(self._monitor._scan_ai_title(str(jl)), "Renamed")
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            self.assertEqual(transcripts._scan_ai_title(str(jl)), "Renamed")
 
     def test_ai_title_past_head_found(self):
         filler = [json.dumps({"type": "user", "content": "x" * 1000}) for _ in range(120)]
         jl = self._write("session11", filler + [
             json.dumps({"type": "ai-title", "aiTitle": "Late title"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            self.assertEqual(self._monitor._scan_ai_title(str(jl)), "Late title")
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            self.assertEqual(transcripts._scan_ai_title(str(jl)), "Late title")
 
     def test_empty_string_title_ignored(self):
         jl = self._write("session7", [
             json.dumps({"type": "ai-title", "aiTitle": "   "}),
             json.dumps({"type": "ai-title", "aiTitle": ""}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            result = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            result = transcripts._scan_ai_title(str(jl))
         self.assertIsNone(result)
 
     def test_path_outside_root_rejected(self):
@@ -4273,8 +4279,8 @@ class TestScanAiTitle(unittest.TestCase):
                 json.dumps({"type": "ai-title", "aiTitle": "Pwn"}) + "\n",
                 encoding="utf-8",
             )
-            with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-                result = self._monitor._scan_ai_title(str(outside))
+            with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+                result = transcripts._scan_ai_title(str(outside))
             self.assertIsNone(result)
         finally:
             try:
@@ -4286,8 +4292,8 @@ class TestScanAiTitle(unittest.TestCase):
         jl = self._write("session8", [
             json.dumps({"type": "ai-title", "aiTitle": "First read"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            r1 = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            r1 = transcripts._scan_ai_title(str(jl))
             # Overwrite contents but DON'T touch mtime — cache should serve old value
             old_mt = jl.stat().st_mtime
             jl.write_text(
@@ -4295,7 +4301,7 @@ class TestScanAiTitle(unittest.TestCase):
                 encoding="utf-8",
             )
             os.utime(str(jl), (old_mt, old_mt))
-            r2 = self._monitor._scan_ai_title(str(jl))
+            r2 = transcripts._scan_ai_title(str(jl))
         self.assertEqual(r1, "First read")
         self.assertEqual(r2, "First read")  # cached
 
@@ -4303,22 +4309,22 @@ class TestScanAiTitle(unittest.TestCase):
         jl = self._write("session9", [
             json.dumps({"type": "ai-title", "aiTitle": "v1"}),
         ])
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            r1 = self._monitor._scan_ai_title(str(jl))
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            r1 = transcripts._scan_ai_title(str(jl))
             # Write new content + bump mtime
             jl.write_text(
                 json.dumps({"type": "ai-title", "aiTitle": "v2"}) + "\n",
                 encoding="utf-8",
             )
             os.utime(str(jl), (time.time() + 10, time.time() + 10))
-            r2 = self._monitor._scan_ai_title(str(jl))
+            r2 = transcripts._scan_ai_title(str(jl))
         self.assertEqual(r1, "v1")
         self.assertEqual(r2, "v2")
 
     def test_invalid_input_returns_none(self):
-        self.assertIsNone(self._monitor._scan_ai_title(None))
-        self.assertIsNone(self._monitor._scan_ai_title(""))
-        self.assertIsNone(self._monitor._scan_ai_title(12345))
+        self.assertIsNone(transcripts._scan_ai_title(None))
+        self.assertIsNone(transcripts._scan_ai_title(""))
+        self.assertIsNone(transcripts._scan_ai_title(12345))
 
 
 class TestListSessionsAiTitle(unittest.TestCase):
@@ -4336,12 +4342,12 @@ class TestListSessionsAiTitle(unittest.TestCase):
         self._data_dir = pathlib.Path(self._tmpdir) / "data"
         self._data_dir.mkdir()
         _monitor.DATA_DIR = self._data_dir
-        _monitor._AI_TITLE_CACHE.clear()
+        transcripts._AI_TITLE_CACHE.clear()
 
     def tearDown(self):
         import shutil as _sh
         self._monitor.DATA_DIR = self._orig_data
-        self._monitor._AI_TITLE_CACHE.clear()
+        transcripts._AI_TITLE_CACHE.clear()
         _sh.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_ai_title_surfaces_into_session_dict(self):
@@ -4364,7 +4370,7 @@ class TestListSessionsAiTitle(unittest.TestCase):
             encoding="utf-8",
         )
         fake_root = self._proj_root.resolve()
-        with patch.object(self._monitor, "CLAUDE_PROJECTS_DIR", fake_root):
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", fake_root):
             sessions = self._monitor.list_sessions()
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["ai_title"], "My session goal")
@@ -4403,7 +4409,7 @@ class TestServerToolUseAggregation(unittest.TestCase):
         )
 
     def setUp(self):
-        from monitor import _SESSION_COST_CACHE as _cache
+        from transcripts import _SESSION_COST_CACHE as _cache
         self._cache = _cache
         _cache.clear()
         self._tmpdir = tempfile.mkdtemp()
@@ -4419,8 +4425,8 @@ class TestServerToolUseAggregation(unittest.TestCase):
     def _run(self, sid, lines):
         import monitor as _m
         jl = _write_transcript(self._proj_dir, sid, lines)
-        with patch.object(_m, "CLAUDE_PROJECTS_DIR", self._fake_root):
-            return _m._aggregate_session_cost(
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
+            return transcripts._aggregate_session_cost(
                 {"session_id": sid, "transcript_path": str(jl)}
             )
 
@@ -4474,7 +4480,7 @@ class TestRenderCostBreakdownServerTool(unittest.TestCase):
     """C: WSR/WFR/TIE/T5M rows render conditionally on non-zero values."""
 
     def setUp(self):
-        from monitor import _SESSION_COST_CACHE as _cache
+        from transcripts import _SESSION_COST_CACHE as _cache
         self._cache = _cache
         _cache.clear()
         self._tmpdir = tempfile.mkdtemp()
@@ -4507,7 +4513,7 @@ class TestRenderCostBreakdownServerTool(unittest.TestCase):
                 "total_input_tokens": 100, "total_output_tokens": 50,
             },
         }
-        with patch.object(_m, "CLAUDE_PROJECTS_DIR", self._fake_root):
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self._fake_root):
             buf = _m.render_cost_breakdown(data, [], 80, 50)
         return "\n".join(_strip_ansi(buf))
 
@@ -4621,9 +4627,9 @@ class TestScanSubagents(unittest.TestCase):
         import tempfile, pathlib, monitor, json
         self._json = json
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_root = monitor.CLAUDE_PROJECTS_DIR
-        monitor.CLAUDE_PROJECTS_DIR = pathlib.Path(self.tmpdir)
-        monitor._subagents_cache.clear()
+        self._orig_root = transcripts.CLAUDE_PROJECTS_DIR
+        transcripts.CLAUDE_PROJECTS_DIR = pathlib.Path(self.tmpdir)
+        transcripts._subagents_cache.clear()
         # transcript = <root>/proj/sess.jsonl ; subagents = <root>/proj/sess/subagents/
         self.proj = pathlib.Path(self.tmpdir) / "proj"
         self.proj.mkdir(parents=True, exist_ok=True)
@@ -4634,8 +4640,8 @@ class TestScanSubagents(unittest.TestCase):
 
     def tearDown(self):
         import shutil, monitor
-        monitor.CLAUDE_PROJECTS_DIR = self._orig_root
-        monitor._subagents_cache.clear()
+        transcripts.CLAUDE_PROJECTS_DIR = self._orig_root
+        transcripts._subagents_cache.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _agent(self, name, in_tok=0, out_tok=0, cache_r=0, tool=None):
@@ -4650,7 +4656,7 @@ class TestScanSubagents(unittest.TestCase):
         import monitor
         self._agent("agent-aaa.jsonl", in_tok=100, out_tok=50, cache_r=200, tool="Read")
         self._agent("agent-bbb.jsonl", in_tok=10, out_tok=5, tool="Grep")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         self.assertIsNotNone(info)
         self.assertEqual(info["total"], 2)
         self.assertEqual(info["total_tokens"], 100 + 50 + 200 + 10 + 5)
@@ -4667,7 +4673,7 @@ class TestScanSubagents(unittest.TestCase):
             self._json.dumps({"type": "assistant",
                               "message": {"usage": {"input_tokens": 7}}}) + "\n",
             encoding="utf-8")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         # agent-aaa + workflow agent-w1, journal.jsonl excluded
         self.assertEqual(info["total"], 2)
         self.assertEqual(info["total_tokens"], 17)
@@ -4678,7 +4684,7 @@ class TestScanSubagents(unittest.TestCase):
         self._agent("agent-stale.jsonl", in_tok=1)
         old = time.time() - 3600
         os.utime(self.subdir / "agent-stale.jsonl", (old, old))
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         self.assertEqual(info["total"], 2)
         self.assertEqual(info["active"], 1)  # only the fresh one
 
@@ -4686,12 +4692,12 @@ class TestScanSubagents(unittest.TestCase):
         import pathlib, monitor
         bare = self.proj / "lonely.jsonl"
         bare.write_text('{"type":"user"}\n', encoding="utf-8")
-        self.assertIsNone(monitor.scan_subagents(str(bare), ttl=0))
+        self.assertIsNone(transcripts.scan_subagents(str(bare), ttl=0))
 
     def test_invalid_path_returns_none(self):
         import monitor
-        self.assertIsNone(monitor.scan_subagents(None, ttl=0))
-        self.assertIsNone(monitor.scan_subagents("/etc/passwd", ttl=0))
+        self.assertIsNone(transcripts.scan_subagents(None, ttl=0))
+        self.assertIsNone(transcripts.scan_subagents("/etc/passwd", ttl=0))
 
     def test_render_agents_no_data_does_not_crash(self):
         import monitor
@@ -4701,7 +4707,7 @@ class TestScanSubagents(unittest.TestCase):
     def test_render_agents_lists_agents(self):
         import monitor
         self._agent("agent-aaa.jsonl", in_tok=1000, tool="Read")
-        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
+        transcripts.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
         buf = monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)
         flat = "\n".join(_strip_ansi(buf))
         self.assertIn("total", flat)
@@ -4717,11 +4723,11 @@ class TestScanSubagents(unittest.TestCase):
             + self._json.dumps({"type": "assistant",
                                 "message": {"usage": {"input_tokens": 5}}}) + "\n",
             encoding="utf-8")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         self.assertIsNotNone(info)
         self.assertEqual(info["total_tokens"], 5)  # only the valid object counts
         # cache must be populated (perf guard not defeated)
-        self.assertTrue(monitor._subagents_cache)
+        self.assertTrue(transcripts._subagents_cache)
 
     def test_malformed_jsonl_line_skipped(self):
         import monitor
@@ -4729,7 +4735,7 @@ class TestScanSubagents(unittest.TestCase):
             "not json at all\n"
             + self._json.dumps({"message": {"usage": {"input_tokens": 99}}}) + "\n",
             encoding="utf-8")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         self.assertEqual(info["total_tokens"], 99)
 
     def test_symlink_leaf_rejected(self):
@@ -4745,7 +4751,7 @@ class TestScanSubagents(unittest.TestCase):
             os.symlink(str(outside), str(self.subdir / "agent-evil.jsonl"))
         except (OSError, NotImplementedError):
             self.skipTest("symlinks not supported here")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         ids = {a["id"] for a in info["agents"]}
         self.assertNotIn("evil", ids)
         self.assertEqual(info["total_tokens"], 10)  # symlink target not read
@@ -4755,13 +4761,13 @@ class TestScanSubagents(unittest.TestCase):
         self._agent("agent-small.jsonl", in_tok=3)
         big = self._json.dumps({"message": {"usage": {"input_tokens": 9999}}})
         (self.subdir / "agent-big.jsonl").write_text((big + "\n") * 100, encoding="utf-8")
-        orig = monitor._SUBAGENT_FILE_MAX
+        orig = transcripts._SUBAGENT_FILE_MAX
         # Cap between the small agent (~90 B) and the big one (~5 KB).
-        monitor._SUBAGENT_FILE_MAX = 500
+        transcripts._SUBAGENT_FILE_MAX = 500
         try:
-            info = monitor.scan_subagents(str(self.tp), ttl=0)
+            info = transcripts.scan_subagents(str(self.tp), ttl=0)
         finally:
-            monitor._SUBAGENT_FILE_MAX = orig
+            transcripts._SUBAGENT_FILE_MAX = orig
         self.assertEqual(info["total"], 2)
         self.assertEqual(info["total_tokens"], 3)  # big one contributes 0
         big_a = [a for a in info["agents"] if a["id"] == "big"][0]
@@ -4771,19 +4777,19 @@ class TestScanSubagents(unittest.TestCase):
         # Second call within TTL returns the cached result (perf guarantee).
         import monitor
         self._agent("agent-a.jsonl", in_tok=1)
-        first = monitor.scan_subagents(str(self.tp), ttl=100)
+        first = transcripts.scan_subagents(str(self.tp), ttl=100)
         self.assertEqual(first["total"], 1)
         self._agent("agent-b.jsonl", in_tok=1)  # add a file after caching
-        cached = monitor.scan_subagents(str(self.tp), ttl=100)
+        cached = transcripts.scan_subagents(str(self.tp), ttl=100)
         self.assertEqual(cached["total"], 1)  # cache hit: new file not seen
-        fresh = monitor.scan_subagents(str(self.tp), ttl=0)
+        fresh = transcripts.scan_subagents(str(self.tp), ttl=0)
         self.assertEqual(fresh["total"], 2)  # ttl=0 forces refresh
 
     def test_lru_cache_bounded(self):
         import monitor
         self._agent("agent-a.jsonl", in_tok=1)
         # Scan more distinct dirs than the cache cap to force eviction.
-        for i in range(monitor._SUBAGENTS_CACHE_MAX + 3):
+        for i in range(transcripts._SUBAGENTS_CACHE_MAX + 3):
             p = pathlib.Path(self.tmpdir) / f"p{i}"
             (p).mkdir(parents=True, exist_ok=True)
             tpi = p / "s.jsonl"
@@ -4793,15 +4799,15 @@ class TestScanSubagents(unittest.TestCase):
             (sd / "agent-x.jsonl").write_text(
                 self._json.dumps({"message": {"usage": {"input_tokens": 1}}}) + "\n",
                 encoding="utf-8")
-            monitor.scan_subagents(str(tpi), ttl=100)
-        self.assertLessEqual(len(monitor._subagents_cache), monitor._SUBAGENTS_CACHE_MAX)
+            transcripts.scan_subagents(str(tpi), ttl=100)
+        self.assertLessEqual(len(transcripts._subagents_cache), transcripts._SUBAGENTS_CACHE_MAX)
 
     def test_render_frame_dispatch_show_agents(self):
         # render_frame must route show_agents=True to the AGENTS modal,
         # like its sibling show_cost / show_legend flags.
         import monitor
         self._agent("agent-aaa.jsonl", in_tok=10)
-        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
+        transcripts.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
         buf = monitor.render_frame(
             {"transcript_path": str(self.tp)}, [], 80, 24, show_agents=True)
         self.assertTrue(any("AGENTS" in ln for ln in _strip_ansi(buf)))
@@ -4815,7 +4821,7 @@ class TestScanSubagents(unittest.TestCase):
         old = time.time() - 3600
         os.utime(self.subdir / "agent-idle.jsonl", (old, old))
         data = {"transcript_path": str(self.tp)}
-        monitor.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
+        transcripts.scan_subagents(str(self.tp), ttl=0)  # warm cache (render is async)
         all_flat = "\n".join(_strip_ansi(monitor.render_agents(data, 80, 24, active_only=False)))
         self.assertIn("live", all_flat)
         self.assertIn("idle", all_flat)
@@ -4835,7 +4841,7 @@ class TestScanSubagents(unittest.TestCase):
             "message": {"usage": {"input_tokens": 7}},
         })
         (self.subdir / "agent-xyz.jsonl").write_text(line + "\n", encoding="utf-8")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         agent = next(a for a in info["agents"] if a["id"] == "xyz")
         self.assertEqual(agent["label"], "haiku-scout")
 
@@ -4848,7 +4854,7 @@ class TestScanSubagents(unittest.TestCase):
             "message": {"usage": {"input_tokens": 3}},
         })
         (self.subdir / "agent-abc.jsonl").write_text(line + "\n", encoding="utf-8")
-        monitor.scan_subagents(str(self.tp), ttl=0)
+        transcripts.scan_subagents(str(self.tp), ttl=0)
         buf = monitor.render_agents({"transcript_path": str(self.tp)}, 80, 24)
         flat = "\n".join(_strip_ansi(buf))
         self.assertIn("sonnet-worker", flat)
@@ -4863,7 +4869,7 @@ class TestScanSubagents(unittest.TestCase):
                 encoding="utf-8")
         except (OSError, ValueError):
             self.skipTest("filesystem rejects ANSI chars in filename")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         for a in info["agents"]:
             self.assertNotIn("\x1b", a["id"])
 
@@ -4876,7 +4882,7 @@ class TestScanSubagents(unittest.TestCase):
             "message": {"usage": {"input_tokens": 2}},
         })
         (self.subdir / "agent-q.jsonl").write_text(line + "\n", encoding="utf-8")
-        info = monitor.scan_subagents(str(self.tp), ttl=0)
+        info = transcripts.scan_subagents(str(self.tp), ttl=0)
         agent = next(a for a in info["agents"] if a["id"] == "q")
         self.assertNotIn("\x1b", agent.get("label") or "")
 
@@ -4888,7 +4894,7 @@ class TestScanSubagents(unittest.TestCase):
         import monitor
         from unittest.mock import patch
         self._agent("agent-aaa.jsonl", in_tok=5)
-        monitor._subagents_cache.clear()
+        transcripts._subagents_cache.clear()
         called = {"n": 0}
 
         def fake_refresh(tp, d=None):
@@ -4900,8 +4906,8 @@ class TestScanSubagents(unittest.TestCase):
         self.assertIn("Scanning", flat)   # empty cache -> "Scanning" shown
         self.assertEqual(called["n"], 1)  # render kicked the off-thread refresh
         # The scan itself populates the cache when actually run.
-        monitor.scan_subagents(str(self.tp), ttl=0)
-        self.assertTrue(monitor._subagents_cache)
+        transcripts.scan_subagents(str(self.tp), ttl=0)
+        self.assertTrue(transcripts._subagents_cache)
 
 
 class TestModalScroll(unittest.TestCase):
@@ -5173,9 +5179,9 @@ class TestAuditFixesV1130(unittest.TestCase):
     def test_period_scope_excludes_unplaceable_ts(self):
         import json, tempfile, pathlib, shutil
         tmp = tempfile.mkdtemp()
-        orig_dir, orig_cache = monitor._CLAUDE_DIR, monitor._usage_cache.copy()
-        monitor._CLAUDE_DIR = pathlib.Path(tmp)
-        monitor._usage_cache.clear()
+        orig_dir, orig_cache = transcripts._CLAUDE_DIR, transcripts._usage_cache.copy()
+        transcripts._CLAUDE_DIR = pathlib.Path(tmp)
+        transcripts._usage_cache.clear()
         try:
             rec = json.dumps({  # no "timestamp" -> _parse_ts == 0
                 "type": "assistant",
@@ -5185,13 +5191,13 @@ class TestAuditFixesV1130(unittest.TestCase):
             _write_session(tmp, "proj1", "sess1", [rec])
             models_all, _ = scan_transcript_stats("all", ttl=0)
             self.assertEqual(models_all["claude-opus-4-6"]["input"], 100)
-            monitor._usage_cache.clear()
+            transcripts._usage_cache.clear()
             models_7d, _ = scan_transcript_stats("7d", ttl=0)
             self.assertNotIn("claude-opus-4-6", models_7d)  # excluded from window
         finally:
-            monitor._CLAUDE_DIR = orig_dir
-            monitor._usage_cache.clear()
-            monitor._usage_cache.update(orig_cache)
+            transcripts._CLAUDE_DIR = orig_dir
+            transcripts._usage_cache.clear()
+            transcripts._usage_cache.update(orig_cache)
             shutil.rmtree(tmp, ignore_errors=True)
 
     # ---- #2a: a corrupt huge timestamp doesn't abort the whole transcript ----
@@ -5204,9 +5210,9 @@ class TestAuditFixesV1130(unittest.TestCase):
                 raise OverflowError("simulated out-of-range timestamp")
 
         tmp = tempfile.mkdtemp()
-        orig_dir, orig_cache = monitor._CLAUDE_DIR, monitor._usage_cache.copy()
-        monitor._CLAUDE_DIR = pathlib.Path(tmp)
-        monitor._usage_cache.clear()
+        orig_dir, orig_cache = transcripts._CLAUDE_DIR, transcripts._usage_cache.copy()
+        transcripts._CLAUDE_DIR = pathlib.Path(tmp)
+        transcripts._usage_cache.clear()
         recs = [json.dumps({
             "type": "assistant", "timestamp": f"2026-04-12T10:0{i}:00Z",
             "message": {"model": "claude-opus-4-6",
@@ -5214,7 +5220,7 @@ class TestAuditFixesV1130(unittest.TestCase):
         }) for i in range(2)]
         _write_session(tmp, "proj1", "sess1", recs)
         try:
-            with patch.object(monitor, "datetime", _BoomDT):
+            with patch.object(transcripts, "datetime", _BoomDT):
                 models, ov = scan_transcript_stats("all", ttl=0)
             # Both records' tokens are aggregated (fromtimestamp raising must not
             # abort the file); only the per-day attribution is skipped.
@@ -5222,9 +5228,9 @@ class TestAuditFixesV1130(unittest.TestCase):
             self.assertEqual(models["claude-opus-4-6"]["calls"], 2)
             self.assertEqual(len(ov["active_days"]), 0)
         finally:
-            monitor._CLAUDE_DIR = orig_dir
-            monitor._usage_cache.clear()
-            monitor._usage_cache.update(orig_cache)
+            transcripts._CLAUDE_DIR = orig_dir
+            transcripts._usage_cache.clear()
+            transcripts._usage_cache.update(orig_cache)
             shutil.rmtree(tmp, ignore_errors=True)
 
     # ---- #3: cleanup join is bounded and finishes a quick worker ----
@@ -5347,7 +5353,7 @@ class TestJsonReadersRejectInvalidShapes(unittest.TestCase):
             path.write_text("\n".join(['[]', '1', 'null', '{',
                             '[' * 20000 + ']' * 20000, json.dumps(valid)]), encoding="utf-8")
             models = {}
-            monitor._aggregate_transcript(path, path.stat(), "session", False, 0,
+            transcripts._aggregate_transcript(path, path.stat(), "session", False, 0,
                                           models, set(), {}, {})
             self.assertEqual(models["test"]["input"], 7)
             self.assertEqual(models["test"]["output"], 2)
@@ -5388,15 +5394,15 @@ class TestDesktopSessions(unittest.TestCase):
         self.root = pathlib.Path(self._td.name)
         self.proj = self.root / "C--work"
         self.proj.mkdir()
-        monitor._desktop_state.clear()
-        monitor._desktop_meta_cache.clear()
-        monitor._desktop_sessions_cache.update({"t": 0.0, "key": None, "sessions": None})
-        self._patch = patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root)
+        transcripts._desktop_state.clear()
+        transcripts._desktop_meta_cache.clear()
+        transcripts._desktop_sessions_cache.update({"t": 0.0, "key": None, "sessions": None})
+        self._patch = patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self.root)
         self._patch.start()
 
     def tearDown(self):
         self._patch.stop()
-        monitor._desktop_state.clear()
+        transcripts._desktop_state.clear()
         self._td.cleanup()
 
     def _write(self, sid, lines, mode="w"):
@@ -5422,7 +5428,7 @@ class TestDesktopSessions(unittest.TestCase):
 
     def test_list_finds_transcript_only_session(self):
         self._basic()
-        s = monitor.list_desktop_sessions()
+        s = transcripts.list_desktop_sessions()
         self.assertEqual([x["id"] for x in s], ["desk-1"])
         self.assertEqual(s[0]["source"], "desktop")
         self.assertEqual(s[0]["origin"], "desk")
@@ -5435,26 +5441,26 @@ class TestDesktopSessions(unittest.TestCase):
         sub.mkdir(parents=True)
         (sub / "agent-a.jsonl").write_text(
             _desk_assistant("s1", "2026-11-13T20:00:00.000Z", input_tokens=1) + "\n", encoding="utf-8")
-        self.assertEqual(monitor.list_desktop_sessions(exclude={"desk-1"}), [])
+        self.assertEqual(transcripts.list_desktop_sessions(exclude={"desk-1"}), [])
 
     def test_list_skips_session_without_reply(self):
         self._write("desk-2", [_desk_rec("user", entrypoint="claude-desktop")])
-        self.assertEqual(monitor.list_desktop_sessions(), [])
+        self.assertEqual(transcripts.list_desktop_sessions(), [])
 
     def test_old_transcripts_do_not_crowd_out_fresh_one(self):
-        old = time.time() - monitor.DESKTOP_SESSION_TTL - 60
+        old = time.time() - transcripts.DESKTOP_SESSION_TTL - 60
         for i in range(30):
             p = self.proj / f"aaa-old-{i:03d}.jsonl"   # sorts before the fresh file
             p.write_text("{}\n", encoding="utf-8")
             os.utime(p, (old, old))
         self._basic("zzz-fresh")
-        with patch.object(monitor, "_DESKTOP_SCAN_CAP", 5):
-            ids = [s["id"] for s in monitor.list_desktop_sessions()]
+        with patch.object(transcripts, "_DESKTOP_SCAN_CAP", 5):
+            ids = [s["id"] for s in transcripts.list_desktop_sessions()]
         self.assertEqual(ids, ["zzz-fresh"])
 
     def test_infinite_ctx_env_does_not_crash_import(self):
         env = dict(os.environ, CC_MON_DESKTOP_CTX="inf")
-        r = subprocess.run([sys.executable, "-c", "import monitor; print(monitor.DESKTOP_CTX_SIZE)"],
+        r = subprocess.run([sys.executable, "-c", "import monitor, transcripts; print(transcripts.DESKTOP_CTX_SIZE)"],
                            cwd=str(pathlib.Path(monitor.__file__).parent), env=env,
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -5467,21 +5473,21 @@ class TestDesktopSessions(unittest.TestCase):
 
     def test_list_skips_old_transcripts(self):
         p = self._basic()
-        old = time.time() - monitor.DESKTOP_SESSION_TTL - 60
+        old = time.time() - transcripts.DESKTOP_SESSION_TTL - 60
         os.utime(p, (old, old))
-        self.assertEqual(monitor.list_desktop_sessions(), [])
+        self.assertEqual(transcripts.list_desktop_sessions(), [])
 
     def test_origin_tag(self):
-        self.assertEqual(monitor._origin_tag("claude-desktop"), "desk")
-        self.assertEqual(monitor._origin_tag("sdk-py"), "sdk-py")
-        self.assertEqual(monitor._origin_tag(""), "?")
-        self.assertEqual(monitor._origin_tag(None), "?")
-        self.assertNotIn("\x1b", monitor._origin_tag("\x1b[31mevil"))
+        self.assertEqual(transcripts._origin_tag("claude-desktop"), "desk")
+        self.assertEqual(transcripts._origin_tag("sdk-py"), "sdk-py")
+        self.assertEqual(transcripts._origin_tag(""), "?")
+        self.assertEqual(transcripts._origin_tag(None), "?")
+        self.assertNotIn("\x1b", transcripts._origin_tag("\x1b[31mevil"))
 
     def test_state_counts_each_message_once(self):
         p = self._basic()
-        data, hist = monitor.load_desktop_state("desk-1", str(p))
-        price = monitor._get_pricing("claude-opus-5-5")
+        data, hist = transcripts.load_desktop_state("desk-1", str(p))
+        price = transcripts._get_pricing("claude-opus-5-5")
         expected = ((10 + 5) * price["input"] + (1000 + 500) * price["output"]
                     + 130_000 * price["cache_read"] + 1_000 * price["cache_write"]) / 1_000_000
         self.assertAlmostEqual(data["cost"]["total_cost_usd"], expected)
@@ -5504,7 +5510,7 @@ class TestDesktopSessions(unittest.TestCase):
         p = self._write("desk-3", [_desk_assistant(
             "m1", "2026-11-13T20:00:00.000Z", model="claude-haiku-4-5-20251001",
             input_tokens=1, cache_read_input_tokens=150_000)])
-        data, _ = monitor.load_desktop_state("desk-3", str(p))
+        data, _ = transcripts.load_desktop_state("desk-3", str(p))
         self.assertEqual(data["context_window"]["context_window_size"], 200_000)
         self.assertAlmostEqual(data["context_window"]["used_percentage"], 75.0005)
 
@@ -5512,7 +5518,7 @@ class TestDesktopSessions(unittest.TestCase):
         p = self._write("desk-4", [_desk_assistant(
             "m1", "2026-11-13T20:00:00.000Z", cache_creation_input_tokens=1_000_000,
             cache_creation={"ephemeral_1h_input_tokens": 600_000, "ephemeral_5m_input_tokens": 400_000})])
-        data, _ = monitor.load_desktop_state("desk-4", str(p))
+        data, _ = transcripts.load_desktop_state("desk-4", str(p))
         # Opus 5.5: input $4 → 1h write $8/M; 5m write $5/M
         self.assertAlmostEqual(data["cost"]["total_cost_usd"], 0.6 * 8.0 + 0.4 * 5.0)
         self.assertEqual(data["_session_cost"]["cache_1h"], 600_000)
@@ -5522,42 +5528,42 @@ class TestDesktopSessions(unittest.TestCase):
                  for i in range(40)]
         p = self._write("desk-5", lines)
         size = p.stat().st_size
-        with patch.object(monitor, "_DESKTOP_READ_BUDGET", size // 3):
-            results = [monitor.load_desktop_state("desk-5", str(p)) for _ in range(5)]
+        with patch.object(transcripts, "_DESKTOP_READ_BUDGET", size // 3):
+            results = [transcripts.load_desktop_state("desk-5", str(p)) for _ in range(5)]
         self.assertIsNone(results[0])          # still catching up
         data, hist = results[-1]
         self.assertEqual(len(hist), 40)        # every request ingested once
 
     def test_cost_breakdown_uses_desktop_breakdown(self):
         p = self._basic()
-        data, _ = monitor.load_desktop_state("desk-1", str(p))
-        self.assertIs(monitor._aggregate_session_cost(data), data["_session_cost"])
+        data, _ = transcripts.load_desktop_state("desk-1", str(p))
+        self.assertIs(transcripts._aggregate_session_cost(data), data["_session_cost"])
 
     def test_env_override_window(self):
         p = self._basic()
-        with patch.object(monitor, "DESKTOP_CTX_SIZE", 400_000):
-            data, _ = monitor.load_desktop_state("desk-1", str(p))
+        with patch.object(transcripts, "DESKTOP_CTX_SIZE", 400_000):
+            data, _ = transcripts.load_desktop_state("desk-1", str(p))
         self.assertEqual(data["context_window"]["context_window_size"], 400_000)
 
     def test_incremental_append_and_partial_line(self):
         p = self._basic()
-        monitor.load_desktop_state("desk-1", str(p))
+        transcripts.load_desktop_state("desk-1", str(p))
         full = _desk_assistant("m3", "2026-11-13T20:10:00.000Z", input_tokens=1, output_tokens=7)
         with open(p, "a", encoding="utf-8") as fh:
             fh.write(full[:20])  # half-written record: must wait for its newline
-        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        data, hist = transcripts.load_desktop_state("desk-1", str(p))
         self.assertEqual(len(hist), 2)
         with open(p, "a", encoding="utf-8") as fh:
             fh.write(full[20:] + "\n")
-        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        data, hist = transcripts.load_desktop_state("desk-1", str(p))
         self.assertEqual(len(hist), 3)
         self.assertEqual(data["context_window"]["current_usage"]["output_tokens"], 7)
 
     def test_rewritten_file_restarts_parse(self):
         p = self._basic()
-        monitor.load_desktop_state("desk-1", str(p))
+        transcripts.load_desktop_state("desk-1", str(p))
         self._write("desk-1", [_desk_assistant("z1", "2026-11-13T21:00:00.000Z", input_tokens=3)])
-        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        data, hist = transcripts.load_desktop_state("desk-1", str(p))
         self.assertEqual(len(hist), 1)
 
     def test_rejects_path_outside_projects(self):
@@ -5565,8 +5571,8 @@ class TestDesktopSessions(unittest.TestCase):
             p = pathlib.Path(other) / "desk-9.jsonl"
             p.write_text(_desk_assistant("m1", "2026-11-13T20:00:00.000Z", input_tokens=1) + "\n",
                          encoding="utf-8")
-            self.assertIsNone(monitor.load_desktop_state("desk-9", str(p)))
-        self.assertIsNone(monitor.load_desktop_state("../bad", str(self.proj / "x.jsonl")))
+            self.assertIsNone(transcripts.load_desktop_state("desk-9", str(p)))
+        self.assertIsNone(transcripts.load_desktop_state("../bad", str(self.proj / "x.jsonl")))
 
     def test_snapshot_mtime_uses_transcript(self):
         self.assertEqual(monitor._snapshot_mtime({"_source": "desktop", "_mtime": 123.0}), 123.0)
@@ -5574,7 +5580,7 @@ class TestDesktopSessions(unittest.TestCase):
 
     def test_render_frame_marks_estimates(self):
         p = self._basic()
-        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        data, hist = transcripts.load_desktop_state("desk-1", str(p))
         with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
             plain = _ANSI_RE.sub("", "\n".join(render_frame(data, hist, 100, 60)))
         self.assertIn("desktop app, estimated", plain)
@@ -5584,7 +5590,7 @@ class TestDesktopSessions(unittest.TestCase):
 
     def test_render_frame_narrow_keeps_line_ends(self):
         p = self._basic()
-        data, hist = monitor.load_desktop_state("desk-1", str(p))
+        data, hist = transcripts.load_desktop_state("desk-1", str(p))
         data["session_name"] = "A very long desktop session name ľščťž"
         with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
             lines = _strip_ansi(render_frame(data, hist, 40, 60))
@@ -5620,13 +5626,13 @@ class TestDesktopSessions(unittest.TestCase):
 
     def test_desktop_snapshot_carries_effort_and_permission_mode(self):
         p = self._settings_transcript("desk-3")
-        data, _ = monitor.load_desktop_state("desk-3", str(p))
+        data, _ = transcripts.load_desktop_state("desk-3", str(p))
         self.assertEqual(data["effort"], {"level": "xhigh"})
         self.assertEqual(data["permission_mode"], "bypassPermissions")
 
     def test_cli_settings_fill_permission_mode_from_transcript(self):
         p = self._settings_transcript("cli-3")
-        monitor._AI_TITLE_CACHE.clear()
+        transcripts._AI_TITLE_CACHE.clear()
         data = {"transcript_path": str(p), "effort": {"level": "medium"}}
         # The statusline effort wins; the permission mode comes from the transcript.
         self.assertEqual(monitor._session_settings(data), ("medium", "bypassPermissions"))
@@ -5634,7 +5640,7 @@ class TestDesktopSessions(unittest.TestCase):
 
     def test_header_title_and_settings_line(self):
         p = self._settings_transcript("desk-4")
-        data, hist = monitor.load_desktop_state("desk-4", str(p))
+        data, hist = transcripts.load_desktop_state("desk-4", str(p))
         with patch.object(monitor, "cached_cross_session_costs", return_value=(0.0, 0.0)):
             wide = render_frame(data, hist, 80, 60)
             narrow = _strip_ansi(render_frame(data, hist, 20, 60))
@@ -5729,14 +5735,14 @@ class TestUsageCountedOncePerRequest(unittest.TestCase):
         self.root = pathlib.Path(self._td.name)
         self.proj = self.root / "proj"
         self.proj.mkdir()
-        monitor._SESSION_COST_CACHE.clear()
-        monitor._subagents_cache.clear()
-        monitor._usage_cache.clear()
+        transcripts._SESSION_COST_CACHE.clear()
+        transcripts._subagents_cache.clear()
+        transcripts._usage_cache.clear()
 
     def tearDown(self):
-        monitor._SESSION_COST_CACHE.clear()
-        monitor._subagents_cache.clear()
-        monitor._usage_cache.clear()
+        transcripts._SESSION_COST_CACHE.clear()
+        transcripts._subagents_cache.clear()
+        transcripts._usage_cache.clear()
         self._td.cleanup()
 
     def _lines(self):
@@ -5745,15 +5751,15 @@ class TestUsageCountedOncePerRequest(unittest.TestCase):
 
     def test_session_cost_dedups(self):
         jl = _write_transcript(self.proj, "sess-a", self._lines())
-        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
-            res = monitor._aggregate_session_cost({"session_id": "sess-a", "transcript_path": str(jl)})
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self.root):
+            res = transcripts._aggregate_session_cost({"session_id": "sess-a", "transcript_path": str(jl)})
         self.assertEqual(res["input"], 30)
         self.assertEqual(res["output"], 300)
 
     def test_token_stats_dedup(self):
         _write_transcript(self.proj, "sess-b", self._lines())
-        with patch.object(monitor, "_CLAUDE_DIR", self.root):
-            models, overview = monitor.scan_transcript_stats("all", ttl=0)
+        with patch.object(transcripts, "_CLAUDE_DIR", self.root):
+            models, overview = transcripts.scan_transcript_stats("all", ttl=0)
         m = models["claude-opus-5-5"]
         self.assertEqual((m["input"], m["output"], m["calls"]), (30, 300, 2))
         self.assertEqual(sum(overview["daily_tokens"].values()), 330)
@@ -5762,8 +5768,8 @@ class TestUsageCountedOncePerRequest(unittest.TestCase):
         lines = [json.dumps({"type": "assistant", "message": {
             "model": "claude-opus-5-5", "usage": {"input_tokens": 5}}})] * 2
         jl = _write_transcript(self.proj, "sess-c", lines)
-        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
-            res = monitor._aggregate_session_cost({"session_id": "sess-c", "transcript_path": str(jl)})
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self.root):
+            res = transcripts._aggregate_session_cost({"session_id": "sess-c", "transcript_path": str(jl)})
         self.assertEqual(res["input"], 10)
 
     def test_subagent_tokens_dedup(self):
@@ -5772,8 +5778,8 @@ class TestUsageCountedOncePerRequest(unittest.TestCase):
         sub.mkdir(parents=True)
         (sub / "agent-x.jsonl").write_text(
             "\n".join(_block_records("s1", input_tokens=7, output_tokens=3)) + "\n", encoding="utf-8")
-        with patch.object(monitor, "CLAUDE_PROJECTS_DIR", self.root):
-            info = monitor.scan_subagents(str(self.proj / "sess-d.jsonl"), ttl=0)
+        with patch.object(transcripts, "CLAUDE_PROJECTS_DIR", self.root):
+            info = transcripts.scan_subagents(str(self.proj / "sess-d.jsonl"), ttl=0)
         self.assertEqual(info["total_tokens"], 10)
 
 
@@ -5798,19 +5804,19 @@ class TestCurrentModelPricing(unittest.TestCase):
     def test_haiku_5_5_long_prompt_tier(self):
         self.assertEqual(_get_pricing("claude-haiku-5-5", prompt_tokens=100_000)["input"], 0.10)
         self.assertEqual(_get_pricing("claude-haiku-5-5", prompt_tokens=100_001)["input"], 0.50)
-        c = monitor._usage_cost("claude-haiku-5-5", None, 150_000, 1_000, 0, 0)
+        c = transcripts._usage_cost("claude-haiku-5-5", None, 150_000, 1_000, 0, 0)
         self.assertAlmostEqual(c["input"], 150_000 * 0.50 / 1e6)
 
     def test_one_hour_write_rate(self):
-        c = monitor._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 1_000_000)
+        c = transcripts._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 1_000_000)
         self.assertAlmostEqual(c["cache_write"], 8.0)  # 2x the $4 input
-        c = monitor._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 0)
+        c = transcripts._usage_cost("claude-opus-5-5", None, 0, 0, 0, 1_000_000, 0)
         self.assertAlmostEqual(c["cache_write"], 5.0)
 
     def test_context_windows(self):
-        self.assertEqual(monitor._model_context_window("claude-opus-5-5"), 1_000_000)
-        self.assertEqual(monitor._model_context_window("claude-haiku-4-5-20251001"), 200_000)
-        self.assertEqual(monitor._model_context_window("claude-future-9"), monitor.DEFAULT_CTX_WINDOW)
+        self.assertEqual(transcripts._model_context_window("claude-opus-5-5"), 1_000_000)
+        self.assertEqual(transcripts._model_context_window("claude-haiku-4-5-20251001"), 200_000)
+        self.assertEqual(transcripts._model_context_window("claude-future-9"), transcripts.DEFAULT_CTX_WINDOW)
 
     def test_aliases(self):
         self.assertEqual(_get_pricing("fable")["input"], 8.0)

@@ -115,7 +115,7 @@ If you add a new env var, add it here in the same commit.
 ### `CC_MON_DESKTOP_CTX`
 
 - **Type:** integer (tokens)
-- **Default:** `0` — the model's window from `monitor._MODELS`
+- **Default:** `0` — the model's window from `transcripts._MODELS`
   (`_model_context_window`: 1 000 000 for current models, 200 000 for
   Haiku 4.5 and older), or 1 000 000 when the requested model carries `[1m]`
 - **Read by:** `monitor.py` (`_env_float` → `DESKTOP_CTX_SIZE`)

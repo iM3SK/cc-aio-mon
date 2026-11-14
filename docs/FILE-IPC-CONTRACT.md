@@ -3,7 +3,7 @@
 **Status**: Active  
 **Version**: 1.18.3 (`SCHEMA_VERSION` = 1)\
 **Last Updated**: 2026-11-13\
-**Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `pulse.py`
+**Source Truth**: `shared.py`, `statusline.py`, `monitor.py`, `transcripts.py`, `pulse.py`
 
 See also: [ARCHITECTURE.md](ARCHITECTURE.md) for module overview, [RELEASE.md](RELEASE.md) for release process.
 
@@ -229,7 +229,7 @@ Not part of the snapshot: these come from the session transcript (`~/.claude/pro
 
 | Field | Disposition | Notes |
 |---|---|---|
-| `message.id`, `requestId` | **consumed** — dedup key | One request = one key (`monitor._usage_key`) |
+| `message.id`, `requestId` | **consumed** — dedup key | One request = one key (`transcripts._usage_key`) |
 | `message.model` | **consumed** — pricing | `<synthetic>` placeholders are skipped |
 | `usage.input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` | **consumed** — tokens and cost | |
 | `usage.cache_creation.ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens` | **consumed** — cost | 1-hour writes are priced at 2× input, 5-minute writes at the model's cache-write rate |
@@ -242,14 +242,14 @@ Not part of the snapshot: these come from the session transcript (`~/.claude/pro
 
 ### Desktop app sessions (in memory only)
 
-`monitor.load_desktop_state()` builds a snapshot-shaped dict from the transcript of a session that has no statusline snapshot. It is never written to `DATA_DIR`. It uses the snapshot fields above (estimated values) plus:
+`transcripts.load_desktop_state()` builds a snapshot-shaped dict from the transcript of a session that has no statusline snapshot. It is never written to `DATA_DIR`. It uses the snapshot fields above (estimated values) plus:
 
 | Field | Type | Description |
 |---|---|---|
 | `_source` | str | `"desktop"` |
 | `_origin` | str | Entrypoint tag (`desk` for `claude-desktop`) |
 | `_mtime` | float | Transcript mtime; drives staleness and UPD |
-| `_session_cost` | dict | Cost breakdown, same shape as `monitor._aggregate_session_cost()` |
+| `_session_cost` | dict | Cost breakdown, same shape as `transcripts._aggregate_session_cost()` |
 | `effort` | dict | `{level}` from the latest assistant record; empty when the transcript has none |
 | `permission_mode` | str | Raw mode of the latest prompt, e.g. `default` or `bypassPermissions`; an unknown mode is shown as written |
 
@@ -279,7 +279,7 @@ running concurrently this may surface another account's limits. Single-account
 running interactive Claude Code session (`pid`, `sessionId`, `status`,
 `updatedAt`, …) and is removed when the session exits. The format is not
 documented by Anthropic (observed with Claude Code 2.1.325).
-`monitor.live_session_ids()` reads at most 64 records (64 KiB each, regular files
+`transcripts.live_session_ids()` reads at most 64 records (64 KiB each, regular files
 in a non-symlinked directory, 2 s TTL) and keeps the `sessionId`s whose process
 is still running (Windows: `OpenProcess` + `GetExitCodeProcess`, never a signal).
 A session listed there is not marked stale, whatever its mtime; any read problem
