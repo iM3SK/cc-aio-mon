@@ -15,7 +15,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import json
 import os
 import pathlib
-import re
 import sys
 import tempfile
 import time
@@ -25,12 +24,9 @@ from unittest.mock import patch, MagicMock
 import shared
 from shared import (
     _ANSI_RE,
-    _sanitize,
     C_RED,
     C_GRN,
     C_YEL,
-    C_ORN,
-    C_CYN,
     C_DIM,
     C_LABEL,
     C_MONEY,
@@ -40,7 +36,6 @@ from shared import (
 
 from statusline import (
     _get_terminal_width,
-    _calc_rates as sl_calc_rates,
     seg_model,
     seg_ctx,
     seg_5hl,
@@ -48,7 +43,6 @@ from statusline import (
     seg_cost,
     seg_brn,
     build_line,
-    _last_known_rate_limits,
     _last_known_rate_limits_at,
     seg_fable,
     seg_cache,
@@ -386,7 +380,7 @@ class TestLastKnownRateLimits(unittest.TestCase):
             {"rate_limits": {"five_hour": {"used_percentage": 9}}},  # newer
         ]
         self.assertEqual(
-            _last_known_rate_limits(hist),
+            _last_known_rate_limits_at(hist)[0],
             {"five_hour": {"used_percentage": 9}},
         )
 
@@ -396,7 +390,7 @@ class TestLastKnownRateLimits(unittest.TestCase):
             {"cost": {"total_cost_usd": 1}},  # newer, no rate_limits
         ]
         self.assertEqual(
-            _last_known_rate_limits(hist),
+            _last_known_rate_limits_at(hist)[0],
             {"seven_day": {"used_percentage": 5}},
         )
 
@@ -413,7 +407,7 @@ class TestLastKnownRateLimits(unittest.TestCase):
             )
             with patch.object(statusline, "DATA_DIR", d):
                 self.assertEqual(
-                    _last_known_rate_limits([]),
+                    _last_known_rate_limits_at([])[0],
                     {"seven_day": {"used_percentage": 5}},
                 )
 
@@ -426,13 +420,13 @@ class TestLastKnownRateLimits(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.object(statusline, "DATA_DIR", d):
-                self.assertIsNone(_last_known_rate_limits([]))
+                self.assertIsNone(_last_known_rate_limits_at([])[0])
 
     def test_none_when_nothing_available(self):
         import tempfile, pathlib, statusline
         with tempfile.TemporaryDirectory() as td:
             with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
-                self.assertIsNone(_last_known_rate_limits([]))
+                self.assertIsNone(_last_known_rate_limits_at([])[0])
 
     def test_history_skips_newer_schema_version(self):
         # F-17: history entries tagged with _schema_version > SCHEMA_VERSION
@@ -443,7 +437,7 @@ class TestLastKnownRateLimits(unittest.TestCase):
             {"rate_limits": {"five_hour": {"used_percentage": 9}},
              "_schema_version": shared.SCHEMA_VERSION + 1},      # too new — skip
         ]
-        result = _last_known_rate_limits(hist)
+        result = _last_known_rate_limits_at(hist)[0]
         self.assertIsNotNone(result)
         self.assertEqual(result["five_hour"]["used_percentage"], 3)
 
@@ -453,7 +447,7 @@ class TestLastKnownRateLimits(unittest.TestCase):
             {"rate_limits": {"five_hour": {"used_percentage": 7}},
              "_schema_version": shared.SCHEMA_VERSION},
         ]
-        result = _last_known_rate_limits(hist)
+        result = _last_known_rate_limits_at(hist)[0]
         self.assertEqual(result, {"five_hour": {"used_percentage": 7}})
 
     def test_history_accepts_missing_schema_version(self):
@@ -461,7 +455,7 @@ class TestLastKnownRateLimits(unittest.TestCase):
         hist = [
             {"rate_limits": {"five_hour": {"used_percentage": 4}}},
         ]
-        result = _last_known_rate_limits(hist)
+        result = _last_known_rate_limits_at(hist)[0]
         self.assertEqual(result, {"five_hour": {"used_percentage": 4}})
 
     def test_history_all_newer_schema_falls_through_to_none(self):
@@ -474,7 +468,7 @@ class TestLastKnownRateLimits(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as td:
             with patch.object(statusline, "DATA_DIR", pathlib.Path(td)):
-                self.assertIsNone(_last_known_rate_limits(hist))
+                self.assertIsNone(_last_known_rate_limits_at(hist)[0])
 
     def test_at_returns_history_row_time(self):
         import tempfile, pathlib, statusline

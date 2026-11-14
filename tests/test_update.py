@@ -23,18 +23,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import os
 import pathlib
-import re
 import sys
 import tempfile
-import time
 import unittest
 from unittest.mock import patch, MagicMock
 
 import shared
-from shared import _ANSI_RE
 
 from update import (
-    get_local_version,
     get_remote_version,
     get_ahead_behind,
     get_remote_changelog_entry,
@@ -46,7 +42,6 @@ from monitor import (
     _update_checks,
     _get_new_commits,
     _get_remote_changelog_preview,
-    _apply_update_action,
     _apply_update_worker,
 )
 

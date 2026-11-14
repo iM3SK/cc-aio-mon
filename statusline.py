@@ -269,19 +269,16 @@ def seg_brn(brn):
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
-def _last_known_rate_limits(hist):
-    """Most recent rate_limits for this account when the current CC event omitted
-    them. Claude Code emits rate_limits only intermittently, so reading solely
-    from the live event makes the 5HL/7DL segments blink out. Mirrors the
-    dashboard fallback (monitor.cached_freshest_rate_limits). Sources, in order:
+def _last_known_rate_limits_at(hist):
+    """(rate_limits, observed_at): the most recent rate_limits for this account
+    when the current CC event omitted them. Claude Code emits rate_limits only
+    intermittently, so reading solely from the live event makes the 5HL/7DL
+    segments blink out. Mirrors the dashboard fallback
+    (monitor.cached_freshest_rate_limits). Sources, in order:
     (1) this session's own history (already in memory — no extra IO);
     (2) the freshest *.json snapshot across all sessions (account-wide, since
-    5H/7D limits are per-account). Returns None when nothing usable is found."""
-    return _last_known_rate_limits_at(hist)[0]
-
-
-def _last_known_rate_limits_at(hist):
-    """(rate_limits, observed_at) — same lookup as _last_known_rate_limits.
+    5H/7D limits are per-account). rate_limits is None when nothing usable is
+    found.
     observed_at is the history row's `t` or the snapshot's mtime; None when the
     row carries no usable time (unknown age never dims). A history row older
     than STALE_DIM_SEC yields to a fresher snapshot of another session — the

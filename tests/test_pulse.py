@@ -13,9 +13,7 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import json
-import os
 import pathlib
-import re
 import sys
 import tempfile
 import time

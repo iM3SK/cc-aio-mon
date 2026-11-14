@@ -15,26 +15,20 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import json
 import os
 import pathlib
-import re
 import sys
 import tempfile
-import time
 import unittest
 from unittest.mock import patch, MagicMock
 
 import shared
 from shared import (
     MAX_FILE_SIZE,
-    _ANSI_RE,
     _SID_RE,
     _sanitize,
     RESERVED_SIDS,
     C_RED,
     C_GRN,
     C_YEL,
-    C_ORN,
-    C_CYN,
-    C_DIM,
     char_width,
     is_safe_dir,
     ensure_data_dir,
@@ -743,9 +737,10 @@ class TestPyFilesSingleSourceOfTruth(unittest.TestCase):
         self.assertNotIn("for f in PY_FILES", src)
 
     def test_monitor_uses_shared_py_files(self):
+        # monitor needs no PY_FILES import: it delegates the whole post-pull
+        # check (and so the file list) to shared.check_syntax_after_pull.
         import monitor as _m
         src = pathlib.Path(_m.__file__).read_text(encoding="utf-8")
-        self.assertIn("PY_FILES", src)
         self.assertIn("check_syntax_after_pull", src)
         self.assertNotIn("for f in PY_FILES", src)
 
