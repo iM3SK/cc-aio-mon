@@ -1473,7 +1473,8 @@ class TestFableRefresherResolvesToolsByAbsolutePath(unittest.TestCase):
              patch("statusline.subprocess.run") as run, \
              patch.dict("os.environ", {"SystemRoot": r"C:\Windows"}):
             statusline._kill_tree(proc)
-        argv0 = run.call_args[0][0][0]
+        # os.path.join uses "/" when the test runs on Linux/macOS.
+        argv0 = run.call_args[0][0][0].replace("/", "\\")
         self.assertTrue(argv0.lower().endswith(r"system32\taskkill.exe"), argv0)
         self.assertTrue(argv0.lower().startswith(r"c:\windows"), argv0)
 
