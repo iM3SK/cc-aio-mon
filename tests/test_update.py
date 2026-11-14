@@ -584,6 +584,61 @@ class TestApplyUpdateWorkerVersionErrorSanitized(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # v1.10.2 security scan regression tests (L-1..L-4, I-1, I-2)
 # ---------------------------------------------------------------------------
+class TestDefaultCheckSanitizesRemoteText(unittest.TestCase):
+    """The default (read-only) `update.py` run prints
+    commit subjects, the CHANGELOG preview and the remote version from
+    origin/main. Control sequences in them must not reach the terminal."""
+
+    OSC_TITLE = "\x1b]0;PWNED\x07"
+    OSC_CLIP = "\x1b]52;c;Y2xpcA==\x07"
+
+    def _run_default_check(self):
+        import io
+        import update as _u
+        out = io.StringIO()
+        with patch.object(_u, "_init_terminal", return_value=False), \
+             patch.object(_u, "check_python_version"), \
+             patch.object(_u, "check_repo"), \
+             patch.object(_u, "check_branch"), \
+             patch.object(_u, "check_clean"), \
+             patch.object(_u, "verify_origin_remote", return_value=None), \
+             patch.object(_u, "fetch_remote"), \
+             patch.object(_u, "get_local_version", return_value="1.0.0"), \
+             patch.object(_u, "get_remote_version",
+                          return_value="1.0.1" + self.OSC_TITLE), \
+             patch.object(_u, "get_ahead_behind", return_value=(1, 0)), \
+             patch.object(_u, "get_new_commits",
+                          return_value=["abc1234 release " + self.OSC_TITLE + " notes"]), \
+             patch.object(_u, "get_remote_changelog_entry",
+                          return_value="## v1.0.1\n- payload [" + self.OSC_CLIP + "] end"), \
+             patch.object(sys, "argv", ["update.py"]), \
+             patch("sys.stdout", out):
+            with self.assertRaises(SystemExit) as cm:
+                _u._main()
+        self.assertEqual(cm.exception.code, 0)
+        return out.getvalue()
+
+    def test_commit_subjects_and_changelog_are_sanitized(self):
+        text = self._run_default_check()
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\x07", text)
+        self.assertIn("abc1234 release ]0;PWNED notes", text)
+        self.assertIn("- payload [", text)
+        self.assertIn("Latest:   1.0.1]0;PWNED", text)
+
+    def test_check_clean_output_is_sanitized(self):
+        import io
+        import update as _u
+        out = io.StringIO()
+        res = MagicMock(returncode=0, stdout=" M evil\x1b]0;x\x07.py\n", stderr="")
+        with patch.object(_u, "run_git", return_value=res), \
+             patch("sys.stdout", out), patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                _u.check_clean()
+        self.assertNotIn("\x1b", out.getvalue())
+        self.assertIn("M evil]0;x.py", out.getvalue())
+
+
 class TestApplyUpdateNewVersionSanitized(unittest.TestCase):
     """L-4: new_ver from get_local_version() must be sanitized before echo."""
 

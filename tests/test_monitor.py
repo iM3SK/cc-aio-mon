@@ -3382,6 +3382,24 @@ class TestRlsCheckWorkerUsesRunGit(unittest.TestCase):
         # Worker must NOT bypass run_git to call subprocess.run directly
         mock_sp.assert_not_called()
 
+    def test_remote_version_is_sanitized(self):
+        """The remote VERSION string is shown in the RLS line and update modal."""
+        from unittest.mock import patch as _patch, MagicMock
+        import monitor as _m
+        res = MagicMock(returncode=0, stdout='VERSION = "99.0.0\x1b]52;c;eA==\x07"',
+                        stderr="")
+        saved = _m._rls_snapshot()
+        self.addCleanup(_m._rls_cache.update, saved)
+        # The worker releases _rls_lock in `finally`; take it as _rls_maybe_check does.
+        _m._rls_lock.acquire(blocking=False)
+        with _patch("monitor.run_git", return_value=res):
+            _m._rls_check_worker()
+        snap = _m._rls_snapshot()
+        self.assertEqual(snap["status"], "update")
+        self.assertNotIn("\x1b", snap["remote_ver"])
+        self.assertNotIn("\x07", snap["remote_ver"])
+        self.assertTrue(snap["remote_ver"].startswith("99.0.0"))
+
 
 # ---------------------------------------------------------------------------
 # Regression: _SESSION_COST_CACHE LRU eviction (DEBT-017 v1.9.1)

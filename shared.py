@@ -8,7 +8,6 @@ import math
 import os
 import pathlib
 import re
-import shutil
 import stat as _stat_mod
 import subprocess
 import sys
@@ -58,7 +57,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.18.0"
+VERSION = "1.18.1"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -421,11 +420,34 @@ def _git_env():
     return env
 
 
-# SEC (PATH injection): resolve git to an absolute path once at import. A bare
-# "git" argv is re-resolved at every call — on Windows CreateProcess even
-# consults the CWD, so a git.exe planted in the repo root would win. Pinning
-# the import-time resolution closes the call-time swap window.
-_GIT_BIN = shutil.which("git")
+def which_abs(name: str) -> Optional[str]:
+    """Find an executable on PATH, looking only in absolute PATH entries.
+
+    shutil.which() on Windows searches the current directory before PATH, so a
+    git.exe in the directory the monitor was started from would win. Empty and
+    relative PATH entries (".", "") are skipped for the same reason."""
+    exts = [""]
+    if sys.platform == "win32":
+        pathext = os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
+        exts = [e for e in pathext.split(os.pathsep) if e]
+        if os.path.splitext(name)[1].upper() in (e.upper() for e in exts):
+            exts = [""]
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        d = d.strip().strip('"')
+        if not d or not os.path.isabs(d):
+            continue
+        for ext in exts:
+            cand = os.path.join(d, name + ext)
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+    return None
+
+
+# SEC (PATH injection): resolve git to an absolute path once at import, from
+# absolute PATH entries only (which_abs). A bare "git" argv is re-resolved at
+# every call, and on Windows both CreateProcess and shutil.which consult the
+# current directory first, so a planted git.exe there would win.
+_GIT_BIN = which_abs("git")
 
 
 def run_git(args: Iterable[str], cwd, timeout: float = 15) -> "subprocess.CompletedProcess[str]":

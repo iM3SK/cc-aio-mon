@@ -892,7 +892,8 @@ def _rls_check_worker():
         if not m:
             _rls_write("error")
             return
-        remote_ver = m.group(1)
+        # SEC: origin/main content is shown in the RLS line and update modal.
+        remote_ver = _sanitize(m.group(1))
         local_t = _parse_version(VERSION)
         remote_t = _parse_version(remote_ver)
         status = "update" if remote_t > local_t else "ok"

@@ -280,6 +280,54 @@ class TestRunGitEnvWhitelist(unittest.TestCase):
         self.assertTrue(os.path.isabs(argv0))
 
 
+class TestWhichAbs(unittest.TestCase):
+    """PATH injection: an executable in the current directory must
+    not shadow the one on PATH (shutil.which on Windows checks CWD first)."""
+
+    def _make_exe(self, folder, name):
+        fname = name + (".exe" if sys.platform == "win32" else "")
+        p = os.path.join(folder, fname)
+        with open(p, "wb") as fh:
+            fh.write(b"#!/bin/sh\n")
+        os.chmod(p, 0o755)
+        return p
+
+    def test_current_directory_is_not_searched(self):
+        from unittest.mock import patch as _patch
+        with tempfile.TemporaryDirectory() as cwd_dir, \
+             tempfile.TemporaryDirectory() as path_dir:
+            self._make_exe(cwd_dir, "fakegit")
+            on_path = self._make_exe(path_dir, "fakegit")
+            old = os.getcwd()
+            os.chdir(cwd_dir)
+            try:
+                with _patch.dict("os.environ", {"PATH": path_dir}):
+                    found = shared.which_abs("fakegit")
+            finally:
+                os.chdir(old)
+        self.assertEqual(os.path.normcase(found), os.path.normcase(on_path))
+
+    def test_relative_and_empty_path_entries_are_skipped(self):
+        from unittest.mock import patch as _patch
+        with tempfile.TemporaryDirectory() as cwd_dir:
+            self._make_exe(cwd_dir, "fakegit")
+            old = os.getcwd()
+            os.chdir(cwd_dir)
+            try:
+                with _patch.dict("os.environ",
+                                 {"PATH": os.pathsep.join(["", ".", "sub"])}):
+                    found = shared.which_abs("fakegit")
+            finally:
+                os.chdir(old)
+        self.assertIsNone(found)
+
+    def test_missing_executable_returns_none(self):
+        from unittest.mock import patch as _patch
+        with tempfile.TemporaryDirectory() as path_dir:
+            with _patch.dict("os.environ", {"PATH": path_dir}):
+                self.assertIsNone(shared.which_abs("no-such-tool-xyz"))
+
+
 # ---------------------------------------------------------------------------
 # Security: self-update origin pinning
 # ---------------------------------------------------------------------------
