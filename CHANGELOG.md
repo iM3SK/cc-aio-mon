@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.18.3 — 2026-11-14
+
+**Security:**
+- **The Fable weekly-usage refresher no longer looks for `claude` or
+  `taskkill` in its working directory.** It runs with the data directory as
+  its current directory; `claude` is now found through `shared.which_abs`
+  (absolute `PATH` entries only) and `taskkill` is called by its full
+  `System32` path.
+- **CI checkouts no longer keep the GitHub token in the job.** The test,
+  Bandit, version-gate and release-smoke workflows set
+  `persist-credentials: false`.
+- `.gitignore` also covers `.git-credentials`, `_netrc`, `.npmrc` and
+  `.pypirc`.
+
+**Docs:**
+- `SECURITY.md` describes Pulse's module-local `urllib` opener, which
+  ignores proxy environment variables.
+- The Sonnet 5, Haiku 5.5 and fast-mode Fable / Mythos 5.2 cache rates are
+  confirmed against Anthropic's documentation; the prices are unchanged.
+
+**Tests:** 956 passing (+2).
+
 ## v1.18.2 — 2026-11-14
 
 **Fixes — narrow terminals:**

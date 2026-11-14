@@ -1180,7 +1180,7 @@ class TestRunFableRefresh(unittest.TestCase):
     def test_runs_get_usage_control_request(self):
         proc = self._proc()
         with patch("statusline.read_fable_weekly", side_effect=[_fbl(age_s=400), _fbl(age_s=0)]), \
-             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.which_abs", return_value="/bin/claude"), \
              patch("statusline.subprocess.Popen", return_value=proc) as po:
             self.assertEqual(statusline.run_fable_refresh(ttl=300), "refreshed")
         argv = po.call_args[0][0]
@@ -1200,7 +1200,7 @@ class TestRunFableRefresh(unittest.TestCase):
         proc = self._proc()
         proc.returncode = 1
         with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
-             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.which_abs", return_value="/bin/claude"), \
              patch("statusline.subprocess.Popen", return_value=proc):
             self.assertEqual(statusline.run_fable_refresh(ttl=300), "error")
         holder = shared.acquire_singleton_lock(self.dd / "fable-refresh.lock")
@@ -1211,14 +1211,14 @@ class TestRunFableRefresh(unittest.TestCase):
         for after in (None, _fbl(age_s=400)):
             with self.subTest(after=after), \
                  patch("statusline.read_fable_weekly", side_effect=[_fbl(age_s=400), after]), \
-                 patch("statusline.shutil.which", return_value="/bin/claude"), \
+                 patch("statusline.which_abs", return_value="/bin/claude"), \
                  patch("statusline.subprocess.Popen", return_value=self._proc()):
                 self.assertEqual(statusline.run_fable_refresh(ttl=300), "error")
 
     def test_usage_child_does_not_inherit_nested_session_marker(self):
         with patch.dict(os.environ, {"CLAUDECODE": "1", "FABLE_FIXTURE_ENV": "preserved"}), \
              patch("statusline.read_fable_weekly", side_effect=[_fbl(age_s=400), _fbl(age_s=0)]), \
-             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.which_abs", return_value="/bin/claude"), \
              patch("statusline.subprocess.Popen", return_value=self._proc()) as po:
             self.assertEqual(statusline.run_fable_refresh(ttl=300), "refreshed")
             self.assertNotIn("CLAUDECODE", po.call_args[1]["env"])
@@ -1229,7 +1229,7 @@ class TestRunFableRefresh(unittest.TestCase):
         proc = self._proc()
         proc.communicate.side_effect = [OSError("fixture pipe error"), ("", "")]
         with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
-             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.which_abs", return_value="/bin/claude"), \
              patch("statusline.subprocess.Popen", return_value=proc), \
              patch("statusline._kill_tree") as kt:
             self.assertEqual(statusline.run_fable_refresh(ttl=300), "error")
@@ -1261,7 +1261,7 @@ class TestRunFableRefresh(unittest.TestCase):
 
     def test_missing_claude_binary(self):
         with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
-             patch("statusline.shutil.which", return_value=None), \
+             patch("statusline.which_abs", return_value=None), \
              patch("statusline.subprocess.Popen") as po:
             self.assertEqual(statusline.run_fable_refresh(ttl=300), "no-claude")
         po.assert_not_called()
@@ -1269,7 +1269,7 @@ class TestRunFableRefresh(unittest.TestCase):
     def test_timeout_kills_tree(self):
         proc = self._proc(timeout=True)
         with patch("statusline.read_fable_weekly", return_value=_fbl(age_s=400)), \
-             patch("statusline.shutil.which", return_value="/bin/claude"), \
+             patch("statusline.which_abs", return_value="/bin/claude"), \
              patch("statusline.subprocess.Popen", return_value=proc), \
              patch("statusline._kill_tree") as kt:
             self.assertEqual(statusline.run_fable_refresh(ttl=300), "timeout")
@@ -1460,6 +1460,29 @@ class TestBuildLineCache(unittest.TestCase):
             statusline.main()
         self.assertIn("CCH cold 82.0k", _ANSI_RE.sub("", output.getvalue()))
         write.assert_called_once_with(payload)
+
+
+class TestFableRefresherResolvesToolsByAbsolutePath(unittest.TestCase):
+    """The refresher runs with cwd=DATA_DIR; neither `claude` nor `taskkill`
+    may be looked up in that directory."""
+
+    def test_kill_tree_uses_absolute_taskkill_on_windows(self):
+        import statusline
+        proc = MagicMock(pid=4242)
+        with patch.object(statusline, "_IS_WIN", True), \
+             patch("statusline.subprocess.run") as run, \
+             patch.dict("os.environ", {"SystemRoot": r"C:\Windows"}):
+            statusline._kill_tree(proc)
+        # os.path.join uses "/" when the test runs on Linux/macOS.
+        argv0 = run.call_args[0][0][0].replace("/", "\\")
+        self.assertTrue(argv0.lower().endswith(r"system32\taskkill.exe"), argv0)
+        self.assertTrue(argv0.lower().startswith(r"c:\windows"), argv0)
+
+    def test_refresher_uses_which_abs_for_claude(self):
+        import statusline
+        src = pathlib.Path(statusline.__file__).read_text(encoding="utf-8")
+        self.assertIn('which_abs("claude")', src)
+        self.assertNotIn('shutil.which("claude")', src)
 
 
 if __name__ == "__main__":
