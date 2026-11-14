@@ -985,6 +985,96 @@ class TestModelFamilies(unittest.TestCase):
     def test_modal_lists_every_family(self):
         import pulse
         self.assertEqual(pulse.MODEL_FAMILIES, ("fable", "mythos", "opus", "sonnet", "haiku"))
+class TestPulseCodingScope(unittest.TestCase):
+    """F-002: the verdict is scored on Claude API + Claude Code only."""
+
+    @staticmethod
+    def _summary(**extra):
+        s = {
+            "status": {"indicator": "minor"},
+            "components": [
+                {"name": "claude.ai", "status": "degraded_performance", "group": False},
+                {"name": "Claude API (api.anthropic.com)", "status": "operational", "group": False},
+                {"name": "Claude Code", "status": "operational", "group": False},
+                {"name": "Claude on Cloud Platforms", "status": "operational", "group": True},
+            ],
+            "incidents": [{"name": "Apple sign-up fails on iOS", "impact": "major",
+                           "status": "investigating", "components": [{"name": "claude.ai"}]}],
+        }
+        s.update(extra)
+        return s
+
+    def _raw(self, summary):
+        ind, comps, incs = pulse._extract(summary)
+        return {"indicator": ind, "scope_indicator": pulse.scope_indicator(comps, ind),
+                "incidents": incs, "components": comps,
+                "maintenances": pulse._extract_maintenances(summary),
+                "latency_ms": 100, "error": None}
+
+    def test_other_service_incident_is_not_scored(self):
+        r = pulse.compute_score(self._raw(self._summary()))
+        self.assertEqual(r["level"], "ok")
+        self.assertEqual(r["score"], 100)
+        self.assertIn("1 elsewhere, not scored", r["reason"])
+
+    def test_coding_component_outage_is_scored(self):
+        s = self._summary()
+        s["components"][1]["status"] = "major_outage"
+        raw = self._raw(s)
+        self.assertEqual(raw["scope_indicator"], "critical")
+        r = pulse.compute_score(raw)
+        self.assertNotEqual(r["level"], "ok")
+        self.assertLessEqual(r["score"], 50)
+        self.assertIn("status: critical outage", r["reason"])
+
+    def test_incident_without_components_counts(self):
+        s = self._summary(incidents=[{"name": "Elevated errors", "impact": "major", "components": []}])
+        _, _, incs = pulse._extract(s)
+        self.assertTrue(incs[0]["relevant"])
+        self.assertIn("1 active incident(s)", pulse.compute_score(self._raw(s))["reason"])
+
+    def test_incident_keeps_status_and_components(self):
+        _, comps, incs = pulse._extract(self._summary())
+        self.assertEqual(incs[0]["status"], "investigating")
+        self.assertEqual(incs[0]["components"], ["claude.ai"])
+        self.assertFalse(incs[0]["relevant"])
+        self.assertEqual([c["name"] for c in comps if c["relevant"]],
+                         ["Claude API (api.anthropic.com)", "Claude Code"])
+
+    def test_scope_falls_back_to_page_indicator(self):
+        comps = [{"name": "Something else", "status": "operational", "relevant": False}]
+        self.assertEqual(pulse.scope_indicator(comps, "major"), "major")
+
+    def test_raw_without_scope_keeps_old_scoring(self):
+        r = pulse.compute_score({"indicator": "none", "latency_ms": 100, "error": None,
+                                 "incidents": [{"impact": "major"}]})
+        self.assertIn("1 active incident(s)", r["reason"])
+        self.assertLess(r["score"], 100)
+
+    def test_maintenances_extracted(self):
+        s = self._summary(scheduled_maintenances=[{
+            "name": "DB upgrade", "status": "scheduled",
+            "scheduled_for": "2026-11-20T02:00:00Z", "scheduled_until": "2026-11-20T04:00:00Z",
+            "components": [{"name": "Claude Code"}]}])
+        m = pulse._extract_maintenances(s)
+        self.assertEqual(m[0]["name"], "DB upgrade")
+        self.assertTrue(m[0]["relevant"])
+        self.assertEqual(m[0]["scheduled_until"] - m[0]["scheduled_for"], 7200)
+
+    def test_modal_shows_scope_and_dims_other_incident(self):
+        raw = self._raw(self._summary())
+        sc = pulse.compute_score(raw)
+        snap = dict(raw, score=sc["score"], raw_score=sc["score"], verdict=sc["verdict"],
+                    level=sc["level"], reason=sc["reason"], latency_p50_ms=None,
+                    latency_p95_ms=None, wall_t=time.time(), t=0)
+        with patch.object(pulse, "get_pulse_snapshot", return_value=snap):
+            buf = render_pulse_modal(70, 80)
+        plain = [_ANSI_RE.sub("", ln).rstrip() for ln in buf]
+        self.assertIn("CODING     none (operational)", plain)
+        self.assertIn("INCIDENTS  0 coding / 1 elsewhere", plain)
+        self.assertIn("     investigating, claude.ai", plain)
+        inc = next(ln for ln in buf if "Apple sign-up" in ln)
+        self.assertNotIn(shared.C_RED, inc)
 
 
 if __name__ == "__main__":

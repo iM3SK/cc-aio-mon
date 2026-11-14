@@ -115,7 +115,7 @@ If you add a new env var, add it here in the same commit.
 ### `CC_MON_DESKTOP_CTX`
 
 - **Type:** integer (tokens)
-- **Default:** `0` — the model's window from `monitor._MODELS`
+- **Default:** `0` — the model's window from `transcripts._MODELS`
   (`_model_context_window`: 1 000 000 for current models, 200 000 for
   Haiku 4.5 and older), or 1 000 000 when the requested model carries `[1m]`
 - **Read by:** `monitor.py` (`_env_float` → `DESKTOP_CTX_SIZE`)
@@ -135,8 +135,9 @@ shells; new thresholds go under `CC_AIO_MON_*`.
 - **Type:** float (percent, 0–100)
 - **Default:** `50.0`
 - **Read by:** `shared.py` → exported as `shared.WARN_PCT`
-- **Effect:** percentage threshold at which `CTX` / `5HL` / `7DL` / `CTR`
-  bars flip from green to yellow.
+- **Effect:** percentage threshold at which `CTX` / `5HL` / `FBL` / `7DL` /
+  `CTR` flip from green to yellow. `CHR` uses its miss rate (100 − hit rate)
+  against the same threshold.
 - **Parser:** `shared._env_pct` — invalid / empty values silently fall back
   to the default (see `tests/test_shared.py::TestEnvPct`).
 
@@ -153,9 +154,11 @@ shells; new thresholds go under `CC_AIO_MON_*`.
 
 - **Type:** float ($/min)
 - **Default:** `3.0`
-- **Read by:** `monitor.py` (`_env_float` → `WARN_BRN`)
-- **Effect:** burn-rate threshold above which the `BRN` segment switches
-  to its alert color. The dashboard `BRN OVER TIME` axis defaults to
+- **Read by:** `shared.py` → exported as `shared.WARN_BRN`
+- **Effect:** burn-rate threshold above which `BRN` turns from green to
+  yellow in the statusline and the dashboard (also the burn-rate bars and
+  `CPM` in the cost breakdown) and the dashboard shows its `BRN` warning.
+  The dashboard `BRN OVER TIME` axis defaults to
   `0–10 $/min` regardless of this value (axis is set by `BRN_MAX`,
   overridable via `CC_MON_BRN_MAX`, not the warn threshold).
 

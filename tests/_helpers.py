@@ -68,7 +68,7 @@ def _full_data(**overrides):
 def _write_session(tmpdir, project, sid, lines, subagent=False):
     """Write a transcript JSONL under tmpdir/project[/sid/subagents]/<file>.
 
-    Mirrors the on-disk layout scanned by monitor.scan_transcript_stats.
+    Mirrors the on-disk layout scanned by transcripts.scan_transcript_stats.
     `tmpdir` may be str or Path; lines are joined with newlines + trailing NL.
     """
     if subagent:

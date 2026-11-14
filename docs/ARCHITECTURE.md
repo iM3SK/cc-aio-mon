@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.18.3 · Target reader: new contributor who just cloned the repo.
+> v1.19.0 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -23,7 +23,7 @@ Sessions in the Claude desktop app never run the statusline (the app runs
 Claude Code headless); the monitor reads them from their transcripts in
 `~/.claude/projects/` and labels their metrics as estimates.
 
-Design center: five runtime Python files, stdlib only, no build step, no pip
+Design center: six runtime Python files, stdlib only, no build step, no pip
 install. Python 3.8+ on Windows, macOS, and Linux.
 
 ---
@@ -62,7 +62,7 @@ lets both processes operate independently without sockets or shared memory.
 
 ---
 
-## 3. Five Modules
+## 3. Six Modules
 
 **statusline.py** — Entry point 1. Reads Claude Code's statusline JSON from
 stdin, renders the single-line ANSI status bar (Model, CTX, CCH, 5HL, FBL, 7DL, CST,
@@ -76,12 +76,19 @@ that refreshes Claude Code's usage cache for FBL (`_maybe_refresh_fable`). On Wi
 is queried via `CONOUT$` because Claude Code runs this script with all file
 descriptors piped (`_get_terminal_width`).
 
-**monitor.py** — Entry point 2 (interactive TUI). ~4 500 LOC. Owns the event
+**monitor.py** — Entry point 2 (interactive TUI). ~3 500 LOC. Owns the event
 loop, all `render_*` functions, the two-section session picker (CLI /
-desktop app), the desktop-session transcript reader, the model pricing table
-(`_MODELS`), and the daemon worker threads (see Section 5). The crash logger (`_install_crash_logger`) writes
+desktop app) and the daemon worker threads (see Section 5). The crash logger (`_install_crash_logger`) writes
 uncaught exceptions to `monitor-crash.log` because the alt-screen buffer would
-otherwise swallow any traceback silently. It is intentionally a single large module. The section index keeps the TUI navigable while preserving the five-runtime-file stdlib layout. The `test_debt016` maintainability trigger sits at 4700 LOC.
+otherwise swallow any traceback silently. A section index keeps the module navigable. The `test_debt016` maintainability trigger sits at 3700 LOC.
+
+**transcripts.py** — Transcript-derived data, no rendering (~1 400 LOC). The token-stats
+usage scanner (`scan_transcript_stats`), desktop app sessions (`list_desktop_sessions`,
+`load_desktop_state`), the session cost breakdown (`_aggregate_session_cost`), the
+subagent scan (`scan_subagents`), title / effort / permission mode from the transcript
+head and tail, the model metadata and pricing table (`_MODELS`, `_get_pricing`) and
+Claude Code's session registry (`live_session_ids`). `monitor.py` reaches it as
+`transcripts.<name>`; it imports only `shared.py` and the stdlib.
 
 **pulse.py** — Daemon thread module. Fetches `status.claude.com/api/v2/summary.json`
 and probes `api.anthropic.com/v1/messages` (any HTTP response counts as liveness).
@@ -96,7 +103,7 @@ cannot be silently routed through an injected proxy.
 **update.py** — Entry point 3 (CLI self-updater). Read-only by default; add
 `--apply` to run `git pull --ff-only`. Guards: clean working tree, on `main`
 branch, no divergence. Creates a `pre-update-YYYYMMDD-HHMMSS` rollback tag
-before each pull. Runs `shared.check_syntax_after_pull()` on all five modules
+before each pull. Runs `shared.check_syntax_after_pull()` on all six modules
 after the pull; missing, unreadable or invalid files fail verification. Both
 paths record the original commit for manual recovery and reject failed Git
 safety checks. In-app update
@@ -104,8 +111,9 @@ safety checks. In-app update
 daemon thread).
 
 **shared.py** — The shared kernel. Single source of truth for: `VERSION`,
-`SCHEMA_VERSION`, `PY_FILES`, `DATA_DIR`, ANSI color palette, `WARN_PCT` /
-`CRIT_PCT` thresholds, `calc_rates()` (BRN/CTR computation from JSONL history),
+`SCHEMA_VERSION`, `PY_FILES`, `DATA_DIR`, the Nord ANSI palette with its role
+aliases and status colors (`level_color()`, `brn_color()`), `WARN_PCT` /
+`CRIT_PCT` / `WARN_BRN` thresholds, `calc_rates()` (BRN/CTR computation from JSONL history),
 `load_history()`, `safe_read()`, `is_safe_dir()`, `ensure_data_dir()`,
 `run_git()` (minimal env whitelist), `acquire_singleton_lock()`,
 `rotate_crash_log()`, `check_syntax_after_pull()`, and `parse_ahead_behind()`.
@@ -248,10 +256,10 @@ in `requirements.txt` (there is none).
 | `status.claude.com` | `pulse.py:_fetch_summary()` | HTTPS (urllib) | Optional — disable with `CC_AIO_MON_NO_PULSE=1` |
 | `api.anthropic.com/v1/messages` | `pulse.py:_ping_api()` | HTTPS (urllib) | Optional — same opt-out |
 | GitHub (`origin/main`) | `_rls_check_worker`, `update.py` | HTTPS via `git fetch` | Optional — disable with `CC_AIO_MON_NO_UPDATE_CHECK=1` |
-| `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`) | `monitor.py:scan_transcript_stats()`, `_aggregate_session_cost()`, `list_desktop_sessions()`, `load_desktop_state()` | local file | Optional — token stats, cost breakdown and desktop app sessions |
+| `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`) | `transcripts.py:scan_transcript_stats()`, `_aggregate_session_cost()`, `list_desktop_sessions()`, `load_desktop_state()` | local file | Optional — token stats, cost breakdown and desktop app sessions |
 | `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) | `shared.read_fable_weekly()` | local file | Optional — FBL weekly pool; hidden when absent |
 | `claude` CLI | `statusline.py` (`run_fable_refresh`, detached) | subprocess (`claude -p`, experimental `get_usage` control request) | Optional — disable with `CC_AIO_MON_FABLE_REFRESH_SEC=0` |
-| `~/.claude/projects/<proj>/<session>/subagents/` | `monitor.py:scan_subagents()` | local file | Optional — agents fan-out modal; derived from the session `transcript_path`, containment-checked |
+| `~/.claude/projects/<proj>/<session>/subagents/` | `transcripts.py:scan_subagents()` | local file | Optional — agents fan-out modal; derived from the session `transcript_path`, containment-checked |
 
 `shared.run_git()` uses a minimal env whitelist (`_GIT_ENV_WHITELIST`) to strip
 injected `GIT_SSH_COMMAND`, `LD_PRELOAD`, and proxy vars before any subprocess
@@ -354,7 +362,7 @@ for `git rev-list --left-right --count` output in both files.
 | Goal | Start here |
 |---|---|
 | Change how burn rate or context rate is computed | `shared.calc_rates()` — reads last `HISTORY_RATE_SAMPLES` JSONL history entries |
-| Change hardcoded model pricing | `monitor._MODELS` dict (single source of truth, keyed by model ID) read via `_get_pricing()`; `_model_base()` normalizes the ID (strips `[...]` + `-YYYYMMDD`), `_DEFAULT_PRICING` is the Sonnet-tier fallback, `speed="fast"` selects the `pricing_fast` rates |
+| Change hardcoded model pricing | `transcripts._MODELS` dict (single source of truth, keyed by model ID) read via `_get_pricing()`; `_model_base()` normalizes the ID (strips `[...]` + `-YYYYMMDD`), `_DEFAULT_PRICING` is the Sonnet-tier fallback, `speed="fast"` selects the `pricing_fast` rates |
 | Add a field to the IPC snapshot | `statusline.write_shared_state()` → add field to `snapshot`/`entry` dict → bump `shared.SCHEMA_VERSION` (and extend `pulse.PulseSnapshot` if it is a pulse field) |
 | Add a new TUI modal | `monitor.render_frame()` dispatches to `render_*` functions; add a new `render_xyz()`, end it with `_window_buf(buf, rows)` so it scrolls (pinned header + scroll-position hint), and wire a key in the event loop |
 | Add a statusline segment | Add a `seg_xyz()` function in `statusline.py` (see `seg_model`, `seg_ctx`, etc.) and insert it into the `all_segs` list in `build_line()` with a drop rank (display order and drop order are separate) |

@@ -62,7 +62,7 @@ Work through these in order before creating any tag.
   python3 tests.py     # macOS / Linux
   ```
   `tests.py` is a thin wrapper that runs `unittest discover tests/`
-  (`tests.py:main()`). Current baseline: **956 tests** (v1.18.3; platform
+  (`tests.py:main()`). Current baseline: **985 tests** (v1.19.0; platform
   skips vary). The new release's count must be >= this number unless tests were
   intentionally removed (document the removal in CHANGELOG).
 
@@ -98,7 +98,7 @@ Work through these in order before creating any tag.
     "Current baseline" line in this file (Section 2).
   - **`monitor.py` LOC** → `wc -l monitor.py`: `docs/ARCHITECTURE.md` and
     `CONTRIBUTING.md`.
-  - **Model table** → when `monitor._MODELS` gains or loses a *priced* family,
+  - **Model table** → when `transcripts._MODELS` gains or loses a *priced* family,
     update the "Current priced families" line in `README.md` (and any model-ID
     examples in `docs/FILE-IPC-CONTRACT.md`).
   - **Avoid hard-coded line numbers** in docs (`monitor.py:NNN`) — they rot on
@@ -187,13 +187,13 @@ headers, bullet list under each, blank line, trailing test count line.
   `test_pulse.py`, `test_update.py`). The `tests.py` wrapper runs all of
   them via `unittest discover`.
 
-- [ ] **Syntax check covers all five modules.**
+- [ ] **Syntax check covers all six modules.**
   `shared.PY_FILES` (`shared.py`) lists every file the post-pull syntax
   check verifies:
   ```python
-  PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
+  PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py", "transcripts.py")
   ```
-  Confirm your changes compile cleanly in all five:
+  Confirm your changes compile cleanly in all six:
   ```
   py -c "import py_compile, shared; [py_compile.compile(f, doraise=True) for f in shared.PY_FILES]"
   ```
@@ -321,7 +321,7 @@ Git safety-check failures, timeouts and invalid comparison output block the pull
 The CLI requires its recovery tag to be created successfully and closes the
 singleton lock on every outcome. Neither updater performs an automatic reset.
 
-**The syntax check covers exactly the five files in `PY_FILES`.** If you add
+**The syntax check covers exactly the six files in `PY_FILES`.** If you add
 a new `.py` module to the project, add it to `PY_FILES` in `shared.py` so
 post-pull checks catch syntax errors in it.
 

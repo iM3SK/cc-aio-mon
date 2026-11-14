@@ -57,7 +57,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.18.3"
+VERSION = "1.19.0"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -104,9 +104,19 @@ def _env_pct(name, default):
     return default
 
 
+def _env_float(name, default):
+    v = os.environ.get(name, "").strip()
+    try:
+        return float(v) if v else default
+    except ValueError:
+        return default
+
+
 # Percentage thresholds shared by statusline + monitor (SSoT, previously parsed twice).
 WARN_PCT = _env_pct("CLAUDE_STATUS_WARN", 50.0)
 CRIT_PCT = _env_pct("CLAUDE_STATUS_CRIT", 80.0)
+# Burn rate ($/min) above which BRN turns from green to yellow (statusline + dashboard).
+WARN_BRN = _env_pct("CLAUDE_WARN_BRN", 3.0)
 
 # Statusline 5HL/FBL: a value older than this renders dim with `~` instead of its
 # threshold color, so an old number never passes for a live one (one rule for both).
@@ -114,19 +124,54 @@ STALE_DIM_SEC = 30 * 60
 
 # Python files that ship with the app — used by syntax-check paths in update flow
 # (monitor.py:_apply_update_worker + update.py:apply_update). Must stay in sync.
-PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py")
+PY_FILES = ("monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py", "transcripts.py")
 
-# ANSI — Nord truecolor (shared palette for statusline.py + monitor.py)
+# ANSI — Nord truecolor (shared palette for statusline.py + monitor.py).
+# Every color carries one meaning:
+#   Frost        metric codes, hotkeys, model, links; blue marks informational bars
+#   Snow Storm   values (brightest) and body text
+#   Polar Night  separators, brackets, empty bar track; brightened nord3 for
+#                secondary labels, units and hints
+#   Aurora       status only — green ok, yellow warning, orange elevated,
+#                red critical — plus purple for money
 E = "\033["
 R = E + "0m"
 B = E + "1m"
-C_RED = E + "38;2;191;97;106m"
-C_GRN = E + "38;2;163;190;140m"
-C_YEL = E + "38;2;235;203;139m"
-C_ORN = E + "38;2;208;135;112m"  # nord12 aurora orange — cost/finance
-C_CYN = E + "38;2;136;192;208m"
-C_WHT = E + "38;2;216;222;233m"
-C_DIM = E + "38;2;76;86;106m"
+C_RED = E + "38;2;191;97;106m"   # nord11 — critical, error, removed lines
+C_ORN = E + "38;2;208;135;112m"  # nord12 — elevated (partial outage, affected model)
+C_YEL = E + "38;2;235;203;139m"  # nord13 — warning
+C_GRN = E + "38;2;163;190;140m"  # nord14 — ok, active, added lines
+C_PUR = E + "38;2;180;142;173m"  # nord15 — money
+C_TEAL = E + "38;2;143;188;187m"  # nord7
+C_CYN = E + "38;2;136;192;208m"  # nord8 — labels, hotkeys, model, links
+C_BLU = E + "38;2;129;161;193m"  # nord9 — informational bars and states
+C_NAV = E + "38;2;94;129;172m"   # nord10
+C_WHT = E + "38;2;236;239;244m"  # nord6 — values
+C_TXT = E + "38;2;216;222;233m"  # nord4 — body text
+C_MUT = E + "38;2;97;110;136m"   # nord3 brightened (Nord comment color) — secondary text
+C_DIM = E + "38;2;76;86;106m"    # nord3 — chrome, inactive data
+
+# Semantic aliases — call sites name the role, the palette above names the hue.
+C_LABEL = C_CYN
+C_MONEY = C_PUR
+C_INFO = C_BLU
+
+
+def level_color(pct, warn=None, crit=None):
+    """Status color of a 0–100 value where more is worse: green, yellow, red."""
+    warn = WARN_PCT if warn is None else warn
+    crit = CRIT_PCT if crit is None else crit
+    if pct >= crit:
+        return C_RED
+    if pct >= warn:
+        return C_YEL
+    return C_GRN
+
+
+def brn_color(brn):
+    """Status color of a burn rate in $/min: yellow above WARN_BRN (the same
+    rule as the dashboard BRN warning), else green."""
+    return C_YEL if brn is not None and brn > WARN_BRN else C_GRN
 
 
 _CONTEXT_SUFFIX_RE = re.compile(r"\s*\((\d+\w?)\s*context\)")

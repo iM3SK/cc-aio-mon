@@ -272,7 +272,7 @@ class TestUpdate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# spin_session
+# _git_cmd
 # ---------------------------------------------------------------------------
 class TestGitCmd(unittest.TestCase):
 

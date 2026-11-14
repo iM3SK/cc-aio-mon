@@ -32,11 +32,11 @@ from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sani
                     lock_file_handle, unlock_file_handle, acquire_singleton_lock, which_abs,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_READ_MAX, HISTORY_RATE_SAMPLES,
                     DATA_DIR, RESERVED_SIDS, SCHEMA_VERSION,
-                    strip_context_suffix, WARN_PCT, CRIT_PCT,
+                    strip_context_suffix, level_color, brn_color,
                     char_width,
                     read_fable_weekly, fable_display_state, FABLE_REFRESH_SEC, FABLE_SETTINGS_STEM,
                     STALE_DIM_SEC,
-                    R, B, C_RED, C_GRN, C_YEL, C_ORN, C_CYN, C_WHT, C_DIM)
+                    R, B, C_RED, C_GRN, C_YEL, C_DIM, C_MUT, C_LABEL, C_MONEY)
 
 
 
@@ -127,15 +127,6 @@ def _get_terminal_width(fallback: int = 80) -> int:
     return fallback
 
 
-def cpc_base(pct, base):
-    """Threshold color — uses metric's own base color below WARN (matches monitor mkbar behavior)."""
-    if pct >= CRIT_PCT:
-        return C_RED
-    if pct >= WARN_PCT:
-        return C_YEL
-    return base
-
-
 # ---------------------------------------------------------------------------
 # Formatting — single-line, no background (CC notifications share the row)
 # ---------------------------------------------------------------------------
@@ -149,7 +140,7 @@ _SEP_VLEN = 3  # " │ "
 def seg_model(data):
     name = _sanitize(as_dict(data.get("model")).get("display_name", ""))
     name = strip_context_suffix(name).replace(" (200k)", "")
-    text = f"{B}{C_WHT}{name}{R}"
+    text = f"{B}{C_LABEL}{name}{R}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
@@ -158,9 +149,9 @@ def seg_ctx(data):
     pct = round(max(0.0, min(100.0, _num(cw.get("used_percentage")))))
     total = _num(cw.get("context_window_size"), 0)
     used = int(total * pct / 100) if total else 0
-    c = cpc_base(pct, C_CYN)
-    tok = f" {C_CYN}{f_tok(used)}/{f_tok(int(total))}{R}" if total else ""
-    text = f"{C_CYN}{B}CTX{R} {c}{pct}%{R}{tok}"
+    c = level_color(pct)
+    tok = f" {C_MUT}{f_tok(used)}/{f_tok(int(total))}{R}" if total else ""
+    text = f"{C_LABEL}{B}CTX{R} {c}{pct}%{R}{tok}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
@@ -180,11 +171,11 @@ def seg_5hl(data, age_s=None):
     if resets > 0 and resets < now:
         pct = 0
     if age_s is not None and age_s > STALE_DIM_SEC:
-        c, approx = C_DIM, "~"
+        lbl, c, rc, approx = C_DIM, C_DIM, C_DIM, "~"
     else:
-        c, approx = cpc_base(pct, C_YEL), ""
-    reset_str = f" {c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
-    text = f"{c}{B}5HL{R} {c}{approx}{pct}%{R}{reset_str}"
+        lbl, c, rc, approx = C_LABEL, level_color(pct), C_MUT, ""
+    reset_str = f" {rc}\u2192 {f_cd(resets)}{R}" if resets > now else ""
+    text = f"{lbl}{B}5HL{R} {c}{approx}{pct}%{R}{reset_str}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
@@ -200,9 +191,9 @@ def seg_7dl(data):
     now = time.time()
     if resets > 0 and resets < now:
         pct = 0
-    c = cpc_base(pct, C_YEL)
-    reset_str = f" {c}\u2192 {f_cd(resets)}{R}" if resets > now else ""
-    text = f"{c}{B}7DL{R} {c}{pct}%{R}{reset_str}"
+    c = level_color(pct)
+    reset_str = f" {C_MUT}\u2192 {f_cd(resets)}{R}" if resets > now else ""
+    text = f"{C_LABEL}{B}7DL{R} {c}{pct}%{R}{reset_str}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
@@ -217,11 +208,11 @@ def seg_fable(entry, now=None, ttl=None):
     pct = round(_num(entry.get("used_percentage")))
     resets = _num(entry.get("resets_at"), 0)
     if state == "stale":
-        c, approx = C_DIM, "~"
+        lbl, c, rc, approx = C_DIM, C_DIM, C_DIM, "~"
     else:
-        c, approx = cpc_base(pct, C_YEL), ""
-    reset_str = f" {c}→ {f_cd(resets)}{R}" if resets > t else ""
-    text = f"{c}{B}FBL{R} {c}{approx}{pct}%{R}{reset_str}"
+        lbl, c, rc, approx = C_LABEL, level_color(pct), C_MUT, ""
+    reset_str = f" {rc}→ {f_cd(resets)}{R}" if resets > t else ""
+    text = f"{lbl}{B}FBL{R} {c}{approx}{pct}%{R}{reset_str}"
     return text, sum(char_width(ch) for ch in _ANSI_RE.sub("", text))
 
 
@@ -255,11 +246,11 @@ def seg_cache(data, now=None):
         ttl_s = _cache_ttl_seconds(pc.get("ttl"))
         c = C_YEL if ttl_s and left < ttl_s * _CACHE_WARN_FRAC else C_GRN
         cd = f_cd(exp, now=t) if left >= 60 else "<1m"
-        text = f"{c}{B}CCH{R} {c}{cd}{R}"
+        text = f"{C_LABEL}{B}CCH{R} {c}{cd}{R}"
     elif warm is False or (warm is True and exp):
         tok = nonnegative_number(pc.get("recache_tokens_if_cold"))
         tok_str = f" {f_tok(tok)}" if tok else ""
-        text = f"{C_RED}{B}CCH{R} {C_RED}cold{tok_str}{R}"
+        text = f"{C_LABEL}{B}CCH{R} {C_RED}cold{tok_str}{R}"
     else:
         return None
     return text, sum(char_width(ch) for ch in _ANSI_RE.sub("", text))
@@ -267,14 +258,14 @@ def seg_cache(data, now=None):
 
 def seg_cost(data):
     usd = as_dict(data.get("cost")).get("total_cost_usd")
-    text = f"{C_ORN}CST{R} {C_ORN}{B}{f_cost_value(usd)}{R}"
+    text = f"{C_LABEL}{B}CST{R} {C_MONEY}{B}{f_cost_value(usd)}{R}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
 def seg_brn(brn):
     if brn is None or brn <= 0.0001:
         return None
-    text = f"{C_ORN}BRN{R} {C_ORN}{B}{brn:.4f} $/min{R}"
+    text = f"{C_LABEL}{B}BRN{R} {brn_color(brn)}{B}{brn:.4f} $/min{R}"
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 

@@ -16,14 +16,14 @@ The Bandit badge tracks report publication; findings are reviewed in
 
 > _Independent community project. Not affiliated with or endorsed by Anthropic. See [NOTICE](NOTICE.md) for provenance & trademark attribution._
 
-> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** on session start or resume, after each assistant message, a completed `/compact`, a permission mode change or vim mode toggle, when a rate-limit reset or prompt-cache expiry passes, and every `refreshInterval` seconds if set (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard; sessions in the Claude desktop app, which never run the statusline, are read from their transcripts instead. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Five runtime Python files, stdlib only, no build step.**
+> **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** on session start or resume, after each assistant message, a completed `/compact`, a permission mode change or vim mode toggle, when a rate-limit reset or prompt-cache expiry passes, and every `refreshInterval` seconds if set (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard; sessions in the Claude desktop app, which never run the statusline, are read from their transcripts instead. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Six runtime Python files, stdlib only, no build step.**
 
 | | |
 |---|---|
 | **Input** | Claude Code `statusLine` JSON protocol via stdin — model info, context window, rate limits, cost, token counts, session metadata |
 | **Output** | ANSI truecolor terminal — single-line statusline + fullscreen TUI dashboard with progress bars, smart alerts, cross-session cost aggregation |
 | **Data flow** | `Claude Code → stdin JSON → statusline.py → temp files → monitor.py → TUI` |
-| **Files** | `statusline.py` (statusline renderer + IPC writer), `monitor.py` (TUI dashboard), `shared.py` (shared helpers + rate math), `update.py` (self-updater), `pulse.py` (Anthropic backend stability monitor) |
+| **Files** | `statusline.py` (statusline renderer + IPC writer), `monitor.py` (TUI dashboard), `shared.py` (shared helpers + rate math), `update.py` (self-updater), `pulse.py` (Anthropic backend stability monitor), `transcripts.py` (transcript reader: usage, desktop sessions, cost, subagents, pricing) |
 | **IPC** | Atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/` — no sockets, no databases |
 
 <p align="center">
@@ -101,7 +101,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 </p>
 
 - **Cross-platform** — Windows (Terminal, PowerShell, Git Bash), macOS (Terminal, iTerm2), Linux. CI-tested: Ubuntu (Python 3.8, 3.10, 3.11, 3.12, 3.13, 3.14), Windows (Python 3.12), macOS (Python 3.12).
-- **Nord truecolor palette** — ANSI 24-bit color with semantic grouping: green = performance, cyan = context, yellow = rate limits, orange = cost/finance, red = critical. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
+- **Nord truecolor palette** — ANSI 24-bit color where every color has one meaning: Aurora marks status (green = ok, yellow = warning, orange = elevated, red = critical) and money (purple); Frost marks metric codes, hotkeys and informational bars; Snow Storm carries values; Polar Night carries separators and secondary text. The legend (`l`) lists the same key. Note: the Nord red/green pair is **not colorblind-safe** (similar luminance for deuteranopia/protanopia); every metric also carries a text label + numeric value, so color is redundant context only.
 - **Responsive layout** — statusline drops right segments for narrow terminals. Dashboard compresses sections automatically.
 - **Multi-session** — auto-detects CLI sessions via temp files and desktop app sessions via their transcripts. Scrolling two-section picker (CLI / desktop app) for multiple sessions. Press `s` to switch anytime. The picker and dashboard header show Claude Code's auto-generated session title (`ai-title` records in the transcript) when no explicit `session_name` is set; falls back to the UUID prefix if neither is available. On the dashboard, an auto-generated ai-title label is capped at 24 characters; the picker shows the full title.
 - **Stale detection** — sessions idle > 30 minutes get dimmed metrics with last known values preserved. See [Session States](#session-states) for a visual example.
@@ -114,7 +114,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
   <sub><b>Agents fan-out</b> (<code>a</code>) — live subagent / Workflow view: active/total, summed tokens, per-agent tokens and last tool.</sub>
 </p>
 - **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). CST displays `0.00 $` for a reported zero and `n/a` for missing or invalid data. The detail explains missing usage or an unavailable transcript estimate, and shows the estimate total even without a reported CST. Also shows cache savings percentage and burn rate over time bars. When non-zero, **WSR / WFR** rows surface server-side tool calls (`web_search_requests` / `web_fetch_requests` from `usage.server_tool_use`) and **TIE / T5M** rows split cache-creation tokens between the 1-hour and 5-minute ephemeral TTLs.
-- **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.claude.com` (indicator + incidents) + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku) — prefers `incidents[].components[]` array, falls back to regex on title. JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
+- **Anthropic Pulse** — press `p` for real-time Anthropic backend stability. Weighted score (0-100) from `status.claude.com` + HTTPS probe on `api.anthropic.com/v1/messages` (TLS + HTTP latency). The score uses only the components coding depends on (Claude API, Claude Code): their worst status and the incidents that list them or no component at all; incidents elsewhere (e.g. claude.ai) and the page-wide indicator are shown but not scored. Scheduled maintenance is listed with its window. Rolling-median smoothed verdict (`SAFE TO CODE` / `DEGRADED` / `NOT SAFE TO CODE`). Per-model tagging of active incidents (opus/sonnet/haiku) — prefers `incidents[].components[]` array, falls back to regex on title. JSONL history in `$TMPDIR/claude-aio-monitor/pulse.jsonl` with hybrid cleanup (24h age cutoff on startup + runtime rotation at 1 MB). **Zero token cost, zero API key required.**
 - **Security hardened** — session ID regex validation (`[a-zA-Z0-9_-]{1,128}`) with Windows reserved-device-name rejection (`CON`/`PRN`/`AUX`/`NUL`/`COM0-9`/`LPT0-9`, case-insensitive), C0/C1 control character sanitization, atomic writes via `NamedTemporaryFile`, symlink/junction rejection on the temp data directory and `~/.claude/projects/`, transcript containment checks, and bounded reads for JSON, JSONL, transcripts, Pulse responses, and post-update source checks.
 - **Singleton lock** — only one interactive `py monitor.py` can run at a time; a second attempt exits with a clear error pointing at `$TMPDIR/claude-aio-monitor/monitor.lock`. The `--list` mode is exempt.
 - **Crash-log rotation** — `monitor-crash.log` rotates to `.log.1` at 1 MB so repeated crashes don't fill the disk.
@@ -122,7 +122,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 
 ## Session States
 
-The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes, `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
+The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes and Claude Code no longer has the session open (no entry with a running process in its `~/.claude/sessions/` registry), `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
 <p align="center">
   <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with CLI SESSIONS and DESKTOP APP SESSIONS sections, a cursor, model codes, desk tags and live tags"></a><br>
@@ -268,7 +268,7 @@ Both scripts import shared.py for shared BRN/CTR calculation.
 | 50-79% | Yellow | Approaching limits |
 | >= 80% | Red | Critical |
 
-Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visually distinguish rate limits from performance metrics. 5HL and FBL turn dim with `~` before the percentage once the value shown is older than 30 minutes (5HL: a last known value shown because the current event carried no rate limits). CCH uses its own time-based scale: green countdown, yellow below 20 % of the cache TTL, red once the cache is cold.
+The ranges apply to CTX, 5HL, FBL, 7DL and CTR in the statusline and the dashboard. CHR is judged by its miss rate: yellow at a 50 % hit rate or less, red at 20 % or less. BRN turns yellow above `CLAUDE_WARN_BRN`. Cost values (CST, TDY, WEK, cost breakdown) are purple and have no threshold; APR is a blue informational bar. 5HL and FBL turn dim with `~` before the percentage once the value shown is older than 30 minutes (5HL: a last known value shown because the current event carried no rate limits). CCH uses its own time-based scale: green countdown, yellow below 20 % of the cache TTL, red once the cache is cold.
 
 ## Configuration
 
@@ -276,7 +276,7 @@ Exception: 5HL/FBL/7DL labels use yellow as base color (even below 50%) to visua
 |----------|---------|-------|-------------|
 | `CLAUDE_STATUS_WARN` | `50` | statusline + dashboard | Yellow threshold (%) |
 | `CLAUDE_STATUS_CRIT` | `80` | statusline + dashboard | Red threshold (%) |
-| `CLAUDE_WARN_BRN` | `3.0` | dashboard | Burn rate warning threshold ($/min) |
+| `CLAUDE_WARN_BRN` | `3.0` | statusline + dashboard | Burn rate warning threshold ($/min) |
 | `CC_MON_BRN_MAX` | `10.0` | dashboard | Burn rate bar ceiling ($/min). Set higher if your bar pins (24/7 Opus API). |
 | `CC_MON_CST_MAX` | `1000.0` | dashboard | Cost bar ceiling ($ per session). Raise for long-running API sessions. |
 | `CC_MON_CTR_MAX` | `10.0` | dashboard | Context change rate ceiling (%/min). |
@@ -308,7 +308,7 @@ export CLAUDE_STATUS_CRIT=90
 - Auto-trimmed when file exceeds 1 MB (keeps last 1000 entries)
 - Stale `.tmp` files older than 60 seconds cleaned up automatically
 - Dead sessions older than 48 hours auto-purged (`.json` + `.jsonl` pair deleted)
-- Session detection: files older than 30 minutes marked as stale — metrics dimmed, `Session Inactive (Nm)` header shown with minutes-since-last-update, last known values preserved (see [Session States](#session-states))
+- Session detection: files older than 30 minutes marked as stale unless Claude Code still has the session open — metrics dimmed, `Session Inactive (Nm)` header shown with minutes-since-last-update, last known values preserved (see [Session States](#session-states))
 
 ### Security
 

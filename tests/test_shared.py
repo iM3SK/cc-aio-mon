@@ -730,7 +730,7 @@ class TestPyFilesSingleSourceOfTruth(unittest.TestCase):
     """I-2: PY_FILES in shared.py is the single source of truth for syntax-check list."""
 
     def test_shared_py_files_contains_all_modules(self):
-        expected = {"monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py"}
+        expected = {"monitor.py", "statusline.py", "shared.py", "pulse.py", "update.py", "transcripts.py"}
         self.assertEqual(set(shared.PY_FILES), expected)
 
     def test_update_uses_shared_py_files(self):
@@ -1568,6 +1568,33 @@ class TestClaudeProjectsDir(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": td}):
                 self.assertEqual(shared.claude_projects_dir(), pathlib.Path(td) / "projects")
+
+
+class TestStatusColors(unittest.TestCase):
+    """level_color / brn_color — the only source of status colors."""
+
+    def test_level_color_thresholds(self):
+        self.assertEqual(shared.level_color(shared.WARN_PCT - 0.1), C_GRN)
+        self.assertEqual(shared.level_color(shared.WARN_PCT), C_YEL)
+        self.assertEqual(shared.level_color(shared.CRIT_PCT), C_RED)
+
+    def test_level_color_custom_thresholds(self):
+        self.assertEqual(shared.level_color(30, warn=20, crit=40), C_YEL)
+
+    def test_brn_color_threshold(self):
+        self.assertEqual(shared.brn_color(shared.WARN_BRN), C_GRN)
+        self.assertEqual(shared.brn_color(shared.WARN_BRN + 0.01), C_YEL)
+        self.assertEqual(shared.brn_color(None), C_GRN)
+
+    def test_palette_is_nord(self):
+        nord = {(191, 97, 106), (208, 135, 112), (235, 203, 139), (163, 190, 140),
+                (180, 142, 173), (143, 188, 187), (136, 192, 208), (129, 161, 193),
+                (94, 129, 172), (236, 239, 244), (216, 222, 233), (97, 110, 136),
+                (76, 86, 106)}
+        for name in ("C_RED", "C_ORN", "C_YEL", "C_GRN", "C_PUR", "C_TEAL", "C_CYN",
+                     "C_BLU", "C_NAV", "C_WHT", "C_TXT", "C_MUT", "C_DIM"):
+            rgb = tuple(int(x) for x in getattr(shared, name)[len("\033[38;2;"):-1].split(";"))
+            self.assertIn(rgb, nord, name)
 
 
 if __name__ == "__main__":
