@@ -20,9 +20,11 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from shared import (
     VERSION_RE, MAX_FILE_SIZE, _sanitize, run_git as _shared_run_git,
-    ensure_utf8_stdout, extract_changelog_entry, PY_FILES, safe_read,
-    check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
+    ensure_utf8_stdout, PY_FILES, safe_read,
+    check_syntax_after_pull, verify_origin_remote,
     DATA_DIR, ensure_data_dir, acquire_singleton_lock,
+    git_current_branch, git_tracked_changes, git_ahead_behind, git_remote_version,
+    git_new_commits, git_remote_changelog_entry, git_head_commit, git_pull_ff_only,
 )
 
 if sys.platform == "win32":
@@ -105,10 +107,7 @@ def check_repo():
 
 
 def check_branch():
-    r = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
-    if r.returncode != 0:
-        raise RuntimeError("Could not verify current branch")
-    branch = r.stdout.strip()
+    branch = git_current_branch(run_git)
     if branch == "HEAD":
         err("Detached HEAD — not on any branch")
         sys.exit(1)
@@ -119,13 +118,10 @@ def check_branch():
 
 
 def check_clean():
-    # -uno: ignore untracked files — they don't affect git pull
-    r = run_git(["status", "--porcelain", "-uno"])
-    if r.returncode != 0:
-        raise RuntimeError("Could not verify working tree")
-    if r.stdout.strip():
+    changes = git_tracked_changes(run_git)
+    if changes.strip():
         err("Working tree has uncommitted changes:")
-        _print_lines(r.stdout)
+        _print_lines(changes)
         note("Commit or stash your changes before updating:")
         note("  git stash   # (or 'git status' to inspect)")
         sys.exit(1)
@@ -156,40 +152,24 @@ def get_local_version() -> str:
 
 
 def get_remote_version() -> str:
-    r = run_git(["show", "origin/main:shared.py"])
-    if r.returncode != 0:
-        raise RuntimeError("Failed to read remote shared.py")
-    m = VERSION_RE.search(r.stdout)
-    if not m:
-        raise RuntimeError("VERSION constant not found in remote shared.py")
-    return m.group(1)
+    return git_remote_version(run_git)
 
 
 def get_ahead_behind() -> Tuple[int, int]:
     """Return (behind, ahead) relative to origin/main."""
-    r = run_git(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
-    if r.returncode != 0:
-        raise RuntimeError("Failed to compare commits")
     try:
-        ahead, behind = parse_ahead_behind(r.stdout)
+        ahead, behind = git_ahead_behind(run_git)
     except ValueError as e:
         raise RuntimeError(str(e)) from e
     return behind, ahead
 
 
 def get_new_commits() -> List[str]:
-    r = run_git(["log", "--oneline", "HEAD..origin/main"])
-    if r.returncode != 0:
-        raise RuntimeError("Failed to read new commits")
-    return [line for line in r.stdout.strip().split("\n") if line]
+    return git_new_commits(run_git)
 
 
 def get_remote_changelog_entry(version: str) -> Optional[str]:
-    r = run_git(["show", "origin/main:CHANGELOG.md"])
-    if r.returncode != 0:
-        raise RuntimeError("Failed to read remote changelog")
-    entry = extract_changelog_entry(r.stdout, version)
-    return entry if entry else None
+    return git_remote_changelog_entry(run_git, version) or None
 
 
 # Mutual exclusion with monitor.py: the interactive monitor holds a singleton
@@ -221,10 +201,7 @@ def apply_update():
 
     recovery = None
     try:
-        head = run_git(["rev-parse", "--verify", "HEAD"])
-        if head.returncode != 0:
-            raise RuntimeError("Could not read recovery commit")
-        recovery = parse_commit_id(head.stdout)
+        recovery = git_head_commit(run_git)
         note(f"Recovery commit: {recovery}")
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         rollback_tag = f"pre-update-{ts}"
@@ -233,9 +210,7 @@ def apply_update():
             raise RuntimeError("Could not create recovery tag")
         ok(f"Rollback tag: {rollback_tag}")
 
-        r = run_git(["pull", "--ff-only", "origin", "main"])
-        if r.returncode != 0:
-            raise RuntimeError("git pull failed")
+        git_pull_ff_only(run_git)
         ok("Pulled latest changes")
         new_ver = get_local_version()
         ok(f"New VERSION: {_sanitize(new_ver)}")

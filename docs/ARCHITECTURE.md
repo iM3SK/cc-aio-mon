@@ -116,7 +116,9 @@ aliases and status colors (`level_color()`, `brn_color()`), `WARN_PCT` /
 `CRIT_PCT` / `WARN_BRN` thresholds, `calc_rates()` (BRN/CTR computation from JSONL history),
 `load_history()`, `safe_read()`, `is_safe_dir()`, `ensure_data_dir()`,
 `run_git()` (minimal env whitelist), `acquire_singleton_lock()`,
-`rotate_crash_log()`, `check_syntax_after_pull()`, and `parse_ahead_behind()`.
+`rotate_crash_log()`, `check_syntax_after_pull()`, `parse_ahead_behind()`, and
+the self-update git queries (`git_*`: branch, tracked changes, ahead/behind,
+remote version, new commits, CHANGELOG entry, HEAD, fast-forward pull).
 Imported by all five other modules; never run directly.
 
 ---
@@ -354,6 +356,12 @@ Two duplicate code paths were also consolidated: `shared.check_syntax_after_pull
 replaces byte-for-byte copies in `monitor._apply_update_worker` and
 `update.apply_update`; `shared.parse_ahead_behind()` replaces duplicate parsers
 for `git rev-list --left-right --count` output in both files.
+
+The self-update git queries live once in `shared.py` (`git_*`). The `update.py`
+CLI and the monitor's update modal, release check and apply worker run the same
+commands and parsing and keep only their own presentation: the CLI prints and
+exits, the monitor turns a failure into a warning or an empty result.
+`TestUpdateGuardParity` pins that both refuse the same repository states.
 
 ---
 

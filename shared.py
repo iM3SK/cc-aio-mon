@@ -15,7 +15,7 @@ import tempfile
 import time
 import unicodedata
 from datetime import datetime, timezone
-from typing import IO, Iterable, List, Optional, Tuple
+from typing import IO, Callable, Iterable, List, Optional, Tuple
 
 # Platform-conditional lock primitives used by acquire_singleton_lock().
 if sys.platform == "win32":
@@ -597,6 +597,91 @@ def parse_commit_id(output: str) -> str:
     if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) or not value.strip("0"):
         raise ValueError("Invalid recovery commit from git")
     return value
+
+
+# Git queries behind the self-update, shared by update.py (CLI) and monitor.py
+# (update modal, release check, apply worker). ``git`` runs one git command in
+# the repo root and returns a CompletedProcess; the caller binds the root and
+# the timeout (update.run_git, monitor._git_cmd). Each query raises
+# RuntimeError when git reports a failure — the CLI prints it and exits, the
+# TUI turns it into a warning or an empty result. A git that cannot run at all
+# raises whatever ``git`` raises.
+GitRunner = Callable[[List[str]], "subprocess.CompletedProcess[str]"]
+
+
+def git_current_branch(git: GitRunner) -> str:
+    """Name of the checked-out branch ("HEAD" when detached)."""
+    r = git(["rev-parse", "--abbrev-ref", "HEAD"])
+    if r.returncode != 0:
+        raise RuntimeError("Could not verify current branch")
+    return r.stdout.strip()
+
+
+def git_tracked_changes(git: GitRunner) -> str:
+    """``git status --porcelain -uno`` output; blank when tracked files are
+    clean. Untracked files are ignored — they do not affect ``git pull``."""
+    r = git(["status", "--porcelain", "-uno"])
+    if r.returncode != 0:
+        raise RuntimeError("Could not verify working tree")
+    return r.stdout
+
+
+def git_ahead_behind(git: GitRunner) -> Tuple[int, int]:
+    """``(ahead, behind)`` of HEAD relative to origin/main. Output that is not
+    two counts raises ValueError (parse_ahead_behind)."""
+    r = git(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
+    if r.returncode != 0:
+        raise RuntimeError("Failed to compare commits")
+    return parse_ahead_behind(r.stdout)
+
+
+def git_remote_version(git: GitRunner) -> str:
+    """VERSION of origin/main's shared.py, read with the same VERSION_RE as
+    the local file. Comes from the remote: sanitize it before display."""
+    r = git(["show", "origin/main:shared.py"])
+    if r.returncode != 0:
+        raise RuntimeError("Failed to read remote shared.py")
+    m = VERSION_RE.search(r.stdout)
+    if not m:
+        raise RuntimeError("VERSION constant not found in remote shared.py")
+    return m.group(1)
+
+
+def git_new_commits(git: GitRunner, max_count: Optional[int] = None) -> List[str]:
+    """One-line subjects of the origin/main commits that HEAD lacks, newest
+    first. Come from the remote: sanitize them before display."""
+    args = ["log", "--oneline"]
+    if max_count is not None:
+        args.append(f"--max-count={max_count}")
+    r = git(args + ["HEAD..origin/main"])
+    if r.returncode != 0:
+        raise RuntimeError("Failed to read new commits")
+    return [line for line in r.stdout.strip().split("\n") if line]
+
+
+def git_remote_changelog_entry(git: GitRunner, version: str, max_lines: Optional[int] = None) -> str:
+    """The ``## v{version}`` section of origin/main's CHANGELOG.md, "" when
+    the file has none. Comes from the remote: sanitize it before display."""
+    r = git(["show", "origin/main:CHANGELOG.md"])
+    if r.returncode != 0:
+        raise RuntimeError("Failed to read remote changelog")
+    return extract_changelog_entry(r.stdout, version, max_lines=max_lines)
+
+
+def git_head_commit(git: GitRunner) -> str:
+    """Full object ID of HEAD, the recovery point recorded before a pull.
+    Output that is not an object ID raises ValueError (parse_commit_id)."""
+    r = git(["rev-parse", "--verify", "HEAD"])
+    if r.returncode != 0:
+        raise RuntimeError("Could not read recovery commit")
+    return parse_commit_id(r.stdout)
+
+
+def git_pull_ff_only(git: GitRunner) -> None:
+    """``git pull --ff-only origin main``: fast-forward or fail, never merge."""
+    r = git(["pull", "--ff-only", "origin", "main"])
+    if r.returncode != 0:
+        raise RuntimeError("git pull failed")
 
 
 def rotate_crash_log(path: pathlib.Path, max_bytes: int = MAX_FILE_SIZE, always: bool = False) -> None:

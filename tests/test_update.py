@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: MIT
 """Unit tests for update.py — stdlib only, no pytest required.
 
-NOTE: monitor.py currently has private mirrors (`_git_cmd`, `_update_checks`,
-`_get_new_commits`, `_get_remote_changelog_preview`, `_apply_update_worker`,
-`_apply_update_action`) that PARALLEL the public ones in update.py. The tests
-named TestGitCmd / TestUpdateChecks / TestGetNewCommits /
-TestGetRemoteChangelogPreview / TestUpdateApplyRollbackTag /
-TestApplyUpdateAction in this file exercise the *monitor*-side helpers, but
-they belong here because they test the update flow. The temporary coupling
-between monitor.py and update.py will be resolved by a follow-up dedup.
+The self-update has two front ends: the update.py CLI and the monitor's
+update modal / apply worker (`_git_cmd`, `_update_checks`, `_get_new_commits`,
+`_get_remote_changelog_preview`, `_apply_update_worker`). Both run the same
+git queries from shared.py (`git_*`, tested in test_shared.py) and keep only
+their own presentation. The monitor-side tests live here because they test
+the update flow; TestUpdateGuardParity pins that both front ends block the
+same repository states.
 
 Run:
     python -m unittest tests.test_update
@@ -23,6 +22,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -44,6 +44,12 @@ from monitor import (
     _get_remote_changelog_preview,
     _apply_update_worker,
 )
+
+
+def _cp(rc, out="", err="", args=("git",)):
+    """A git result as the monitor's _git_cmd returns it."""
+    return subprocess.CompletedProcess(list(args), rc, out, err)
+
 
 class TestUpdate(unittest.TestCase):
 
@@ -271,29 +277,32 @@ class TestUpdate(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestGitCmd(unittest.TestCase):
 
-    def test_returns_stripped_stdout_on_zero_rc(self):
-        import subprocess as sp
-        completed = sp.CompletedProcess(args=["git"], returncode=0, stdout="ok\n", stderr="")
-        with patch("monitor.run_git", return_value=completed):
-            rc, out, err = _git_cmd(["status"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(out, "ok")
-        self.assertEqual(err, "")
+    def test_returns_the_completed_process_on_zero_rc(self):
+        completed = _cp(0, "ok\n")
+        with patch("monitor.run_git", return_value=completed) as run:
+            r = _git_cmd(["status"])
+        self.assertIs(r, completed)
+        self.assertEqual(run.call_args.args[0], ["status"])
 
     def test_file_not_found(self):
         with patch("monitor.run_git", side_effect=FileNotFoundError):
-            rc, out, err = _git_cmd(["status"])
-        self.assertEqual(rc, -1)
-        self.assertEqual(out, "")
-        self.assertIn("git not found", err)
+            r = _git_cmd(["status"])
+        self.assertEqual(r.returncode, -1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("git not found", r.stderr)
+
+    def test_os_error(self):
+        with patch("monitor.run_git", side_effect=PermissionError):
+            r = _git_cmd(["status"])
+        self.assertEqual(r.returncode, -1)
+        self.assertIn("git unavailable", r.stderr)
 
     def test_timeout(self):
-        import subprocess as sp
-        with patch("monitor.run_git", side_effect=sp.TimeoutExpired(cmd="git", timeout=15)):
-            rc, out, err = _git_cmd(["status"])
-        self.assertEqual(rc, -2)
-        self.assertEqual(out, "")
-        self.assertIn("timeout", err)
+        with patch("monitor.run_git", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=15)):
+            r = _git_cmd(["status"])
+        self.assertEqual(r.returncode, -2)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("timeout", r.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +319,8 @@ class TestUpdateChecks(unittest.TestCase):
             i = call_count[0]
             call_count[0] += 1
             if i < len(responses):
-                return responses[i]
-            return (0, "", "")
+                return _cp(*responses[i], args=args)
+            return _cp(0, args=args)
 
         return _cmd
 
@@ -346,12 +355,12 @@ class TestUpdateChecks(unittest.TestCase):
 class TestGetNewCommits(unittest.TestCase):
 
     def test_splits_stdout_into_commit_lines_on_zero_rc(self):
-        with patch("monitor._git_cmd", return_value=(0, "abc feat\ndef fix", "")):
+        with patch("monitor._git_cmd", return_value=_cp(0, "abc feat\ndef fix")):
             result = _get_new_commits()
         self.assertEqual(result, ["abc feat", "def fix"])
 
     def test_returns_empty_list_on_nonzero_rc(self):
-        with patch("monitor._git_cmd", return_value=(1, "", "error")):
+        with patch("monitor._git_cmd", return_value=_cp(1, "", "error")):
             result = _get_new_commits()
         self.assertEqual(result, [])
 
@@ -370,7 +379,7 @@ class TestGetRemoteChangelogPreview(unittest.TestCase):
     )
 
     def test_extracts_version(self):
-        with patch("monitor._git_cmd", return_value=(0, self._CHANGELOG, "")):
+        with patch("monitor._git_cmd", return_value=_cp(0, self._CHANGELOG)):
             result = _get_remote_changelog_preview("2.0.0")
         self.assertEqual(result[0], "## v2.0.0")
         self.assertIn("- item1", result)
@@ -380,7 +389,7 @@ class TestGetRemoteChangelogPreview(unittest.TestCase):
 
     def test_not_found(self):
         content = "## v1.0.0\n- something\n"
-        with patch("monitor._git_cmd", return_value=(0, content, "")):
+        with patch("monitor._git_cmd", return_value=_cp(0, content)):
             result = _get_remote_changelog_preview("9.9.9")
         self.assertEqual(result, [])
 
@@ -426,7 +435,7 @@ class TestApplyUpdateAction(unittest.TestCase):
         # Test the synchronous worker directly (not the thread-spawning wrapper).
         # _update_checks is patched clean — the worker now blocks on warnings.
         with patch("monitor._update_checks", return_value=[]):
-            with patch("monitor._git_cmd", return_value=(0, "a" * 40, "")):
+            with patch("monitor._git_cmd", return_value=_cp(0, "a" * 40)):
                 with patch("pathlib.Path.exists", return_value=True):
                     with patch("pathlib.Path.read_text", return_value="# valid python\nx = 1\n"):
                         _apply_update_worker()
@@ -462,7 +471,7 @@ class TestApplyUpdateAction(unittest.TestCase):
             repo_root = pathlib.Path(td)
             (repo_root / "monitor.py").write_text("# stub")
             with patch("monitor._update_checks", return_value=[]):
-                with patch("monitor._git_cmd", return_value=(0, "a" * 40, "")):
+                with patch("monitor._git_cmd", return_value=_cp(0, "a" * 40)):
                     with patch.object(shared, "PY_FILES", ("monitor.py",)):
                         with patch.object(monitor, "_REPO_ROOT", repo_root):
                             with patch("shared.safe_read", return_value=None) as mock_safe_read:
@@ -472,7 +481,7 @@ class TestApplyUpdateAction(unittest.TestCase):
 
     def test_nonzero_rc_marks_failed_with_stderr(self):
         with patch("monitor._update_checks", return_value=[]):
-            with patch("monitor._git_cmd", return_value=(1, "", "conflict")):
+            with patch("monitor._git_cmd", return_value=_cp(1, "", "conflict")):
                 _apply_update_worker()
 
         import monitor
@@ -829,7 +838,7 @@ class TestUpdateFailureBoundaries(unittest.TestCase):
                 replies = [(0, "main", ""), (0, "", ""), (0, "0 1", "")]
                 replies[index] = bad
                 with self.subTest(index=index, bad=bad), \
-                     patch.object(monitor, "_git_cmd", side_effect=replies) as git, \
+                     patch.object(monitor, "_git_cmd", side_effect=[_cp(*r) for r in replies]) as git, \
                      patch.object(monitor, "verify_origin_remote", return_value=None):
                     monitor._apply_update_worker()
                 self.assertFalse(any(c.args[0][0] == "pull" for c in git.call_args_list))
@@ -840,7 +849,7 @@ class TestUpdateFailureBoundaries(unittest.TestCase):
         for value in ("", "nonsense", "-1 0", "0 1 2"):
             with self.subTest(value=value), \
                  patch.object(monitor, "_git_cmd", side_effect=[
-                     (0, "main", ""), (0, "", ""), (0, value, "")]) as git, \
+                     _cp(0, "main"), _cp(0), _cp(0, value)]) as git, \
                  patch.object(monitor, "verify_origin_remote", return_value=None):
                 monitor._apply_update_worker()
             self.assertFalse(any(c.args[0][0] == "pull" for c in git.call_args_list))
@@ -901,7 +910,7 @@ class TestUpdateFailureBoundaries(unittest.TestCase):
                 with patch.object(monitor, "_REPO_ROOT", root), \
                      patch.object(monitor, "_update_checks", return_value=[]), \
                      patch.object(monitor, "_git_cmd", side_effect=[
-                         (0, self.SHA, ""), (0, "", "")]), \
+                         _cp(0, self.SHA), _cp(0)]), \
                      patch.object(shared, "safe_read", return_value=None) if failure == "unreadable" else \
                      patch.object(shared, "safe_read", wraps=shared.safe_read):
                     monitor._apply_update_worker()
@@ -912,6 +921,73 @@ class TestUpdateFailureBoundaries(unittest.TestCase):
                     self.assertNotIn("complete", result)
                 else:
                     self.assertIn("complete", result)
+
+
+class TestUpdateGuardParity(unittest.TestCase):
+    """The CLI (update.py) and the TUI (monitor._update_checks, which the apply
+    worker re-runs before pulling) must refuse the same repository states.
+    Both share the shared.git_* queries; this pins that their rules agree."""
+
+    def _repo(self, branch="main", dirty="", counts="0 1", fail=None):
+        def git(args, **_kw):
+            if fail and args[0] == fail:
+                return _cp(1, "", "failed", args=args)
+            if args[:2] == ["rev-parse", "--abbrev-ref"]:
+                out = branch
+            elif args[:2] == ["rev-parse", "--is-inside-work-tree"]:
+                out = "true"
+            elif args[0] == "status":
+                out = dirty
+            elif args[0] == "rev-list":
+                out = counts
+            elif args[:2] == ["show", "origin/main:shared.py"]:
+                out = 'VERSION = "9.9.9"\n'
+            else:
+                out = ""
+            return _cp(0, out, args=args)
+        return git
+
+    def _cli_refuses(self, git, origin_problem):
+        import io
+        import update
+        with patch.object(update, "run_git", side_effect=git), \
+             patch.object(update, "verify_origin_remote", return_value=origin_problem), \
+             patch.object(update, "get_local_version", return_value="9.9.8"), \
+             patch.object(update, "_init_terminal", return_value=False), \
+             patch.object(sys, "argv", ["update.py"]), \
+             patch.object(sys, "stdout", io.StringIO()), \
+             patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                update.main()
+        return raised.exception.code != 0
+
+    def _tui_refuses(self, git, origin_problem):
+        import monitor
+        with patch.object(monitor, "_git_cmd", side_effect=git), \
+             patch.object(monitor, "verify_origin_remote", return_value=origin_problem):
+            return bool(monitor._update_checks())
+
+    def test_both_front_ends_refuse_the_same_states(self):
+        cases = {
+            "behind on a clean main": ({}, None, False),
+            "up to date": ({"counts": "0 0"}, None, False),
+            "other branch": ({"branch": "develop"}, None, True),
+            "detached HEAD": ({"branch": "HEAD"}, None, True),
+            "uncommitted changes": ({"dirty": " M monitor.py\n"}, None, True),
+            "ahead only": ({"counts": "2 0"}, None, True),
+            "diverged": ({"counts": "2 3"}, None, True),
+            "unreadable comparison": ({"counts": "nonsense"}, None, True),
+            "branch check fails": ({"fail": "rev-parse"}, None, True),
+            "status check fails": ({"fail": "status"}, None, True),
+            "comparison fails": ({"fail": "rev-list"}, None, True),
+            "foreign origin": ({}, "unexpected origin URL: x", True),
+        }
+        for name, (state, origin, refuses) in cases.items():
+            with self.subTest(name):
+                git = self._repo(**state)
+                self.assertEqual(self._cli_refuses(git, origin), refuses, "CLI")
+                self.assertEqual(self._tui_refuses(git, origin), refuses, "TUI")
+
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)

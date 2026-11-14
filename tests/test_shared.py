@@ -1592,6 +1592,83 @@ class TestStatusColors(unittest.TestCase):
             self.assertIn(rgb, nord, name)
 
 
+class TestSelfUpdateGitQueries(unittest.TestCase):
+    """shared.git_*: the one copy of the self-update git queries that update.py
+    and monitor.py both run. A scripted runner stands in for git."""
+
+    SHA = "b" * 40
+
+    def _git(self, stdout="", rc=0):
+        import subprocess
+        calls = []
+
+        def git(args):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(list(args), rc, stdout, "err")
+        git.calls = calls
+        return git
+
+    def test_each_query_runs_its_command(self):
+        cases = [
+            (shared.git_current_branch, (), ["rev-parse", "--abbrev-ref", "HEAD"], "main\n"),
+            (shared.git_tracked_changes, (), ["status", "--porcelain", "-uno"], ""),
+            (shared.git_ahead_behind, (), ["rev-list", "--left-right", "--count", "HEAD...origin/main"], "0\t0\n"),
+            (shared.git_remote_version, (), ["show", "origin/main:shared.py"], 'VERSION = "1.2.3"\n'),
+            (shared.git_new_commits, (), ["log", "--oneline", "HEAD..origin/main"], ""),
+            (shared.git_new_commits, (5,), ["log", "--oneline", "--max-count=5", "HEAD..origin/main"], ""),
+            (shared.git_remote_changelog_entry, ("1.2.3",), ["show", "origin/main:CHANGELOG.md"], ""),
+            (shared.git_head_commit, (), ["rev-parse", "--verify", "HEAD"], self.SHA + "\n"),
+            (shared.git_pull_ff_only, (), ["pull", "--ff-only", "origin", "main"], ""),
+        ]
+        for fn, extra, command, stdout in cases:
+            with self.subTest(fn=fn.__name__, extra=extra):
+                git = self._git(stdout)
+                fn(git, *extra)
+                self.assertEqual(git.calls, [command])
+
+    def test_git_failure_raises_runtime_error_with_the_cli_message(self):
+        cases = [
+            (shared.git_current_branch, (), "Could not verify current branch"),
+            (shared.git_tracked_changes, (), "Could not verify working tree"),
+            (shared.git_ahead_behind, (), "Failed to compare commits"),
+            (shared.git_remote_version, (), "Failed to read remote shared.py"),
+            (shared.git_new_commits, (), "Failed to read new commits"),
+            (shared.git_remote_changelog_entry, ("1.2.3",), "Failed to read remote changelog"),
+            (shared.git_head_commit, (), "Could not read recovery commit"),
+            (shared.git_pull_ff_only, (), "git pull failed"),
+        ]
+        for fn, extra, message in cases:
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(RuntimeError) as raised:
+                    fn(self._git("main", rc=1), *extra)
+                self.assertEqual(str(raised.exception), message)
+
+    def test_parsed_results(self):
+        self.assertEqual(shared.git_current_branch(self._git("main\n")), "main")
+        self.assertEqual(shared.git_tracked_changes(self._git(" M a.py\n")), " M a.py\n")
+        self.assertEqual(shared.git_ahead_behind(self._git("2\t5\n")), (2, 5))
+        self.assertEqual(shared.git_remote_version(self._git('x = 1\nVERSION = "1.2.3"\n')), "1.2.3")
+        self.assertEqual(shared.git_new_commits(self._git("abc one\ndef two\n")), ["abc one", "def two"])
+        self.assertEqual(shared.git_new_commits(self._git("")), [])
+        self.assertEqual(shared.git_head_commit(self._git(self.SHA + "\n")), self.SHA)
+        changelog = "# Changelog\n\n## v1.2.3 — x\n\n- a\n- b\n\n## v1.2.2 — y\n\n- old\n"
+        entry = shared.git_remote_changelog_entry(self._git(changelog), "1.2.3")
+        self.assertTrue(entry.startswith("## v1.2.3"))
+        self.assertNotIn("old", entry)
+        self.assertEqual(shared.git_remote_changelog_entry(self._git(changelog), "1.2.3", max_lines=2),
+                         "## v1.2.3 — x\n")
+        self.assertEqual(shared.git_remote_changelog_entry(self._git(changelog), "9.9.9"), "")
+
+    def test_bad_output_is_rejected(self):
+        with self.assertRaises(ValueError):
+            shared.git_ahead_behind(self._git("nonsense"))
+        with self.assertRaises(ValueError):
+            shared.git_head_commit(self._git("bad-sha"))
+        with self.assertRaises(RuntimeError) as raised:
+            shared.git_remote_version(self._git("no version here"))
+        self.assertEqual(str(raised.exception), "VERSION constant not found in remote shared.py")
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)
