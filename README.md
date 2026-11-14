@@ -32,7 +32,7 @@ The Bandit badge tracks report publication; findings are reviewed in
 </p>
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — single-line ANSI status bar showing Model, CTX, 5HL, 7DL, CST, BRN segments with reset countdown"></a><br>
+  <a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — statusline under the Claude Code prompt showing Model, CTX, 5HL and 7DL with reset countdowns, and CST"></a><br>
   <sub><b>Statusline</b> — a single-line status bar (model, context, rate limits, cost, burn) for your Claude Code prompt.</sub>
 </p>
 
