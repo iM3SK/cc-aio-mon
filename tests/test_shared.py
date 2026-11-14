@@ -280,6 +280,29 @@ class TestRunGitEnvWhitelist(unittest.TestCase):
         self.assertTrue(os.path.isabs(argv0))
 
 
+class TestNumRejectsOverflowAndNonFinite(unittest.TestCase):
+    """A huge integer or inf/nan in Claude Code JSON or a transcript must fall
+    back to the default instead of raising OverflowError downstream."""
+
+    def test_huge_integer_returns_default(self):
+        self.assertEqual(shared._num(10 ** 400, 7), 7)
+        self.assertEqual(shared._num(json.loads("1" + "0" * 400)), 0)
+
+    def test_non_finite_values_return_default(self):
+        for v in (float("inf"), float("-inf"), float("nan"), "1e999", "nan"):
+            self.assertEqual(shared._num(v, 3), 3, v)
+
+    def test_regular_values_unchanged(self):
+        self.assertEqual(shared._num("2.5"), 2.5)
+        self.assertEqual(shared._num(42), 42.0)
+        self.assertEqual(shared._num(None, 1), 1)
+        self.assertEqual(shared._num("x", 1), 1)
+
+    def test_int_of_num_never_raises(self):
+        for v in (10 ** 400, "1e999", float("nan")):
+            int(shared._num(v))
+
+
 class TestWhichAbs(unittest.TestCase):
     """PATH injection: an executable in the current directory must
     not shadow the one on PATH (shutil.which on Windows checks CWD first)."""

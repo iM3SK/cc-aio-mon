@@ -2825,6 +2825,79 @@ class TestFlush(unittest.TestCase):
         self.assertIn(SYNC_ON, output)
         self.assertIn(SYNC_OFF, output)
 
+    def test_full_width_line_is_not_followed_by_erase(self):
+        """A line filling the last column must not be followed by EL: in the
+        pending-wrap state EL also erases that last character ("liv")."""
+        from io import StringIO
+        import monitor as _m
+        full = "x" * 9 + "live"   # 13 columns
+        with patch("sys.stdout", new_callable=StringIO) as mock_out:
+            flush([full, "foot"], cols=13)
+            output = mock_out.getvalue()
+        self.assertIn(_m.EL + full + "\n", output)
+        self.assertNotIn(full + _m.EL, output)
+
+    def test_last_line_keeps_one_column_free(self):
+        from io import StringIO
+        import monitor as _m
+        with patch("sys.stdout", new_callable=StringIO) as mock_out:
+            flush(["head", "y" * 20], cols=10)
+            output = mock_out.getvalue()
+        self.assertIn(_m.EL + "y" * 9, output)
+        self.assertNotIn("y" * 10, output)
+
+
+class TestNarrowKeyHints(unittest.TestCase):
+    """Menu and legend key hints wrap whole items instead of being cut."""
+
+    def test_pack_items_fits_on_one_line(self):
+        from monitor import _pack_items
+        self.assertEqual(_pack_items(["ab", "cd"], 10), ["ab  cd"])
+
+    def test_pack_items_wraps_with_indent(self):
+        from monitor import _pack_items
+        self.assertEqual(_pack_items(["abcd", "efgh"], 6, gap=" ", indent="  "),
+                         ["abcd", "  efgh"])
+
+    def _plain(self, lines):
+        import monitor as _m
+        return [_m._ANSI_RE.sub("", ln) for ln in lines]
+
+    def test_menu_navigation_fits_narrow_terminal(self):
+        import monitor as _m
+        lines = self._plain(_m.render_menu(44, 60))
+        self.assertTrue(all(_m._vis_width(ln) <= 44 for ln in lines))
+        text = "\n".join(lines)
+        for hint in ("[↑↓ jk] Scroll", "[PgUp/Dn] Page", "[Home/End] Jump"):
+            self.assertIn(hint, text)
+
+    def test_legend_scroll_hint_fits_narrow_terminal(self):
+        import monitor as _m
+        lines = self._plain(_m.render_legend(44, 200))
+        self.assertTrue(all(_m._vis_width(ln) <= 44 for ln in lines))
+        text = "\n".join(lines)
+        self.assertIn("[↑↓ jk] Scroll modal / move picker", text)
+        self.assertIn("PgUp/Dn Home/End", text)
+
+    def test_legend_long_entries_wrap_without_losing_words(self):
+        import monitor as _m
+        wide = " ".join(self._plain(_m.render_legend(200, 400)))
+        narrow = self._plain(_m.render_legend(44, 400))
+        joined = " ".join(" ".join(narrow).split())
+        for phrase in ("other tags name the Claude Code entrypoint",
+                       "aggregated from transcript",
+                       "(narrow: est.)"):
+            self.assertIn(phrase, " ".join(wide.split()))
+            self.assertIn(phrase, joined)
+
+    def test_wrap_ansi_resumes_colour_on_continuation(self):
+        import monitor as _m
+        line = f"{_m.C_DIM}one two three four five six{_m.R}"
+        parts = _m._wrap_ansi(line, 12)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(parts[1].lstrip(" ").startswith(_m.C_DIM))
+        self.assertTrue(all(_m._vis_width(p) <= 12 for p in parts))
+
 
 # ---------------------------------------------------------------------------
 # TestModelCode — _model_code()
