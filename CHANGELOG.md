@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.19.0 — 2026-11-14
+
+**Header and session line:**
+- **A settings line under the title shows how the session is configured.** It
+  reads `model │ effort │ fast │ thinking off │ permission mode`; the title
+  bar keeps only the app name and version. Effort comes from the statusline
+  snapshot or the transcript, `fast` and `thinking off` from the snapshot's
+  `fast_mode` and `thinking.enabled`, and the permission mode from the latest
+  prompt in the transcript
+  (the statusline JSON does not carry it). `bypass` is orange. On a narrow
+  terminal the flags go first, then the permission mode, then the effort.
+- **A breathing dot replaces "Session Active".** An active session shows a
+  dot that grows and shrinks (`·` `∙` `•` `●`, 2 s cycle); an inactive one
+  keeps a static red dot and "Session Inactive".
+
+**Colors — one meaning per Nord color:**
+- **Colors follow what a value means.** Frost marks metric codes, hotkeys,
+  the model and links. Aurora green / yellow / red is used only for
+  thresholded status (CTX, 5HL, FBL, 7DL, CTR, CHR by miss rate, BRN above
+  `CLAUDE_WARN_BRN`); orange marks an elevated state, purple money and blue
+  bars without a threshold. Values are Snow Storm white, secondary labels
+  muted.
+- The statusline follows the same rules, and the legend has a COLORS section.
+
+**Data accuracy:**
+- **The cost modal's last-request estimate applies fast mode and the
+  long-prompt price tier.** Its title says which rates were used
+  (`est., fast rates` or `est., std rates`).
+- **Pulse scores only Claude API and Claude Code.** Incidents on other
+  services are listed dimmed with their service and status and counted as
+  "elsewhere, not scored"; scheduled maintenance has its own section. An
+  incident on claude.ai alone no longer drops the score to DEGRADED.
+- **Dashboard rate limits older than 30 minutes render dim with their age**
+  (`(~13h old)`) instead of looking current. The statusline still shows them
+  undimmed.
+- **CHR counts uncached input.** The cache hit ratio is cache read / (input +
+  cache read + cache write), as in Claude Code; cache misses and the last miss
+  cause appear next to CRD / CWR (`MISS: 2 ttl_expired_5m`).
+- **A session open in Claude Code's `~/.claude/sessions` registry is no
+  longer marked inactive** after a quiet period, as long as the registered
+  process is still running.
+
+**Refactor:**
+- **The transcript layer moves from `monitor.py` to a new `transcripts.py`**
+  (usage scanner, desktop session discovery, the live session registry,
+  per-session cost, subagent scan and the model price table).
+  `shared.PY_FILES` lists it, so the post-pull syntax check covers six files.
+  Behavior is unchanged.
+
+**Tests:** 985 passing (+29).
+
 ## v1.18.3 — 2026-11-14
 
 **Security:**
