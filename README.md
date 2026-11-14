@@ -27,12 +27,12 @@ The Bandit badge tracks report publication; findings are reviewed in
 | **IPC** | Atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/` — no sockets, no databases |
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard for a Claude desktop app session: API ratio, cache hit rate, context window, burn rate and estimated cost, with rate limits shown as n/a"></a><br>
-  <sub><b>Fullscreen dashboard</b> — context window, API ratio, cache hit rate, rate limits, burn rate and cross-session cost at a glance. Shown here for a desktop app session, where values are estimated from the transcript.</sub>
+  <a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard for a working Claude Code session: model, effort and permission mode under the title, a CTF context-full warning, then API ratio, cache hit rate, context window, 5-hour and 7-day rate limits with reset countdowns, burn rate, context rate and cost"></a><br>
+  <sub><b>Fullscreen dashboard</b> — context window, API ratio, cache hit rate, rate limits, burn rate and cross-session cost at a glance. Shown here for a Claude Code session at work, with the <code>CTF</code> warning blinking under the session line.</sub>
 </p>
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — statusline under the Claude Code prompt showing Model, CTX, 5HL and 7DL with reset countdowns, and CST"></a><br>
+  <a href="screenshots/cc-aio-mon-statusline.png"><img src="screenshots/cc-aio-mon-statusline.png" alt="CC AIO MON — statusline under the Claude Code prompt during work, showing Model, CTX, 5HL and 7DL with reset countdowns, CST and the BRN burn rate"></a><br>
   <sub><b>Statusline</b> — a single-line status bar (model, context, rate limits, cost, burn) for your Claude Code prompt.</sub>
 </p>
 
@@ -53,7 +53,7 @@ Other monitors scrape log files or estimate costs from token counts. For Claude 
 </p>
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay with the hotkeys section and the start of the dashboard metric glossary, with a scroll position hint"></a><br>
+  <a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay with the hotkeys section, the color meanings and the start of the dashboard metric glossary, with a scroll position hint"></a><br>
   <sub><b>Legend</b> (<code>l</code>) — hotkeys first, then the full glossary of every metric code (scroll for more).</sub>
 </p>
 
@@ -76,7 +76,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Two-tier architecture** — `statusline.py` (single-line status bar, triggered per Claude Code event) + `monitor.py` (fullscreen TUI, polls temp files independently).
 - **Temp file IPC** — atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/`. No sockets, no databases, no shared memory. Works across terminal sessions.
 - **Progress bars with configurable ranges** — BRN (default 0-10.0 $/min), CTR (default 0-10.0 %/min), CST (default 0-$1000) plus standard 0-100% bars for APR, CHR, CTX, 5HL, FBL, 7DL. Ceilings tunable via env vars (`CC_MON_BRN_MAX`, `CC_MON_CTR_MAX`, `CC_MON_CST_MAX`). Statusline 5HL/FBL/7DL segments also show a reset countdown (`→ 2h 15m`, `→ 6d 12h`) alongside the percentage.
-- **Smart warnings** — header alerts when context fills in < 30 min or burn rate exceeds threshold.
+- **Smart warnings** — blinking alerts under the session line: `CTF <Nm` when the context would fill in under 30 minutes at the current context rate (CTR), and `BRN` when the burn rate exceeds `CLAUDE_WARN_BRN`.
 - **Cross-session cost tracking** — TDY (today) and WEK (rolling 7-day) aggregate cost across all active Claude Code sessions.
 - **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Initial loading and period changes run in the background so the modal remains responsive. Model bars and daily peak (PEAK) count all token types: input + output + cache_read + cache_write.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
@@ -110,7 +110,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, agents fan-out, cost breakdown, Anthropic Pulse, update manager.
 - **Agents fan-out** — press `a` for a live view of the subagents / Workflow agents spawned by the watched session: active/total count, summed token usage, and a per-agent list (id, tokens, last tool) sorted by recency, refreshed while the modal is open. Press `f` to toggle an **active-only** filter that hides idle agents (a non-destructive "clear board" — nothing on disk is touched). Reads each agent's transcript under `~/.claude/projects/<proj>/<session>/subagents/agent-*.jsonl` (lazy, TTL-cached, containment-checked). When a Task or Workflow fans out across dozens of agents, you can see it happen in real time.
 <p align="center">
-  <a href="screenshots/cc-aio-mon-agents.png"><img src="screenshots/cc-aio-mon-agents.png" alt="CC AIO MON — agents fan-out modal showing 0 active of 8 agents, summed token usage, and a per-agent list with token counts and last tool"></a><br>
+  <a href="screenshots/cc-aio-mon-agents.png"><img src="screenshots/cc-aio-mon-agents.png" alt="CC AIO MON — agents fan-out modal showing 3 active of 3 agents, summed token usage, and a per-agent list with token counts and last tool"></a><br>
   <sub><b>Agents fan-out</b> (<code>a</code>) — live subagent / Workflow view: active/total, summed tokens, per-agent tokens and last tool.</sub>
 </p>
 - **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). CST displays `0.00 $` for a reported zero and `n/a` for missing or invalid data. The detail explains missing usage or an unavailable transcript estimate, and shows the estimate total even without a reported CST. Also shows cache savings percentage and burn rate over time bars. When non-zero, **WSR / WFR** rows surface server-side tool calls (`web_search_requests` / `web_fetch_requests` from `usage.server_tool_use`) and **TIE / T5M** rows split cache-creation tokens between the 1-hour and 5-minute ephemeral TTLs.
@@ -125,7 +125,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes and Claude Code no longer has the session open (no entry with a running process in its `~/.claude/sessions/` registry), `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with CLI SESSIONS and DESKTOP APP SESSIONS sections, a cursor, model codes, desk tags and live tags"></a><br>
+  <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with CLI SESSIONS and DESKTOP APP SESSIONS sections, a cursor, model codes, a desk tag, and live and stale tags"></a><br>
   <sub><b>Session picker</b> (<code>s</code>) — CLI and desktop app sessions in two sections; move the cursor and press <code>Enter</code> (see <a href="#session-picker">Session Picker</a>).</sub>
 </p>
 
@@ -137,7 +137,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 |--------|--------------|-------|-------|
 | **APR** | API time / total session time | 0-100% | dashboard |
 | **DUR** | Session duration (sub-stat of APR) | — | dashboard |
-| **CHR** | Cache read tokens / total cache | 0-100% | dashboard |
+| **CHR** | Cache hit rate: cache read / (input + cache read + cache write) | 0-100% | dashboard |
 | **CTX** | Context window usage | 0-100% | statusline + dashboard |
 | **CCH** | Prompt-cache countdown — time until the cached conversation goes cold (shown from 50 min down), then `cold` + the tokens the next message re-caches; Claude Code v2.1.251+ (see below) | — | statusline |
 | **5HL** | 5-hour rate limit usage + reset countdown (`→ 2h 15m`) | 0-100% | statusline + dashboard |
@@ -145,6 +145,7 @@ Press `r` to force a refresh (resets the stale timer if new data has arrived), o
 | **7DL** | 7-day rate limit usage + reset countdown (`→ 6d 12h`) | 0-100% | statusline + dashboard |
 | **BRN** | Cost burn rate | 0-10.0 $/min (env: `CC_MON_BRN_MAX`) | statusline + dashboard |
 | **CTR** | Context consumption rate | 0-10.0 %/min (env: `CC_MON_CTR_MAX`) | dashboard |
+| **CTF** | Context-full warning: minutes until the context fills at the current CTR, shown under 30 min (`CTF <25m`) | — | dashboard |
 | **CST** | Session cost | 0-$1000 (env: `CC_MON_CST_MAX`) | statusline + dashboard |
 | **TDY** | Today's cost (all sessions) | — | dashboard |
 | **WEK** | Rolling 7-day cost (all sessions) | — | dashboard |

@@ -1,6 +1,6 @@
 # CC AIO MON — Architecture Overview
 
-> v1.19.0 · Target reader: new contributor who just cloned the repo.
+> v1.19.1 · Target reader: new contributor who just cloned the repo.
 > Goal: understand "where is what and how do things relate" in ~10 minutes.
 > For the full feature reference see [README.md](../README.md).
 > For the IPC field schema see [FILE-IPC-CONTRACT.md](FILE-IPC-CONTRACT.md).
@@ -117,7 +117,7 @@ aliases and status colors (`level_color()`, `brn_color()`), `WARN_PCT` /
 `load_history()`, `safe_read()`, `is_safe_dir()`, `ensure_data_dir()`,
 `run_git()` (minimal env whitelist), `acquire_singleton_lock()`,
 `rotate_crash_log()`, `check_syntax_after_pull()`, and `parse_ahead_behind()`.
-Imported by all four other modules; never run directly.
+Imported by all five other modules; never run directly.
 
 ---
 

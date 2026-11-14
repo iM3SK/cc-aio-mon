@@ -254,18 +254,33 @@ class TestAuditRemediation20261114(unittest.TestCase):
     def _rl_line(self, buf, label):
         return next(ln for ln in buf if _ANSI_RE.sub("", ln).startswith(label))
 
+    def _rst_after(self, buf, label):
+        i = next(i for i, ln in enumerate(buf) if _ANSI_RE.sub("", ln).startswith(label))
+        return buf[i + 1]
+
     def test_old_rate_limits_dimmed_with_age(self):
         d = _full_data()
         buf = self._frame(d, rate_limits=d["rate_limits"], rate_limits_mtime=time.time() - 2 * 3600)
         line = self._rl_line(buf, "7DL")
-        self.assertIn("(~2h old)", _ANSI_RE.sub("", line))
         self.assertNotIn(C_GRN, line)
+        rst = _ANSI_RE.sub("", self._rst_after(buf, "7DL"))
+        self.assertTrue(rst.startswith("    RST:"))
+        self.assertIn("(~2h old)", rst)
+
+    def test_age_tag_fits_a_narrow_terminal(self):
+        # The tag used to follow the full-width bar and was cut off at 46 cols.
+        d = _full_data()
+        buf = render_frame(d, [], 46, 60, rate_limits=d["rate_limits"],
+                           rate_limits_mtime=time.time() - 14 * 3600)
+        shown = [_ANSI_RE.sub("", truncate(ln, 46)) for ln in buf]
+        self.assertTrue(any(ln.startswith("    RST:") and ln.endswith("(~14h old)") for ln in shown))
 
     def test_fresh_rate_limits_untagged(self):
         d = _full_data()
         buf = self._frame(d, rate_limits=d["rate_limits"], rate_limits_mtime=time.time() - 60)
         line = self._rl_line(buf, "5HL")
         self.assertNotIn("old)", _ANSI_RE.sub("", line))
+        self.assertNotIn("old)", _ANSI_RE.sub("", self._rst_after(buf, "5HL")))
         self.assertIn(C_GRN, line)
 
     def test_rate_limits_mtime_follows_scan(self):
@@ -5310,8 +5325,10 @@ class TestFableRow(unittest.TestCase):
 
     def test_stale_row_tagged(self):
         lines = self._plain({"used_percentage": 7, "resets_at": 9999999999, "age_s": 5000})
-        row = next(l for l in lines if l.startswith("FBL"))
-        self.assertIn("(stale", row)
+        i = next(i for i, l in enumerate(lines) if l.startswith("FBL"))
+        self.assertNotIn("(stale", lines[i])
+        self.assertTrue(lines[i + 1].startswith("    RST:"))
+        self.assertIn("(stale", lines[i + 1])
 
     def test_hidden_when_too_old(self):
         lines = self._plain({"used_percentage": 7, "resets_at": 9999999999, "age_s": 90000})
