@@ -27,8 +27,8 @@ The Bandit badge tracks report publication; findings are reviewed in
 | **IPC** | Atomic JSON snapshots + JSONL history in `$TMPDIR/claude-aio-monitor/` — no sockets, no databases |
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard showing context window, API ratio, cache hit rate, rate limits, burn rate, cost, and cross-session totals with Nord color scheme"></a><br>
-  <sub><b>Fullscreen dashboard</b> — context window, API ratio, cache hit rate, rate limits, burn rate and cross-session cost at a glance.</sub>
+  <a href="screenshots/cc-aio-mon-dashboard.png"><img src="screenshots/cc-aio-mon-dashboard.png" alt="CC AIO MON — fullscreen TUI dashboard for a Claude desktop app session: API ratio, cache hit rate, context window, burn rate and estimated cost, with rate limits shown as n/a"></a><br>
+  <sub><b>Fullscreen dashboard</b> — context window, API ratio, cache hit rate, rate limits, burn rate and cross-session cost at a glance. Shown here for a desktop app session, where values are estimated from the transcript.</sub>
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@ Other monitors scrape log files or estimate costs from token counts. For Claude 
 </p>
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay showing all metric codes, hotkeys, token stats, cost breakdown, and update sections"></a><br>
+  <a href="screenshots/cc-aio-mon-legend.png"><img src="screenshots/cc-aio-mon-legend.png" alt="CC AIO MON — legend overlay with the hotkeys section and the start of the dashboard metric glossary, with a scroll position hint"></a><br>
   <sub><b>Legend</b> (<code>l</code>) — hotkeys first, then the full glossary of every metric code (scroll for more).</sub>
 </p>
 
@@ -81,7 +81,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Token usage stats** — press `t` for a per-model token breakdown (In / Out / Calls, plus Cache Read and Cache Write rows when non-zero), session count, active days, streaks, longest session, and most active day. Reads `~/.claude/projects/` transcripts. Filterable by All Time / Last 7 Days / Last 30 Days. Initial loading and period changes run in the background so the modal remains responsive. Model bars and daily peak (PEAK) count all token types: input + output + cache_read + cache_write.
 - **Update manager** — press `u` to check for updates. Shows current vs remote version, new commits, changelog preview, and safety warnings. Press `a` to apply.
 <p align="center">
-  <a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal with per-model breakdown using 3-char codes, includes cache tokens in bar"></a><br>
+  <a href="screenshots/cc-aio-mon-stats.png"><img src="screenshots/cc-aio-mon-stats.png" alt="CC AIO MON — token stats modal, All Time period: sessions, active days, streak, longest session, peak day and a per-model breakdown with cache tokens"></a><br>
   <sub><b>Token stats</b> (<code>t</code>) — per-model token breakdown, sessions, streaks and peak-day.</sub>
 </p>
 
@@ -110,7 +110,7 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 - **Menu modal** — press `m` to open the navigation hub. Quick access to all features: refresh, session switch, legend, token stats, agents fan-out, cost breakdown, Anthropic Pulse, update manager.
 - **Agents fan-out** — press `a` for a live view of the subagents / Workflow agents spawned by the watched session: active/total count, summed token usage, and a per-agent list (id, tokens, last tool) sorted by recency, refreshed while the modal is open. Press `f` to toggle an **active-only** filter that hides idle agents (a non-destructive "clear board" — nothing on disk is touched). Reads each agent's transcript under `~/.claude/projects/<proj>/<session>/subagents/agent-*.jsonl` (lazy, TTL-cached, containment-checked). When a Task or Workflow fans out across dozens of agents, you can see it happen in real time.
 <p align="center">
-  <a href="screenshots/cc-aio-mon-agents.png"><img src="screenshots/cc-aio-mon-agents.png" alt="CC AIO MON — agents fan-out modal showing active/total agent count, summed token usage, and a per-agent list with compact tool codes"></a><br>
+  <a href="screenshots/cc-aio-mon-agents.png"><img src="screenshots/cc-aio-mon-agents.png" alt="CC AIO MON — agents fan-out modal showing 0 active of 8 agents, summed token usage, and a per-agent list with token counts and last tool"></a><br>
   <sub><b>Agents fan-out</b> (<code>a</code>) — live subagent / Workflow view: active/total, summed tokens, per-agent tokens and last tool.</sub>
 </p>
 - **Cost breakdown** — press `c` for two scopes: **LAST REQUEST (est.)** shows last-message token costs from `current_usage`; **SESSION BREAKDOWN (est.)** aggregates the entire session from transcript JSONL with per-record model pricing and reconciliation against server-reported CST (warn tag if delta >15%). CST displays `0.00 $` for a reported zero and `n/a` for missing or invalid data. The detail explains missing usage or an unavailable transcript estimate, and shows the estimate total even without a reported CST. Also shows cache savings percentage and burn rate over time bars. When non-zero, **WSR / WFR** rows surface server-side tool calls (`web_search_requests` / `web_fetch_requests` from `usage.server_tool_use`) and **TIE / T5M** rows split cache-creation tokens between the 1-hour and 5-minute ephemeral TTLs.
@@ -125,8 +125,8 @@ Optional first step: run `check-requirements.ps1` (Windows) or `check-requiremen
 The dashboard distinguishes **active** and **inactive** sessions. An active session receives fresh JSON snapshots from `statusline.py` on every Claude Code event. When no update arrives for more than 30 minutes, `monitor.py` marks the session as stale: the header switches to `Session Inactive`, the time-since-last-update is shown in parentheses (e.g. `(617m)`), and every metric is rendered in the dimmed variant of its color. Last known values are preserved — nothing is zeroed out — so you can still see where the session left off (context used, cost accumulated, rate-limit buckets, burn rate at time of freeze).
 
 <p align="center">
-  <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker from v1.13.0: session labels, model codes and live/stale tags"></a><br>
-  <sub><b>Session picker</b> (<code>s</code>) — pick among Claude Code sessions; live / stale tags, model codes. Screenshot from v1.13.0; the current picker has CLI and DESKTOP APP sections and a cursor (see <a href="#session-picker">Session Picker</a>).</sub>
+  <a href="screenshots/cc-aio-mon-picker.png"><img src="screenshots/cc-aio-mon-picker.png" alt="CC AIO MON — session picker with CLI SESSIONS and DESKTOP APP SESSIONS sections, a cursor, model codes, desk tags and live tags"></a><br>
+  <sub><b>Session picker</b> (<code>s</code>) — CLI and desktop app sessions in two sections; move the cursor and press <code>Enter</code> (see <a href="#session-picker">Session Picker</a>).</sub>
 </p>
 
 Press `r` to force a refresh (resets the stale timer if new data has arrived), or `s` to switch to a different session from the picker. If the session has truly ended and you want it out of the picker, delete its JSON/JSONL pair from `$TMPDIR/claude-aio-monitor/`.
