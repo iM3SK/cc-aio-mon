@@ -733,6 +733,50 @@ def _ellipsize(text, maxw):
     return "".join(out) + "…"
 
 
+def _pack_items(items, width, gap="  ", indent=""):
+    """Join key-hint items on one line; when they do not fit in `width`,
+    move whole items to further lines (prefixed by `indent`) instead of
+    cutting the line at the terminal edge."""
+    lines, cur, cur_w = [], "", 0
+    for it in items:
+        w = _vis_width(it)
+        if cur and cur_w + len(gap) + w > width:
+            lines.append(cur)
+            cur, cur_w = indent + it, _vis_width(indent) + w
+        elif cur:
+            cur, cur_w = cur + gap + it, cur_w + len(gap) + w
+        else:
+            cur, cur_w = it, w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _wrap_ansi(line, width):
+    """Word-wrap one coloured line to `width` columns. Continuation lines are
+    indented two columns past the line's own indent and resume the colour that
+    was active at the break, so a long legend entry stays readable in a narrow
+    terminal instead of being cut at the edge."""
+    if _vis_width(line) <= width:
+        return [line]
+    plain = _ANSI_RE.sub("", line)
+    indent = " " * min(width // 2, len(plain) - len(plain.lstrip(" ")) + 2)
+    lines, cur, cur_w, style = [], "", 0, ""
+    for word in line.split(" "):
+        w = _vis_width(word)
+        if cur_w and cur_w + 1 + w > width:
+            lines.append(cur + R)
+            cur, cur_w = indent + style + word, len(indent) + w
+        elif cur or cur_w:
+            cur, cur_w = cur + " " + word, cur_w + 1 + w
+        else:
+            cur, cur_w = word, w
+        for code in _ANSI_RE.findall(word):
+            style = "" if code == R else style + code
+    lines.append(cur)
+    return [truncate(ln, width) for ln in lines]
+
+
 # ---------------------------------------------------------------------------
 # Characters
 # ---------------------------------------------------------------------------
@@ -2100,7 +2144,10 @@ def render_legend(cols, rows):
     buf.append(f"{C_DIM}[{R}{C_WHT}l{R}{C_DIM}]{R}   {C_DIM}Legend{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}1-3{R}{C_DIM}]{R} {C_DIM}Token Stats Period{R}")
     buf.append(f"{C_DIM}[{R}{C_WHT}f{R}{C_DIM}]{R}   {C_DIM}Agents: {R}{C_GRN}●{R}{C_DIM} active {R}{C_DIM}○ idle, toggle filter{R}")
-    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal / move picker{R} {C_DIM}PgUp/Dn Home/End{R}")
+    buf.extend(_pack_items(
+        [f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll modal / move picker{R}",
+         f"{C_DIM}PgUp/Dn Home/End{R}"],
+        SW, gap=" ", indent=" " * 8))
     buf.append(f"{C_DIM}[{R}{C_WHT}enter{R}{C_DIM}]{R} {C_DIM}Open Session (picker){R}")
     # ── Dashboard metrics ──
     buf.append(sep(SW))
@@ -2168,6 +2215,7 @@ def render_legend(cols, rows):
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
+    buf[:] = [part for ln in buf for part in _wrap_ansi(ln, SW)]
     _window_buf(buf, rows)
     return buf
 
@@ -2953,7 +3001,11 @@ def render_menu(cols, rows):
     np = max(0, SW - 10)  # "NAVIGATION" = 10 chars
     buf.append(f"{BG_BAR}{C_WHT}{B}NAVIGATION{R}{BG_BAR}{' ' * np}{R}")
     buf.append(sep(SW))
-    buf.append(f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll{R}  {C_DIM}[{R}{C_WHT}PgUp/Dn{R}{C_DIM}]{R} {C_DIM}Page{R}  {C_DIM}[{R}{C_WHT}Home/End{R}{C_DIM}]{R} {C_DIM}Jump{R}")
+    buf.extend(_pack_items(
+        [f"{C_DIM}[{R}{C_WHT}↑↓ jk{R}{C_DIM}]{R} {C_DIM}Scroll{R}",
+         f"{C_DIM}[{R}{C_WHT}PgUp/Dn{R}{C_DIM}]{R} {C_DIM}Page{R}",
+         f"{C_DIM}[{R}{C_WHT}Home/End{R}{C_DIM}]{R} {C_DIM}Jump{R}"],
+        SW))
     buf.append(sep(SW))
     buf.append(f"{C_DIM}press any key to close{R}")
 
@@ -3986,11 +4038,17 @@ def render_picker(sessions, cols, rows, desktop=None, selected=None, loading=Fal
 # Screen flush
 # ---------------------------------------------------------------------------
 def flush(buf, cols):
+    # Clear each line BEFORE writing it. After a line that fills the last
+    # column the cursor sits in the pending-wrap state, and an EL or ED sent
+    # there also erases that last character (seen in Windows Terminal: "live"
+    # rendered as "liv"). The final line is kept one column short for the same
+    # reason, because the leftover-lines ED below follows it directly.
     out = [SYNC_ON, HOME]
+    last = len(buf) - 1
     for i, line in enumerate(buf):
-        out.append(truncate(line, cols))
         out.append(EL)
-        if i < len(buf) - 1:
+        out.append(truncate(line, cols if i < last else max(1, cols - 1)))
+        if i < last:
             out.append("\n")
     # Clear any leftover lines below the buffer from previous frames
     out.append(E + "J")  # erase from cursor to end of screen

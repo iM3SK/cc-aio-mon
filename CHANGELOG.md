@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.18.2 — 2026-11-14
+
+**Fixes — narrow terminals:**
+- **The last column of a full-width line is no longer erased.** The screen was
+  cleared to the end of each line after writing it; with the cursor in the last
+  column, Windows Terminal also erased that last character, so a picker row
+  ended in `liv` instead of `live`. Each line is now cleared before it is
+  written (`monitor.flush`).
+- **Menu and legend wrap instead of cutting text.** The menu's NAVIGATION keys
+  move to a second line when they do not fit, and long legend entries wrap at
+  word boundaries with their colour kept (`_pack_items`, `_wrap_ansi`).
+
+**Fixes — other:**
+- **A huge or non-finite number no longer crashes the statusline or the
+  monitor.** `shared._num` returns the default for values that overflow a
+  float or are `inf` / `nan`, which `int()` later failed on.
+
+**Tests:** 954 passing (+12).
+
 ## v1.18.1 — 2026-11-14
 
 **Security:**
