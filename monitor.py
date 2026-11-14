@@ -48,13 +48,11 @@ import pathlib
 import re
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import threading
 import time
 import traceback
-from collections import OrderedDict
 from datetime import datetime, timedelta
 
 from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
@@ -62,17 +60,16 @@ from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read
                     char_width, is_safe_dir, ensure_data_dir, ensure_utf8_stdout, run_git,
                     load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
-                    SECONDS_1H, SECONDS_5H, SECONDS_1D, SECONDS_7D,
-                    HISTORY_RATE_SAMPLES, MIN_EPOCH,
+                    SECONDS_1H, SECONDS_1D,
+                    HISTORY_RATE_SAMPLES,
                     WARN_PCT, CRIT_PCT,
                     DATA_DIR, VERSION_RE, VERSION, SCHEMA_VERSION,
-                    PY_FILES,  # noqa: F401 — pinned by TestPyFilesSingleSourceOfTruth (SSoT regression guard)
                     RESERVED_SIDS, strip_context_suffix, compact_context_suffix,
                     badge_context_suffix,
                     extract_changelog_entry,
                     check_syntax_after_pull, parse_ahead_behind, parse_commit_id, verify_origin_remote,
                     rotate_crash_log, acquire_singleton_lock,
-                    read_fable_weekly, fable_display_state, claude_projects_dir, STALE_DIM_SEC,
+                    read_fable_weekly, fable_display_state, STALE_DIM_SEC,
                     E, R, B, C_RED, C_GRN, C_YEL, C_ORN, C_TEAL, C_CYN, C_BLU, C_NAV,
                     C_WHT, C_TXT, C_MUT, C_DIM, C_LABEL, C_MONEY, C_INFO,
                     level_color, brn_color, WARN_BRN, _env_float)
@@ -531,13 +528,13 @@ def mkbar(pct, color=None, show_pct=True):
 
 
 # Rate-limit rows in display order — one table feeds render_frame and the legend.
-# (source key, label, window seconds, legend text). "fable" is not part of CC's
-# rate_limits payload: it comes from shared.read_fable_weekly() (Claude Code's
-# cached /usage data) and is merged into the row source by render_frame.
+# (source key, label, legend text). "fable" is not part of CC's rate_limits
+# payload: it comes from shared.read_fable_weekly() (Claude Code's cached
+# /usage data) and is merged into the row source by render_frame.
 _RL_ROWS = (
-    ("five_hour", "5HL", SECONDS_5H, "5-Hour Rate Limit"),
-    ("fable", "FBL", SECONDS_7D, "Fable Weekly Pool"),
-    ("seven_day", "7DL", SECONDS_7D, "7-Day Rate Limit"),
+    ("five_hour", "5HL", "5-Hour Rate Limit"),
+    ("fable", "FBL", "Fable Weekly Pool"),
+    ("seven_day", "7DL", "7-Day Rate Limit"),
 )
 
 
@@ -1343,11 +1340,11 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
         old_tag = (f"  {C_MUT}(~{_f_age(rl_age)} old){R}"
                    if rl_age is not None and rl_age > STALE_DIM_SEC else "")
 
-        def _render_rate_limit(data_obj, label, window_sec, tag="", dim=False):
+        def _render_rate_limit(data_obj, label, tag="", dim=False):
             """SIZE-002: shared renderer for every rate-limit block in
-            _RL_ROWS. Rows differ only in the data source, label and reset
-            window length; rendering logic (pct, expired tag, color,
-            countdown) is identical. Closure over `buf`, `c`, `mkbar`
+            _RL_ROWS. Rows differ only in the data source and label;
+            rendering logic (pct, expired tag, color, countdown) is
+            identical. Closure over `buf`, `c`, `mkbar`
             keeps the helper colocated with its only caller."""
             if not data_obj:
                 return False
@@ -1375,10 +1372,10 @@ def render_frame(data, hist, cols, rows, show_legend=False, show_menu=False, sho
             if fable_state == "stale":
                 fable_tag = f"  {C_MUT}(stale {int(_num(fable.get('age_s'))) // 60}m){R}"
         shown = [
-            _render_rate_limit(as_dict(src.get(key)), label, window,
+            _render_rate_limit(as_dict(src.get(key)), label,
                                fable_tag if key == "fable" else old_tag,
                                dim=bool(old_tag) and key != "fable")
-            for key, label, window, _legend in _RL_ROWS
+            for key, label, _legend in _RL_ROWS
         ]
         if not any(shown) and is_desktop:
             # Limits arrive only through the statusline; a CLI session (any
@@ -1521,7 +1518,7 @@ def render_legend(cols, rows):
     sub("CRD  Cache Read - CWR  Cache Write - MISS  Cache misses + last cause (CLI)")
     code(("CTX", "Context Window"))
     sub("INP  Input Tokens - OUT  Output Tokens")
-    for _key, label, _window, legend in _RL_ROWS:
+    for _key, label, legend in _RL_ROWS:
         code((label, legend))
     sub("RST  Reset Countdown")
     buf.append(f"{C_LABEL}BRN{R} {C_TXT}Burn Rate{R} {C_MUT}0-{BRN_MAX} $/min{R}")
@@ -2114,7 +2111,6 @@ _update_lock = threading.Lock()
 # Acquired here (non-blocking), released by the worker's finally block so no
 # two git-subprocesses run concurrently.  Mirrors _rls_maybe_check pattern.
 _checks_lock = threading.Lock()
-_checks_thread = None  # handle kept to allow is_alive() guard
 # Handle to the in-flight self-update worker (set by _apply_update_action).
 # Read by the main loop's `q` handler to refuse quitting mid git-pull, which
 # would kill the daemon before its post-pull syntax check runs (M-cross-1).
@@ -2269,7 +2265,6 @@ def _cached_update_checks():
     and immediately return the last cached value — the render frame never
     blocks on git.  Mirrors the _rls_maybe_check / _rls_check_worker pattern.
     F-01 / CACHE-10."""
-    global _checks_thread
     now = time.monotonic()
     with _update_lock:
         if now - _update_modal_cache["checks_ts"] < _UPDATE_MODAL_TTL:
@@ -2280,7 +2275,6 @@ def _cached_update_checks():
         try:
             t = threading.Thread(target=_update_checks_worker, daemon=True,
                                  name="update-checks")
-            _checks_thread = t
             t.start()
         except Exception:  # noqa: BLE001
             _checks_lock.release()
@@ -2328,7 +2322,7 @@ def _apply_update_worker():
         if rc != 0:
             raise RuntimeError("Could not read recovery commit")
         recovery = parse_commit_id(out)
-        rc, out, err = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
+        rc, _, _ = _git_cmd(["pull", "--ff-only", "origin", "main"], timeout=30)
         if rc != 0:
             raise RuntimeError("git pull failed")
         _invalidate_update_modal_cache()

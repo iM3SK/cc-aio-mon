@@ -26,14 +26,11 @@ import shared
 from shared import (
     MAX_FILE_SIZE,
     _ANSI_RE,
-    _SID_RE,
-    _sanitize,
     RESERVED_SIDS,
     C_RED,
     C_GRN,
     C_YEL,
     C_ORN,
-    C_CYN,
     C_DIM,
     C_MUT,
     C_LABEL,
@@ -64,7 +61,6 @@ from monitor import (
     BRN_MAX,
     CTR_MAX,
     CST_MAX,
-    BAR_W,
     _parse_version,
     _rls_cache,
     _rls_blink,
@@ -82,7 +78,6 @@ from monitor import (
     list_sessions,
     load_state,
     load_history,
-    DATA_DIR,
     render_picker,
     cached_cross_session_costs,
     _cost_cache,
@@ -100,14 +95,11 @@ from transcripts import (
     _parse_ts,
     _model_label,
     scan_transcript_stats,
-    _CLAUDE_DIR,
-    _usage_cache,
     _model_base,
     _get_pricing,
     _DEFAULT_PRICING,
     _aggregate_session_cost,
     _SESSION_COST_CACHE,
-    _SESSION_COST_TTL,
     _SESSION_COST_CACHE_MAX,
 )
 
@@ -3434,7 +3426,6 @@ class TestRenderPickerLimit(unittest.TestCase):
 # Pulse — scoring + extraction
 # ---------------------------------------------------------------------------
 import pulse
-from monitor import render_pulse_modal
 
 
 class TestListSessionsPurgesOrphan(unittest.TestCase):
@@ -5344,7 +5335,7 @@ class TestFableRow(unittest.TestCase):
         self.assertEqual(labels, ["5HL", "FBL", "7DL"])
         plain = _ANSI_RE.sub("", "\n".join(render_legend(80, 80)))
         for row in monitor._RL_ROWS:
-            self.assertIn(f"{row[1]} {row[3]}", plain)
+            self.assertIn(f"{row[1]} {row[2]}", plain)
 
 
 class TestJsonReadersRejectInvalidShapes(unittest.TestCase):
