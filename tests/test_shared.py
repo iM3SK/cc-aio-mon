@@ -312,7 +312,7 @@ class TestWhichAbs(unittest.TestCase):
         p = os.path.join(folder, fname)
         with open(p, "wb") as fh:
             fh.write(b"#!/bin/sh\n")
-        os.chmod(p, 0o755)
+        os.chmod(p, 0o700)
         return p
 
     def test_current_directory_is_not_searched(self):
