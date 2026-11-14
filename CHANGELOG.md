@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.18.1 — 2026-11-14
+
+**Security:**
+- **`update.py` strips control sequences from what it prints.** The default
+  read-only check printed commit subjects, the CHANGELOG preview and the remote
+  version from `origin/main` as they were, so a merged commit message could set
+  the terminal title or write to the clipboard (OSC 0 / OSC 52). The same
+  applies to the `git status` and `git fetch` output it echoes.
+- **The monitor strips control sequences from the remote version** shown in
+  the RLS line and the update modal.
+- **`git` is no longer found in the current directory on Windows.**
+  `shutil.which()` searched the current directory first, so a `git.exe` in
+  the folder the monitor or `update.py` was started from ran instead of Git
+  (`shared.which_abs`, absolute `PATH` entries only).
+
+**Tests:** 942 passing (+6).
+
 ## v1.18.0 — 2026-11-14
 
 **New — desktop app sessions:**

@@ -74,6 +74,12 @@ def hdr(msg):  print(f"\n{CYN}== {msg} =={R}")
 def note(msg): print(f"     {DIM}{msg}{R}")
 
 
+def _print_lines(text, indent=""):
+    """Print git or origin/main text line by line with control sequences stripped."""
+    for line in str(text).splitlines():
+        print(f"{indent}{_sanitize(line)}")
+
+
 REPO_ROOT = Path(__file__).parent.resolve()
 MIN_PYTHON = (3, 8)
 
@@ -119,7 +125,7 @@ def check_clean():
         raise RuntimeError("Could not verify working tree")
     if r.stdout.strip():
         err("Working tree has uncommitted changes:")
-        print(r.stdout)
+        _print_lines(r.stdout)
         note("Commit or stash your changes before updating:")
         note("  git stash   # (or 'git status' to inspect)")
         sys.exit(1)
@@ -130,7 +136,7 @@ def fetch_remote():
     r = run_git(["fetch", "origin", "main"])
     if r.returncode != 0:
         err("Failed to fetch from origin:")
-        print(r.stderr)
+        _print_lines(r.stderr)
         sys.exit(1)
     ok("Fetched from origin")
 
@@ -303,8 +309,8 @@ def _main():
     remote_ver = get_remote_version()
     behind, ahead = get_ahead_behind()
 
-    print(f"     Current:  {local_ver}")
-    print(f"     Latest:   {remote_ver}")
+    print(f"     Current:  {_sanitize(local_ver)}")
+    print(f"     Latest:   {_sanitize(remote_ver)}")
 
     if ahead > 0 and behind == 0:
         warn(f"Local is {ahead} commit(s) ahead of origin/main — cannot downgrade")
@@ -320,15 +326,15 @@ def _main():
 
     print(f"     Behind:   {behind} commit(s)")
 
+    # SEC: commit subjects and the CHANGELOG come from origin/main, i.e. from
+    # whoever got a commit merged; strip control sequences before printing.
     hdr("New commits")
-    for line in get_new_commits():
-        print(f"     {line}")
+    _print_lines("\n".join(get_new_commits()), indent="     ")
 
     cl_entry = get_remote_changelog_entry(remote_ver)
     if cl_entry:
-        hdr(f"CHANGELOG preview (v{remote_ver})")
-        for line in cl_entry.split("\n")[:20]:
-            print(f"     {line}")
+        hdr(f"CHANGELOG preview (v{_sanitize(remote_ver)})")
+        _print_lines("\n".join(cl_entry.split("\n")[:20]), indent="     ")
         note("(see CHANGELOG.md for full details)")
 
     if not args.apply:
