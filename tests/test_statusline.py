@@ -1559,6 +1559,12 @@ class TestProjectFor(unittest.TestCase):
         self.assertEqual(p["label"], statusline.PROJECT_CONFIG_ERROR_LABEL)
         self.assertEqual(p["color"], C_RED)
 
+    def test_unresolvable_home_means_off(self):
+        # no HOME / no passwd entry: a user who never created the file must
+        # not see an error segment
+        with patch("statusline.projects_config_path", side_effect=RuntimeError("no home")):
+            self.assertIsNone(statusline.project_for(self.data))
+
     def test_internal_error_never_breaks_the_line(self):
         self.cfg.write_bytes(b"{}")
         with patch("statusline.projects_config_path", return_value=self.cfg), \

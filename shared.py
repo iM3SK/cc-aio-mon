@@ -955,7 +955,13 @@ def projects_config_path() -> pathlib.Path:
 
 def _read_user_json(path, max_bytes) -> Optional[dict]:
     """Bounded read of a hand-written JSON object file. A UTF-8 BOM is accepted:
-    Windows PowerShell 5.1 `Set-Content -Encoding utf8` writes one."""
+    Windows PowerShell 5.1 `Set-Content -Encoding utf8` writes one. Anything
+    but a regular file (a directory, a FIFO that would block open()) is None."""
+    try:
+        if not _stat_mod.S_ISREG(os.stat(path).st_mode):
+            return None
+    except (OSError, ValueError):
+        return None
     raw = safe_read(path, max_bytes)
     if raw is None:
         return None
@@ -972,11 +978,17 @@ def load_projects_config(path=None) -> Tuple[str, Optional[dict]]:
     return ("on", cfg) if cfg is not None else ("error", None)
 
 
+_PROJECT_LABEL_DROP_RE = re.compile("[\\ud800-\\udfff\\u200b-\\u200d\\u2060\\ufeff]")
+
+
 def _project_label(value) -> Optional[str]:
-    """Sanitized, trimmed label cut to PROJECT_LABEL_MAX columns; None if empty."""
+    """Sanitized, trimmed label cut to PROJECT_LABEL_MAX columns; None if empty.
+    Lone surrogates (an emoji cut by UTF-16 units) are removed: printing one
+    raises UnicodeEncodeError and would kill the whole line. Zero-width
+    characters are removed so an invisible label cannot win over the folder."""
     if not isinstance(value, str):
         return None
-    s = _sanitize(value).strip()
+    s = _PROJECT_LABEL_DROP_RE.sub("", _sanitize(value)).strip()
     return ellipsize(s, PROJECT_LABEL_MAX) if s else None
 
 
@@ -999,7 +1011,10 @@ def _session_project(cfg: dict, sid, default_color) -> Optional[dict]:
         return None
     if not isinstance(sid, str) or not _SID_RE.match(sid):
         return None
-    base = pathlib.Path(sdir.strip()).expanduser()
+    try:
+        base = pathlib.Path(sdir.strip()).expanduser()
+    except (RuntimeError, KeyError, OSError):   # `~user` that does not exist, no HOME
+        return None
     if not base.is_absolute():
         return None
     entry = _read_user_json(base / f"{sid}.json", PROJECT_SESSION_FILE_MAX)
@@ -1013,9 +1028,11 @@ def resolve_project(data: dict, cfg: dict) -> Optional[dict]:
     """{"label", "color" (palette escape)} for this statusline event, or None.
 
     Order: (1) `sessions_dir/<session_id>.json` written by another tool,
-    (2) the longest `projects[].path` containing the session's current_dir,
-    project_dir or cwd, (3) the name of project_dir (the folder Claude Code was
-    started in), unless `"folder_name": false`."""
+    (2) the longest `projects[].path` containing the session's current_dir —
+    else its project_dir, else cwd (the first of them with a match decides, so
+    `cd` into another mapped folder switches the label), (3) the name of
+    project_dir (the folder Claude Code was started in), unless
+    `"folder_name": false`."""
     data, cfg = as_dict(data), as_dict(cfg)
     default_color = cfg.get("color")
     ws = as_dict(data.get("workspace"))
@@ -1024,21 +1041,24 @@ def resolve_project(data: dict, cfg: dict) -> Optional[dict]:
     if hit:
         return hit
 
-    dirs = [d for d in (_norm_dir(ws.get("current_dir")), _norm_dir(ws.get("project_dir")),
-                        _norm_dir(data.get("cwd"))) if d]
     entries = cfg.get("projects")
-    best, best_len = None, -1
+    mapped = []
     for item in entries if isinstance(entries, list) else []:
         item = as_dict(item)
         base, label = _norm_dir(item.get("path")), _project_label(item.get("label"))
-        if base is None or label is None:
+        if base is not None and label is not None:
+            mapped.append((base, label, item.get("color")))
+    for d in (_norm_dir(ws.get("current_dir")), _norm_dir(ws.get("project_dir")),
+              _norm_dir(data.get("cwd"))):
+        if d is None:
             continue
-        prefix = base if base.endswith(os.sep) else base + os.sep
-        if len(base) > best_len and any(d == base or d.startswith(prefix) for d in dirs):
-            best = {"label": label, "color": _project_color(item.get("color"), default_color)}
-            best_len = len(base)
-    if best:
-        return best
+        best = None
+        for base, label, color in mapped:
+            prefix = base if base.endswith(os.sep) else base + os.sep
+            if (d == base or d.startswith(prefix)) and (best is None or len(base) > len(best[0])):
+                best = (base, label, color)
+        if best:
+            return {"label": best[1], "color": _project_color(best[2], default_color)}
 
     if cfg.get("folder_name", True) is False:
         return None

@@ -1813,6 +1813,33 @@ class TestResolveProject(unittest.TestCase):
         p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
         self.assertEqual(p["label"], "Sh[2Jop")
 
+    def test_lone_surrogate_is_removed(self):
+        # a JS tool cutting an emoji by UTF-16 units writes this; printing it
+        # raised UnicodeEncodeError in main() and killed the whole line
+        cfg = {"projects": [{"path": self.shop, "label": "ab\ud83d"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "ab")
+        p["label"].encode("utf-8")
+
+    def test_invisible_only_label_is_empty(self):
+        cfg = {"projects": [{"path": self.shop, "label": "​⁠﻿"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "shop")
+
+    def test_current_dir_beats_a_longer_project_dir_match(self):
+        billing = str(self.root / "b")
+        shop_long = str(self.root / "work" / "shop-frontend-long")
+        cfg = {"projects": [{"path": billing, "label": "Billing"},
+                            {"path": shop_long, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=shop_long, current_dir=billing), cfg)
+        self.assertEqual(p["label"], "Billing")
+
+    def test_project_dir_match_when_current_dir_unmapped(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop,
+                                              current_dir=str(self.root / "elsewhere")), cfg)
+        self.assertEqual(p["label"], "Shop")
+
     def test_long_label_is_cut_with_ellipsis(self):
         cfg = {"projects": [{"path": self.shop, "label": "x" * 60}]}
         p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
@@ -1870,6 +1897,25 @@ class TestResolveProject(unittest.TestCase):
         for sid in ("../sess-1", "a/b", "", "CON", None):
             p = shared.resolve_project(self._data(project_dir=self.shop, sid=sid), {"sessions_dir": sdir})
             self.assertEqual(p["label"], "shop", sid)
+
+    def test_unexpandable_sessions_dir_falls_through(self):
+        with patch.object(shared.pathlib.Path, "expanduser", side_effect=RuntimeError("no home")):
+            p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": "~nobody/x"})
+        self.assertEqual(p["label"], "shop")
+
+    def test_session_path_that_is_not_a_file_falls_through(self):
+        d = self.root / "sessions"
+        (d / "sess-1.json").mkdir(parents=True)
+        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": str(d)})
+        self.assertEqual(p["label"], "shop")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs exist on POSIX only")
+    def test_fifo_session_file_is_not_opened(self):
+        d = self.root / "sessions"
+        d.mkdir()
+        os.mkfifo(str(d / "sess-1.json"))   # opening it would block the statusline
+        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": str(d)})
+        self.assertEqual(p["label"], "shop")
 
     def test_relative_sessions_dir_is_ignored(self):
         self._sessions("sess-1", {"label": "X"})

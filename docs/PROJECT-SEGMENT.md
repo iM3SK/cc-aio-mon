@@ -12,7 +12,8 @@ not say which is which.
 
 **It is off by default.** Nothing changes until you create the configuration
 file described below. The segment only reads files; it writes nothing and
-makes no network calls.
+opens no network connection of its own (a `sessions_dir` on a network share is
+read like any other folder — keep it local, see Troubleshooting).
 
 ---
 
@@ -57,12 +58,18 @@ to labels and colors:
 - **`path`** matches the folder itself and everything below it. When several
   entries match, the longest `path` wins, so `~/work/shop/api` beats
   `~/work/shop` for a session inside `api`.
-- The session's current directory, the folder Claude Code was started in and
-  `cwd` are all checked, so `cd` into a mapped subfolder is enough.
+- The session's current directory is checked first, then the folder Claude
+  Code was started in, then `cwd`. A `cd` into another mapped folder switches
+  the label.
+- Paths are compared as text: symlinks and junctions are not resolved. Write
+  the path the way Claude Code reports it in its statusline input (for
+  example, on macOS `/tmp` is a symlink to `/private/tmp`). Outside Windows
+  the comparison is case-sensitive.
 - `~` is expanded. On Windows, case and `/` vs `\` do not matter — but write
-  paths with `/` (`C:/Users/me/billing`): in JSON a single `\` is an error and
-  must be doubled (`C:\\Users\\me\\billing`), and the segment then shows
-  `PRJ config?`.
+  paths with `/` (`C:/Users/me/billing`). In JSON a single `\` must be doubled
+  (`C:\\Users\\me\\billing`). A single one is either an error (`PRJ config?`)
+  or, before `b`, `f`, `n`, `r` or `t`, silently a control character:
+  `"D:\repos\frontend"` loads without an error and never matches.
 - A folder that matches no entry still shows its own name. Add
   `"folder_name": false` to show `PRJ` only for mapped folders.
 
@@ -84,7 +91,9 @@ Unknown keys are ignored. An entry without `path` or `label` is skipped.
 unknown name falls back to the default color. Raw escape codes are not
 accepted.
 
-Labels are cut to 24 columns (ending in `…`); control characters are removed.
+Labels are cut to 24 columns (ending in `…`). Control characters, zero-width
+characters and broken UTF-16 halves (an emoji cut in two) are removed; a label
+that is empty after that counts as no label.
 
 ---
 
@@ -109,15 +118,19 @@ label each session separately.
    `color` is optional. The file must stay under 4 KB.
 
 The session id is the `session_id` field Claude Code passes to hooks and to
-the statusline. Commands that Claude Code runs (the Bash tool, hooks) also see
-it as the `CLAUDE_CODE_SESSION_ID` environment variable in current Claude Code
-versions.
+the statusline. Commands Claude Code runs (Bash and PowerShell tools, hooks)
+also get it as the
+[`CLAUDE_CODE_SESSION_ID`](https://code.claude.com/docs/en/env-vars)
+environment variable. `/clear` starts a new session id, so a tool that labels
+sessions should label the new one too (a `SessionStart` hook does, see below).
 
 Example — label the current session from inside it (macOS / Linux):
 
 ```bash
-echo '{"label": "Billing", "color": "orange"}' \
-  > "$HOME/.cache/my-tool/statusline/$CLAUDE_CODE_SESSION_ID.json"
+dir="$HOME/.cache/my-tool/statusline"
+mkdir -p "$dir"
+[ -n "$CLAUDE_CODE_SESSION_ID" ] &&
+  echo '{"label": "Billing", "color": "orange"}' > "$dir/$CLAUDE_CODE_SESSION_ID.json"
 ```
 
 Example — a `SessionStart` hook that labels each session from a lookup of
@@ -135,7 +148,7 @@ your own (`.claude/settings.json`):
 
 ```python
 # ~/bin/label-session.py — reads the hook input, writes the label file
-import json, os, pathlib, sys
+import json, pathlib, sys
 
 event = json.load(sys.stdin)
 out = pathlib.Path.home() / ".cache/my-tool/statusline"
@@ -145,8 +158,8 @@ label = pathlib.Path(event.get("cwd", "")).name or "unknown"   # your own logic 
 ```
 
 A per-session file wins over `projects` and over the folder name. When the file
-is missing, unreadable or has no `label`, the segment falls back to them.
-Remove old files yourself; the statusline never deletes anything.
+is missing, unreadable, not a regular file or has no `label`, the segment falls
+back to them. Remove old files yourself; the statusline never deletes anything.
 
 ---
 
@@ -154,7 +167,8 @@ Remove old files yourself; the statusline never deletes anything.
 
 1. `sessions_dir/<session_id>.json`, when `sessions_dir` is set and the file
    has a `label`
-2. the longest matching `projects[].path`
+2. the longest `projects[].path` that contains the current directory — else the
+   folder Claude Code was started in, else `cwd`
 3. the name of the folder Claude Code was started in, unless
    `"folder_name": false`
 4. nothing — no `PRJ` segment
@@ -175,9 +189,11 @@ name.
 | You see | Cause | Fix |
 |---|---|---|
 | no `PRJ` at all | the file is not where the statusline looks | check `~/.claude/cc-aio-mon-projects.json`, or the `CLAUDE_CONFIG_DIR` folder |
-| `PRJ config?` in red | the file exists but is not a valid JSON object, cannot be read, or is over 64 KB | validate it, e.g. `python3 -m json.tool ~/.claude/cc-aio-mon-projects.json` |
-| the folder name instead of your label | no `path` contains the session's folder | compare `path` with the folder Claude Code runs in; a relative `path` never matches, so use an absolute path or `~` |
-| a per-session label is ignored | `sessions_dir` is relative, or the file name is not the exact session id | use an absolute folder; the file is `<session_id>.json` |
+| `PRJ config?` in red | the file exists but is not a JSON object (`{ … }`), cannot be read, or is over 64 KB | open it in a JSON validator; the whole file must be one object |
+| the folder name instead of your label | no `path` contains the session's folder | compare `path` with the folder Claude Code runs in. A relative `path` never matches (use an absolute one or `~`); so does a Windows path with single `\` (see above) or a symlinked folder |
+| a per-session label is ignored | `sessions_dir` is relative, the file name is not the exact session id, or the id changed after `/clear` | use an absolute folder; the file is `<session_id>.json` |
+| the statusline is slow or freezes | `sessions_dir` is on a network share that does not answer | put `sessions_dir` on a local disk |
 
-The segment never stops the statusline: any error in reading the
-configuration shows `PRJ config?` and the rest of the line stays as it was.
+Errors in the configuration never stop the statusline: they show
+`PRJ config?` instead of a label, and the other segments are computed as usual
+(on a narrow terminal the error takes room like a label would).

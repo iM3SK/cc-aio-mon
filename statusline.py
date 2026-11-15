@@ -283,7 +283,11 @@ def project_for(data):
     """PRJ input for this event: None when the config file is absent (feature
     off) or no project resolves, else {"label", "color"}. Never raises."""
     try:
-        state, cfg = load_projects_config(projects_config_path())
+        path = projects_config_path()
+    except Exception:   # no resolvable home directory: the user cannot have the file
+        return None
+    try:
+        state, cfg = load_projects_config(path)
         if state == "off":
             return None
         if state == "error":
