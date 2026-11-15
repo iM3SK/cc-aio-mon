@@ -65,12 +65,12 @@ lets both processes operate independently without sockets or shared memory.
 ## 3. Six Modules
 
 **statusline.py** — Entry point 1. Reads Claude Code's statusline JSON from
-stdin, renders the single-line ANSI status bar (Model, CTX, CCH, 5HL, FBL, 7DL, CST,
+stdin, renders the single-line ANSI status bar (PRJ when enabled, Model, CTX, CCH, 5HL, FBL, 7DL, CST,
 BRN segments), and writes the IPC snapshot + history via `write_shared_state()`.
-Segment builders (`seg_model`, `seg_ctx`, `seg_cache`, `seg_5hl`, `seg_fable`,
+Segment builders (`seg_project`, `seg_model`, `seg_ctx`, `seg_cache`, `seg_5hl`, `seg_fable`,
 `seg_7dl`, `seg_cost`, `seg_brn`) each return `(text, visible_length)`;
 `build_line()` drops them by a drop rank when the terminal is too narrow (right
-to left, except that FBL goes before 7DL and CCH goes after BRN and CST, before FBL). A second entry point,
+to left, except that FBL goes before 7DL, CCH goes after BRN and CST, before FBL, and PRJ goes after CST, before CCH). A second entry point,
 `statusline.py --refresh-fable` (`run_fable_refresh`), is the detached helper
 that refreshes Claude Code's usage cache for FBL (`_maybe_refresh_fable`). On Windows, terminal width
 is queried via `CONOUT$` because Claude Code runs this script with all file
@@ -378,5 +378,6 @@ exits, the monitor turns a failure into a warning or an empty result.
 | Add a new Python file to the project | Append the filename to `shared.PY_FILES` — this propagates to the post-update syntax check and the compile-check in the test suite |
 | Understand the session file format | `statusline.py:write_shared_state()` writes it; `monitor.py:load_state()` reads it; field names mirror the Claude Code statusline JSON protocol keys |
 | Change the Fable weekly pool (FBL) | Reader + display rule: `shared.read_fable_weekly()` / `fable_display_state()`; statusline segment `seg_fable()` and refresher `_maybe_refresh_fable()` / `run_fable_refresh()`; dashboard row + legend come from `monitor._RL_ROWS`. See FILE-IPC-CONTRACT "Fable weekly pool" |
+| Change the project segment (PRJ) | Config + resolution: `shared.projects_config_path()` / `load_projects_config()` / `resolve_project()`; render: `statusline.project_for()` + `seg_project()`. Statusline only; user guide [PROJECT-SEGMENT.md](PROJECT-SEGMENT.md) |
 | Change the prompt-cache countdown (CCH) | `statusline.seg_cache()` — reads the stdin `prompt_cache` object; thresholds `_CACHE_SHOW_S` (hide above 50 min) and `_CACHE_WARN_FRAC` (yellow below 20 % of the TTL). Statusline only; the dashboard does not read it |
 | Change how 5HL/7DL rate limits are sourced | `monitor.cached_freshest_rate_limits()` — account-wide read from the freshest snapshot across all sessions (per-account limits, idle snapshots freeze); injected via `render_frame(..., rate_limits=...)`. See FILE-IPC-CONTRACT "Rate Limits — account-wide read semantics" |

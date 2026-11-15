@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.20.0 — 2026-11-15
+
+**Statusline — project segment (PRJ), opt-in:**
+- **`PRJ` names the project a session works in**, at the start of the line,
+  so sessions running side by side are easy to tell apart. It is off until
+  `cc-aio-mon-projects.json` exists in `~/.claude/` (or `$CLAUDE_CONFIG_DIR`);
+  an empty `{}` shows the name of the folder Claude Code was started in.
+- **The same file maps folders to labels and colors** (`projects`, longest
+  matching path wins, subfolders included) and can name a `sessions_dir`
+  where another tool writes `<session_id>.json` with a label for one session.
+  Colors are names from the Nord palette; labels are sanitized and cut to 24
+  columns.
+- **A broken file is shown, not hidden:** `PRJ config?` in red. The
+  segment never stops the line. A UTF-8 BOM (Windows PowerShell 5.1) is
+  accepted.
+- **On a narrow terminal PRJ drops after BRN and CST, before CCH**, so the
+  limits stay visible longer than the project name.
+- Guide: [docs/PROJECT-SEGMENT.md](docs/PROJECT-SEGMENT.md).
+
+**Internal:**
+- `ellipsize` moved from `monitor.py` to `shared.py`; the monitor imports it
+  under its old name and its behavior is unchanged.
+
+**Tests:** 1038 passing (+45).
+
 ## v1.19.1 — 2026-11-14
 
 **Fixes — narrow terminals:**
