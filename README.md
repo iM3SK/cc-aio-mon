@@ -16,6 +16,12 @@ The Bandit badge tracks report publication; findings are reviewed in
 
 > _Independent community project. Not affiliated with or endorsed by Anthropic. See [NOTICE](NOTICE.md) for provenance & trademark attribution._
 
+https://github.com/user-attachments/assets/9309ef86-4ac7-4560-86df-d837339a0969
+
+<p align="center">
+  <sub><b>Promo film</b> (55 s) — the statusline, the data flow, the dashboard and the one-key views. Music: “Aitech” by Kevin MacLeod (<a href="https://incompetech.com/">incompetech.com</a>), <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>. The narration is synthetic speech. See <a href="NOTICE.md">NOTICE</a>.</sub>
+</p>
+
 > **How it works:** Claude Code pipes session telemetry as JSON to `statusline.py` via **stdin** on session start or resume, after each assistant message, a completed `/compact`, a permission mode change or vim mode toggle, when a rate-limit reset or prompt-cache expiry passes, and every `refreshInterval` seconds if set (300ms debounce). The script parses the JSON, renders a single ANSI-colored status line in the terminal, and writes the data to `$TMPDIR/claude-aio-monitor/` as atomic JSON snapshots + append-only JSONL history. A separate `monitor.py` process polls these temp files and renders a fullscreen TUI dashboard; sessions in the Claude desktop app, which never run the statusline, are read from their transcripts instead. Both scripts share `shared.py` for burn rate ($/min) and context rate (%/min) calculation. A `pulse.py` background worker probes Anthropic backend stability (`status.claude.com` status page + HTTPS endpoint) for a "safe to code / not safe to code" verdict — disable with `CC_AIO_MON_NO_PULSE=1`. **Six runtime Python files, stdlib only, no build step.**
 
 | | |

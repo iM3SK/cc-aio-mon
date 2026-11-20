@@ -88,3 +88,19 @@ descriptive purposes only:
 - Python Software Foundation — Python language, PSF License
 
 All trademarks are the property of their respective owners.
+
+================================================================
+Promo Film
+================================================================
+
+The promo film embedded in the README is hosted as a GitHub attachment.
+It is not part of this repository or of the runtime.
+
+- Music: "Aitech" by Kevin MacLeod (https://incompetech.com/),
+  licensed under Creative Commons Attribution 3.0
+  (https://creativecommons.org/licenses/by/3.0/). The track was trimmed
+  and mixed under narration and sound effects.
+- Narration: synthetic speech generated with a text-to-speech model.
+  No human voice was recorded.
+- Screens: the project's own terminal output and screenshots. Figures
+  that change during a shot are illustrative.
