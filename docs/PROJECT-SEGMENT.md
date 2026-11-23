@@ -34,6 +34,11 @@ From the next statusline update on, the segment shows the name of the folder
 Claude Code was started in (`workspace.project_dir` from the statusline
 input). No restart is needed.
 
+If you start Claude Code in one folder that holds many projects, that name is
+the same for every session. Put `{ "folder_name": "current" }` in the file
+instead, and the segment shows the name of the folder the session is working
+in right now (`workspace.current_dir`); it follows a `cd`.
+
 To turn it off again, delete the file.
 
 ---
@@ -70,14 +75,16 @@ to labels and colors:
   or, before `b`, `f`, `n`, `r` or `t`, silently a control character:
   `"D:\repos\frontend"` loads without an error and never matches.
 - A folder that matches no entry still shows its own name. Add
-  `"folder_name": false` to show `PRJ` only for mapped folders.
+  `"folder_name": false` to show `PRJ` only for mapped folders, or
+  `"folder_name": "current"` to name the current folder instead of the one
+  Claude Code was started in.
 
 ### All keys
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `color` | color name | `"white"` | Color of every label that has no color of its own |
-| `folder_name` | `true` / `false` | `true` | Show the folder name when nothing else matches |
+| `folder_name` | `true` / `false` / `"current"` | `true` | Folder name shown when nothing else matches: `true` the folder Claude Code was started in, `"current"` the session's current folder, `false` none |
 | `projects` | list | `[]` | `{ "path", "label", "color"? }` entries, see above |
 
 Unknown keys are ignored. An entry without `path` or `label` is skipped.
@@ -99,7 +106,8 @@ that is empty after that counts as no label.
 
 1. the longest `projects[].path` that contains the current directory — else the
    folder Claude Code was started in, else `cwd`
-2. the name of the folder Claude Code was started in, unless
+2. the name of the folder Claude Code was started in — with
+   `"folder_name": "current"` the name of the current folder — unless
    `"folder_name": false`
 3. nothing — no `PRJ` segment
 

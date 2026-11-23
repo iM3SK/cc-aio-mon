@@ -1757,6 +1757,28 @@ class TestResolveProject(unittest.TestCase):
         p = shared.resolve_project({"cwd": self.shop}, {})
         self.assertEqual(p["label"], "shop")
 
+    def test_folder_name_current_prefers_current_dir(self):
+        p = shared.resolve_project(self._data(project_dir=self.shop, current_dir=self.shop_api),
+                                   {"folder_name": " Current "})
+        self.assertEqual(p["label"], "api")
+
+    def test_folder_name_current_falls_back_to_cwd_then_project_dir(self):
+        cfg = {"folder_name": "current"}
+        data = {"cwd": self.shop_api, "workspace": {"project_dir": self.shop}}
+        self.assertEqual(shared.resolve_project(data, cfg)["label"], "api")
+        self.assertEqual(shared.resolve_project(self._data(project_dir=self.shop), cfg)["label"], "shop")
+
+    def test_folder_name_current_keeps_mapped_paths_first(self):
+        cfg = {"folder_name": "current", "projects": [{"path": self.shop, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop, current_dir=self.shop_api), cfg)
+        self.assertEqual(p["label"], "Shop")
+
+    def test_folder_name_unknown_value_means_default(self):
+        for value in ("launch", "", 1, None, [], True):
+            p = shared.resolve_project(self._data(project_dir=self.shop, current_dir=self.shop_api),
+                                       {"folder_name": value})
+            self.assertEqual(p["label"], "shop", value)
+
     def test_folder_name_can_be_switched_off(self):
         self.assertIsNone(shared.resolve_project(self._data(project_dir=self.shop),
                                                  {"folder_name": False}))

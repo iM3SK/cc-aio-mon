@@ -1,4 +1,4 @@
-# FILE-IPC CONTRACT: cc-aio-mon v1.19.1
+# FILE-IPC CONTRACT: cc-aio-mon v1.20.0
 
 **Status**: Active  
 **Version**: 1.19.1 (`SCHEMA_VERSION` = 1)\
@@ -901,6 +901,6 @@ All IPC is best-effort. No exceptions are raised to the user—errors are logged
 
 ---
 
-**Document Version**: 1.19.1\
+**Document Version**: 1.20.0\
 **Last Verified**: 2026-11-13  
 **Status**: Production

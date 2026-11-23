@@ -1,12 +1,15 @@
 # Changelog
 
-## v1.20.0 — 2026-11-15
+## v1.20.0 — 2026-11-23
 
 **Statusline — project segment (PRJ), opt-in:**
 - **`PRJ` names the project a session works in**, at the start of the line,
   so sessions running side by side are easy to tell apart. It is off until
   `cc-aio-mon-projects.json` exists in `~/.claude/` (or `$CLAUDE_CONFIG_DIR`);
   an empty `{}` shows the name of the folder Claude Code was started in.
+- **`"folder_name": "current"` names the folder the session is working in
+  right now** instead of the one Claude Code was started in. For one launch
+  folder that holds many projects, with no folder list to maintain.
 - **The same file maps folders to labels and colors** (`projects`, longest
   matching path wins, subfolders included; the current directory decides
   first, so a `cd` into another mapped folder switches the label). Colors are
@@ -28,7 +31,7 @@
 - `ellipsize` moved from `monitor.py` to `shared.py`; the monitor imports it
   under its old name and its behavior is unchanged.
 
-**Tests:** 1037 passing (+44).
+**Tests:** 1041 passing (+48).
 
 ## v1.19.1 — 2026-11-14
 
