@@ -14,8 +14,8 @@
 #
 # Usage:  scripts/release.sh X.Y.Z
 #
-# Maintainer tool (Linux/macOS bash). Not shipped to end users, not part of the
-# six runtime modules in shared.PY_FILES.
+# Maintainer tool (bash on Linux/macOS, Git Bash on Windows). Not shipped to
+# end users, not part of the six runtime modules in shared.PY_FILES.
 
 set -euo pipefail
 
@@ -36,9 +36,18 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     exit 2
 fi
 
-PY="$(command -v python3 || command -v py || true)"
+# Take the first interpreter that actually runs. On Windows `python3` is on
+# PATH as a Microsoft Store stub that exits non-zero without running anything,
+# so being found by `command -v` is not enough.
+PY=""
+for cand in python3 python py; do
+    if command -v "$cand" >/dev/null 2>&1         && "$cand" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >/dev/null 2>&1; then
+        PY="$cand"
+        break
+    fi
+done
 if [ -z "$PY" ]; then
-    errln "python3 / py not found on PATH"
+    errln "no working Python 3.8+ found (tried python3, python, py)"
     exit 1
 fi
 
