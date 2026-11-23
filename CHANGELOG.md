@@ -9,24 +9,26 @@
   an empty `{}` shows the name of the folder Claude Code was started in.
 - **The same file maps folders to labels and colors** (`projects`, longest
   matching path wins, subfolders included; the current directory decides
-  first, so a `cd` into another mapped folder switches the label) and can name
-  a `sessions_dir` where another tool writes `<session_id>.json` with a label
-  for one session. Colors are names from the Nord palette. Labels are
-  sanitized (control and zero-width characters, broken UTF-16 halves) and cut
-  to 24 columns.
+  first, so a `cd` into another mapped folder switches the label). Colors are
+  names from the Nord palette. Labels are sanitized (control and zero-width
+  characters, broken UTF-16 halves) and cut to 24 columns.
 - **A broken file is shown, not hidden:** `PRJ config?` in red. Errors in the
   configuration never stop the line. A UTF-8 BOM (Windows PowerShell 5.1) is
-  accepted; a per-session path that is not a regular file is skipped without
+  accepted; a config path that is not a regular file is reported without
   being opened.
 - **On a narrow terminal PRJ drops after BRN and CST, before CCH**, so the
   limits stay visible longer than the project name.
 - Guide: [docs/PROJECT-SEGMENT.md](docs/PROJECT-SEGMENT.md).
 
+**Security:**
+- `.github/SECURITY.md` and `NOTICE.md` list the new read of
+  `cc-aio-mon-projects.json` in the Claude config directory.
+
 **Internal:**
 - `ellipsize` moved from `monitor.py` to `shared.py`; the monitor imports it
   under its old name and its behavior is unchanged.
 
-**Tests:** 1046 passing (+53).
+**Tests:** 1037 passing (+44).
 
 ## v1.19.1 — 2026-11-14
 

@@ -935,7 +935,6 @@ def ellipsize(text, maxw):
 # ---------------------------------------------------------------------------
 PROJECTS_FILE_NAME = "cc-aio-mon-projects.json"
 PROJECTS_FILE_MAX = 65_536          # the whole config; a map of paths stays far below
-PROJECT_SESSION_FILE_MAX = 4_096    # one per-session file: {"label": ..., "color": ...}
 PROJECT_LABEL_MAX = 24              # display columns, ellipsis included
 PROJECT_DEFAULT_COLOR = "white"
 # Names a user writes in the config -> palette entries (never raw escapes).
@@ -1005,41 +1004,17 @@ def _norm_dir(value) -> Optional[str]:
     return os.path.normcase(os.path.normpath(os.path.expanduser(value.strip())))
 
 
-def _session_project(cfg: dict, sid, default_color) -> Optional[dict]:
-    sdir = cfg.get("sessions_dir")
-    if not isinstance(sdir, str) or not sdir.strip():
-        return None
-    if not isinstance(sid, str) or not _SID_RE.match(sid):
-        return None
-    try:
-        base = pathlib.Path(sdir.strip()).expanduser()
-    except (RuntimeError, KeyError, OSError):   # `~user` that does not exist, no HOME
-        return None
-    if not base.is_absolute():
-        return None
-    entry = _read_user_json(base / f"{sid}.json", PROJECT_SESSION_FILE_MAX)
-    label = _project_label(entry.get("label")) if entry else None
-    if label is None:
-        return None
-    return {"label": label, "color": _project_color(entry.get("color"), default_color)}
-
-
 def resolve_project(data: dict, cfg: dict) -> Optional[dict]:
     """{"label", "color" (palette escape)} for this statusline event, or None.
 
-    Order: (1) `sessions_dir/<session_id>.json` written by another tool,
-    (2) the longest `projects[].path` containing the session's current_dir —
-    else its project_dir, else cwd (the first of them with a match decides, so
-    `cd` into another mapped folder switches the label), (3) the name of
-    project_dir (the folder Claude Code was started in), unless
-    `"folder_name": false`."""
+    Order: (1) the longest `projects[].path` containing the session's
+    current_dir — else its project_dir, else cwd (the first of them with a
+    match decides, so `cd` into another mapped folder switches the label),
+    (2) the name of project_dir (the folder Claude Code was started in),
+    unless `"folder_name": false`."""
     data, cfg = as_dict(data), as_dict(cfg)
     default_color = cfg.get("color")
     ws = as_dict(data.get("workspace"))
-
-    hit = _session_project(cfg, data.get("session_id"), default_color)
-    if hit:
-        return hit
 
     entries = cfg.get("projects")
     mapped = []

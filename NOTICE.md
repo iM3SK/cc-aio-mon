@@ -37,6 +37,11 @@ The project interacts with Anthropic products through:
      and, to refresh it, runs the user's own `claude` CLI with its
      experimental `get_usage` control request. No credentials are read.
      Opt-out via `CC_AIO_MON_FABLE_REFRESH_SEC=0`.
+   - Optional PRJ project segment: reads the user's own
+     `cc-aio-mon-projects.json` in the Claude Code config directory
+     (`~/.claude/`, or `$CLAUDE_CONFIG_DIR`), read-only, and only when
+     the user has created it. The file belongs to this project, not to
+     Claude Code.
 
 2. Public endpoints:
    - `status.claude.com/api/v2/summary.json` — Anthropic's public

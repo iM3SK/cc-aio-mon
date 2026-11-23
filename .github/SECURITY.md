@@ -48,7 +48,7 @@ CC AIO MON reads session data from Claude Code via stdin and writes snapshots to
 - **Session IDs** — regex-validated (`^[a-zA-Z0-9_\-]{1,128}$`), reserved names (`rls`, `stats`, `pulse`, `fable-refresh-settings`) blocked.
 - **transcript_path** (statusline JSON) — containment-checked: `~/.claude/projects/` itself must be a real directory, and the transcript must be a regular file inside it; symlinks/junctions are rejected. (added 2026-04; root validation tightened 2026-05)
 - **Transcript content** (read-only, `~/.claude/projects/`) — per-file 50 MB cap, model IDs sanitized before terminal render. (added 2026-04)
-- **File I/O** — confined to `$TMPDIR/claude-aio-monitor/` (writes) and `~/.claude/projects/` plus `~/.claude.json` (reads; `$CLAUDE_CONFIG_DIR` when set). `~/.claude.json` is read size-capped for the FBL usage cache only; `.credentials.json` and OAuth tokens are never read. Desktop app transcripts are read incrementally, up to 1 GiB per file and 16 MiB per poll. Atomic writes via `NamedTemporaryFile` + `os.replace`.
+- **File I/O** — confined to `$TMPDIR/claude-aio-monitor/` (writes) and `~/.claude/projects/`, `~/.claude.json` and `~/.claude/cc-aio-mon-projects.json` (reads; `$CLAUDE_CONFIG_DIR` when set). `~/.claude.json` is read size-capped for the FBL usage cache only; `cc-aio-mon-projects.json` is the user's own opt-in PRJ config, read by the statusline only when it exists and is a regular file, capped at 64 KB; `.credentials.json` and OAuth tokens are never read. Desktop app transcripts are read incrementally, up to 1 GiB per file and 16 MiB per poll. Atomic writes via `NamedTemporaryFile` + `os.replace`.
 - **Subprocess** — `git` (`shell=False`, list args, `GIT_TERMINAL_PROMPT=0`, bounded timeouts, minimal env whitelist, added 2026-04; never `--no-verify` / `--force`), plus the optional FBL refresher: `statusline.py --refresh-fable` (same interpreter, detached) which runs the user's `claude -p` with hooks and session persistence disabled. Disable with `CC_AIO_MON_FABLE_REFRESH_SEC=0`.
 - **Network** — Pulse: `status.claude.com` + `api.anthropic.com` HTTPS GET, no auth, bounded size (512 KB) + timeout (5 s). Update: git fetch origin main (HTTPS or SSH, configurable by user's git remote).
 
@@ -59,7 +59,7 @@ Key protections:
 - Session ID validated against `[a-zA-Z0-9_-]{1,128}` — prevents path traversal
 - All JSON fields sanitized before terminal output — prevents escape injection
 - Atomic writes via `NamedTemporaryFile` + `os.replace()` — prevents partial reads
-- File size limits on all reads (1 MB JSON/source files, 2 MB JSONL, 10 MB cross-session, 50 MiB transcripts, 512 KB pulse response, 1 MB `pulse.jsonl`) — prevents memory exhaustion
+- File size limits on all reads (1 MB JSON/source files, 2 MB JSONL, 10 MB cross-session, 50 MiB transcripts, 512 KB pulse response, 1 MB `pulse.jsonl`, 64 KB `cc-aio-mon-projects.json`) — prevents memory exhaustion
 - Symlink and NTFS junction rejection on temp data directory — `lstat()` + `S_ISDIR` verification with `FILE_ATTRIBUTE_REPARSE_POINT` check on Windows. Defends against TOCTOU races between mkdir and validation.
 - Temp directory created with `0o700` permissions where supported
 - `update.py` guards: dirty tree, wrong branch, detached HEAD, divergence, downgrade, Python version mismatch

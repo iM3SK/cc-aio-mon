@@ -1704,6 +1704,15 @@ class TestProjectsConfig(unittest.TestCase):
         self.path.write_bytes(b"{" + b" " * shared.PROJECTS_FILE_MAX + b"}")
         self.assertEqual(shared.load_projects_config(self.path), ("error", None))
 
+    def test_directory_is_error(self):
+        self.path.mkdir()
+        self.assertEqual(shared.load_projects_config(self.path), ("error", None))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs exist on POSIX only")
+    def test_fifo_is_not_opened(self):
+        os.mkfifo(str(self.path))   # opening it would block the statusline
+        self.assertEqual(shared.load_projects_config(self.path), ("error", None))
+
     def test_default_path_follows_claude_config_dir(self):
         with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.dir)}):
             self.assertEqual(shared.projects_config_path(), self.path)
@@ -1716,7 +1725,7 @@ class TestProjectsConfig(unittest.TestCase):
 
 
 class TestResolveProject(unittest.TestCase):
-    """Order: per-session file > longest path match in `projects` > folder name."""
+    """Order: longest path match in `projects` > folder name."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1809,7 +1818,7 @@ class TestResolveProject(unittest.TestCase):
         self.assertEqual(p["color"], shared.PROJECT_COLORS[shared.PROJECT_DEFAULT_COLOR])
 
     def test_label_is_sanitized(self):
-        cfg = {"projects": [{"path": self.shop, "label": "Sh\x1b[2Jop‮"}]}
+        cfg = {"projects": [{"path": self.shop, "label": "Sh\x1b[2Jop\u202e"}]}
         p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
         self.assertEqual(p["label"], "Sh[2Jop")
 
@@ -1822,7 +1831,7 @@ class TestResolveProject(unittest.TestCase):
         p["label"].encode("utf-8")
 
     def test_invisible_only_label_is_empty(self):
-        cfg = {"projects": [{"path": self.shop, "label": "​⁠﻿"}]}
+        cfg = {"projects": [{"path": self.shop, "label": "\u200b\u2060\ufeff"}]}
         p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
         self.assertEqual(p["label"], "shop")
 
@@ -1851,77 +1860,6 @@ class TestResolveProject(unittest.TestCase):
         p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
         width = sum(shared.char_width(c) for c in p["label"])
         self.assertLessEqual(width, shared.PROJECT_LABEL_MAX)
-
-    # --- per-session files ---
-
-    def _sessions(self, sid, payload):
-        d = self.root / "sessions"
-        d.mkdir(exist_ok=True)
-        (d / f"{sid}.json").write_bytes(payload if isinstance(payload, bytes)
-                                        else json.dumps(payload).encode())
-        return str(d)
-
-    def test_session_file_wins_over_map_and_folder(self):
-        sdir = self._sessions("sess-1", {"label": "P13 cc-aio-mon", "color": "orange"})
-        cfg = {"sessions_dir": sdir, "projects": [{"path": self.shop, "label": "Shop"}]}
-        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
-        self.assertEqual((p["label"], p["color"]), ("P13 cc-aio-mon", shared.C_ORN))
-
-    def test_other_sessions_file_is_not_used(self):
-        sdir = self._sessions("sess-2", {"label": "Other"})
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": sdir})
-        self.assertEqual(p["label"], "shop")
-
-    def test_session_file_with_utf8_bom(self):
-        sdir = self._sessions("sess-1", b"\xef\xbb\xbf" + json.dumps({"label": "Billing"}).encode())
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": sdir})
-        self.assertEqual(p["label"], "Billing")
-
-    def test_session_file_without_label_falls_through(self):
-        sdir = self._sessions("sess-1", {"color": "red"})
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": sdir})
-        self.assertEqual(p["label"], "shop")
-
-    def test_malformed_session_file_falls_through(self):
-        sdir = self._sessions("sess-1", b"{oops")
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": sdir})
-        self.assertEqual(p["label"], "shop")
-
-    def test_oversized_session_file_falls_through(self):
-        sdir = self._sessions("sess-1", b'{"label": "' + b"x" * shared.PROJECT_SESSION_FILE_MAX + b'"}')
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": sdir})
-        self.assertEqual(p["label"], "shop")
-
-    def test_unsafe_session_id_never_builds_a_path(self):
-        sdir = self._sessions("sess-1", {"label": "X"})
-        for sid in ("../sess-1", "a/b", "", "CON", None):
-            p = shared.resolve_project(self._data(project_dir=self.shop, sid=sid), {"sessions_dir": sdir})
-            self.assertEqual(p["label"], "shop", sid)
-
-    def test_unexpandable_sessions_dir_falls_through(self):
-        with patch.object(shared.pathlib.Path, "expanduser", side_effect=RuntimeError("no home")):
-            p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": "~nobody/x"})
-        self.assertEqual(p["label"], "shop")
-
-    def test_session_path_that_is_not_a_file_falls_through(self):
-        d = self.root / "sessions"
-        (d / "sess-1.json").mkdir(parents=True)
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": str(d)})
-        self.assertEqual(p["label"], "shop")
-
-    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs exist on POSIX only")
-    def test_fifo_session_file_is_not_opened(self):
-        d = self.root / "sessions"
-        d.mkdir()
-        os.mkfifo(str(d / "sess-1.json"))   # opening it would block the statusline
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": str(d)})
-        self.assertEqual(p["label"], "shop")
-
-    def test_relative_sessions_dir_is_ignored(self):
-        self._sessions("sess-1", {"label": "X"})
-        p = shared.resolve_project(self._data(project_dir=self.shop), {"sessions_dir": "sessions"})
-        self.assertEqual(p["label"], "shop")
-
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
