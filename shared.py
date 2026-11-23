@@ -1011,7 +1011,8 @@ def resolve_project(data: dict, cfg: dict) -> Optional[dict]:
     current_dir — else its project_dir, else cwd (the first of them with a
     match decides, so `cd` into another mapped folder switches the label),
     (2) the name of project_dir (the folder Claude Code was started in),
-    unless `"folder_name": false`."""
+    unless `"folder_name": false`. `"folder_name": "current"` names the
+    session's current_dir instead, for one launch folder holding many projects."""
     data, cfg = as_dict(data), as_dict(cfg)
     default_color = cfg.get("color")
     ws = as_dict(data.get("workspace"))
@@ -1035,9 +1036,13 @@ def resolve_project(data: dict, cfg: dict) -> Optional[dict]:
         if best:
             return {"label": best[1], "color": _project_color(best[2], default_color)}
 
-    if cfg.get("folder_name", True) is False:
+    folder_name = cfg.get("folder_name", True)
+    if folder_name is False:
         return None
-    for d in (ws.get("project_dir"), ws.get("current_dir"), data.get("cwd")):
+    dirs = [ws.get("project_dir"), ws.get("current_dir"), data.get("cwd")]
+    if isinstance(folder_name, str) and folder_name.strip().lower() == "current":
+        dirs = [ws.get("current_dir"), data.get("cwd"), ws.get("project_dir")]
+    for d in dirs:
         if isinstance(d, str) and d.strip():
             label = _project_label(os.path.basename(os.path.normpath(d.strip())))
             if label:
