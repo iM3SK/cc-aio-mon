@@ -1669,6 +1669,198 @@ class TestSelfUpdateGitQueries(unittest.TestCase):
         self.assertEqual(str(raised.exception), "VERSION constant not found in remote shared.py")
 
 
+class TestProjectsConfig(unittest.TestCase):
+    """PRJ segment config: the file is the on-switch, a broken file is reported."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self._tmp.name)
+        self.path = self.dir / shared.PROJECTS_FILE_NAME
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_missing_file_is_off(self):
+        self.assertEqual(shared.load_projects_config(self.path), ("off", None))
+
+    def test_empty_object_is_on(self):
+        self.path.write_bytes(b"{}")
+        self.assertEqual(shared.load_projects_config(self.path), ("on", {}))
+
+    def test_utf8_bom_is_accepted(self):
+        # Windows PowerShell 5.1 `Set-Content -Encoding utf8` writes a BOM
+        self.path.write_bytes(b"\xef\xbb\xbf" + b'{"color": "green"}')
+        self.assertEqual(shared.load_projects_config(self.path), ("on", {"color": "green"}))
+
+    def test_malformed_json_is_error(self):
+        self.path.write_bytes(b"{not json")
+        self.assertEqual(shared.load_projects_config(self.path), ("error", None))
+
+    def test_non_object_is_error(self):
+        self.path.write_bytes(b"[1, 2]")
+        self.assertEqual(shared.load_projects_config(self.path), ("error", None))
+
+    def test_oversized_file_is_error(self):
+        self.path.write_bytes(b"{" + b" " * shared.PROJECTS_FILE_MAX + b"}")
+        self.assertEqual(shared.load_projects_config(self.path), ("error", None))
+
+    def test_directory_is_error(self):
+        self.path.mkdir()
+        self.assertEqual(shared.load_projects_config(self.path), ("error", None))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs exist on POSIX only")
+    def test_fifo_is_not_opened(self):
+        os.mkfifo(str(self.path))   # opening it would block the statusline
+        self.assertEqual(shared.load_projects_config(self.path), ("error", None))
+
+    def test_default_path_follows_claude_config_dir(self):
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.dir)}):
+            self.assertEqual(shared.projects_config_path(), self.path)
+
+    def test_default_path_without_config_dir(self):
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(shared.projects_config_path(),
+                             pathlib.Path.home() / ".claude" / shared.PROJECTS_FILE_NAME)
+
+
+class TestResolveProject(unittest.TestCase):
+    """Order: longest path match in `projects` > folder name."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.shop = str(self.root / "work" / "shop")
+        self.shop_api = str(self.root / "work" / "shop" / "api")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _data(self, project_dir=None, current_dir=None, sid="sess-1"):
+        ws = {}
+        if project_dir is not None:
+            ws["project_dir"] = project_dir
+        if current_dir is not None:
+            ws["current_dir"] = current_dir
+        return {"session_id": sid, "workspace": ws}
+
+    def test_folder_name_by_default(self):
+        p = shared.resolve_project(self._data(project_dir=self.shop), {})
+        self.assertEqual(p["label"], "shop")
+        self.assertEqual(p["color"], shared.PROJECT_COLORS[shared.PROJECT_DEFAULT_COLOR])
+
+    def test_folder_name_prefers_project_dir_over_current_dir(self):
+        p = shared.resolve_project(self._data(project_dir=self.shop, current_dir=self.shop_api), {})
+        self.assertEqual(p["label"], "shop")
+
+    def test_folder_name_falls_back_to_cwd(self):
+        p = shared.resolve_project({"cwd": self.shop}, {})
+        self.assertEqual(p["label"], "shop")
+
+    def test_folder_name_can_be_switched_off(self):
+        self.assertIsNone(shared.resolve_project(self._data(project_dir=self.shop),
+                                                 {"folder_name": False}))
+
+    def test_no_directory_no_project(self):
+        self.assertIsNone(shared.resolve_project({"session_id": "s"}, {}))
+
+    def test_config_default_color(self):
+        p = shared.resolve_project(self._data(project_dir=self.shop), {"color": "green"})
+        self.assertEqual(p["color"], shared.C_GRN)
+
+    def test_mapped_path_gives_label_and_color(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Shop", "color": "orange"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual((p["label"], p["color"]), ("Shop", shared.C_ORN))
+
+    def test_mapped_path_matches_a_subdirectory(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(current_dir=self.shop_api), cfg)
+        self.assertEqual(p["label"], "Shop")
+
+    def test_longest_mapped_path_wins(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Shop"},
+                            {"path": self.shop_api, "label": "Shop API"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop, current_dir=self.shop_api), cfg)
+        self.assertEqual(p["label"], "Shop API")
+
+    def test_prefix_respects_directory_boundary(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Shop"}]}
+        other = str(self.root / "work" / "shopping")
+        p = shared.resolve_project(self._data(project_dir=other), cfg)
+        self.assertEqual(p["label"], "shopping")
+
+    def test_trailing_separator_in_mapped_path(self):
+        cfg = {"projects": [{"path": self.shop + os.sep, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "Shop")
+
+    @unittest.skipUnless(os.name == "nt", "path case folding applies on Windows only")
+    def test_windows_path_case_and_slashes_ignored(self):
+        cfg = {"projects": [{"path": self.shop.upper().replace("\\", "/"), "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "Shop")
+
+    def test_malformed_entries_are_skipped(self):
+        cfg = {"projects": ["x", {"path": 5, "label": "A"}, {"path": self.shop},
+                            {"path": self.shop, "label": "  "},
+                            {"path": self.shop, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "Shop")
+
+    def test_projects_not_a_list_is_ignored(self):
+        p = shared.resolve_project(self._data(project_dir=self.shop), {"projects": {"a": 1}})
+        self.assertEqual(p["label"], "shop")
+
+    def test_unknown_color_falls_back_to_default(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Shop", "color": "\x1b[31m"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["color"], shared.PROJECT_COLORS[shared.PROJECT_DEFAULT_COLOR])
+
+    def test_label_is_sanitized(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Sh\x1b[2Jop\u202e"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "Sh[2Jop")
+
+    def test_lone_surrogate_is_removed(self):
+        # a JS tool cutting an emoji by UTF-16 units writes this; printing it
+        # raised UnicodeEncodeError in main() and killed the whole line
+        cfg = {"projects": [{"path": self.shop, "label": "ab\ud83d"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "ab")
+        p["label"].encode("utf-8")
+
+    def test_invisible_only_label_is_empty(self):
+        cfg = {"projects": [{"path": self.shop, "label": "\u200b\u2060\ufeff"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(p["label"], "shop")
+
+    def test_current_dir_beats_a_longer_project_dir_match(self):
+        billing = str(self.root / "b")
+        shop_long = str(self.root / "work" / "shop-frontend-long")
+        cfg = {"projects": [{"path": billing, "label": "Billing"},
+                            {"path": shop_long, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=shop_long, current_dir=billing), cfg)
+        self.assertEqual(p["label"], "Billing")
+
+    def test_project_dir_match_when_current_dir_unmapped(self):
+        cfg = {"projects": [{"path": self.shop, "label": "Shop"}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop,
+                                              current_dir=str(self.root / "elsewhere")), cfg)
+        self.assertEqual(p["label"], "Shop")
+
+    def test_long_label_is_cut_with_ellipsis(self):
+        cfg = {"projects": [{"path": self.shop, "label": "x" * 60}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        self.assertEqual(len(p["label"]), shared.PROJECT_LABEL_MAX)
+        self.assertTrue(p["label"].endswith("…"))
+
+    def test_wide_label_is_cut_by_display_width(self):
+        cfg = {"projects": [{"path": self.shop, "label": "漢" * 30}]}
+        p = shared.resolve_project(self._data(project_dir=self.shop), cfg)
+        width = sum(shared.char_width(c) for c in p["label"])
+        self.assertLessEqual(width, shared.PROJECT_LABEL_MAX)
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

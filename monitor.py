@@ -57,7 +57,7 @@ from datetime import datetime, timedelta
 
 from shared import (as_dict, json_object, calc_rates, _num, _sanitize, safe_read, f_tok, f_cost, f_dur, f_cd,
                     nonnegative_number, f_cost_value,
-                    char_width, is_safe_dir, ensure_data_dir, ensure_utf8_stdout, run_git,
+                    char_width, ellipsize as _ellipsize, is_safe_dir, ensure_data_dir, ensure_utf8_stdout, run_git,
                     load_history as _shared_load_history,
                     _SID_RE, _ANSI_RE, MAX_FILE_SIZE, HISTORY_AGGREGATE_MAX, TRANSCRIPT_MAX_BYTES,
                     SECONDS_1H, SECONDS_1D,
@@ -431,24 +431,6 @@ def truncate(s, maxw):
 def _vis_width(s):
     """Visible width of s in terminal columns (ANSI codes ignored, CJK-aware)."""
     return sum(char_width(c) for c in _ANSI_RE.sub("", s))
-
-
-def _ellipsize(text, maxw):
-    """Cut plain text to maxw visible columns, ending in '…' when shortened.
-    Used for the variable-length part of a line (a session name) so the fixed
-    tags after it stay visible in a narrow terminal."""
-    if maxw <= 0:
-        return ""
-    if _vis_width(text) <= maxw:
-        return text
-    out, w = [], 0
-    for ch in text:
-        cw = char_width(ch)
-        if w + cw > maxw - 1:
-            break
-        out.append(ch)
-        w += cw
-    return "".join(out) + "…"
 
 
 def _pack_items(items, width, gap="  ", indent=""):

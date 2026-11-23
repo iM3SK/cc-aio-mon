@@ -1478,6 +1478,101 @@ class TestFableRefresherResolvesToolsByAbsolutePath(unittest.TestCase):
         self.assertNotIn('shutil.which("claude")', src)
 
 
+class TestSegProject(unittest.TestCase):
+
+    def test_none_without_project(self):
+        self.assertIsNone(statusline.seg_project(None))
+
+    def test_renders_prj_label_and_color(self):
+        text, vl = statusline.seg_project({"label": "Shop", "color": C_GRN})
+        self.assertEqual(_ANSI_RE.sub("", text), "PRJ Shop")
+        self.assertIn(C_GRN, text)
+        self.assertEqual(vl, _vlen(text))
+
+    def test_wide_label_width(self):
+        text, vl = statusline.seg_project({"label": "漢字", "color": C_GRN})
+        self.assertEqual(vl, _vlen(text))
+        self.assertEqual(vl, len("PRJ ") + 4)
+
+
+class TestBuildLineProject(unittest.TestCase):
+    _P = {"label": "Shop", "color": C_GRN}
+
+    def _plain(self, cols, project):
+        return _ANSI_RE.sub("", build_line(_full_data(), cols, brn=0.5, project=project))
+
+    def test_no_project_leaves_line_unchanged(self):
+        self.assertEqual(build_line(_full_data(), 300, brn=0.5),
+                         build_line(_full_data(), 300, brn=0.5, project=None))
+
+    def test_project_comes_first(self):
+        self.assertTrue(self._plain(300, self._P).startswith("PRJ Shop"))
+
+    def test_drop_order_after_brn_and_cost_before_limits(self):
+        full = self._plain(300, self._P)
+        self.assertIn("BRN", full)
+        widths = range(_vlen(build_line(_full_data(), 300, brn=0.5, project=self._P)), 10, -1)
+        seen_without_prj = None
+        for cols in widths:
+            plain = self._plain(cols, self._P)
+            if "PRJ" not in plain:
+                seen_without_prj = plain
+                break
+            # while PRJ is still shown, nothing ranked below it may have gone
+            self.assertIn("7DL", plain, cols)
+            self.assertIn("5HL", plain, cols)
+            self.assertIn("CTX", plain, cols)
+        self.assertIsNotNone(seen_without_prj)
+        self.assertNotIn("BRN", seen_without_prj)
+        self.assertNotIn("CST", seen_without_prj)
+        self.assertIn("7DL", seen_without_prj)
+
+    def test_fits_cols(self):
+        for cols in (40, 80, 120, 300):
+            self.assertLessEqual(_vlen(build_line(_full_data(), cols, project=self._P)), cols)
+
+
+class TestProjectFor(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg = pathlib.Path(self._tmp.name) / shared.PROJECTS_FILE_NAME
+        self.data = {"session_id": "s1", "workspace": {"project_dir": str(pathlib.Path(self._tmp.name) / "shop")}}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self):
+        with patch("statusline.projects_config_path", return_value=self.cfg):
+            return statusline.project_for(self.data)
+
+    def test_no_config_file_means_off(self):
+        self.assertIsNone(self._run())
+
+    def test_config_file_switches_it_on(self):
+        self.cfg.write_bytes(b"{}")
+        self.assertEqual(self._run()["label"], "shop")
+
+    def test_broken_config_is_shown_not_hidden(self):
+        self.cfg.write_bytes(b"{broken")
+        p = self._run()
+        self.assertEqual(p["label"], statusline.PROJECT_CONFIG_ERROR_LABEL)
+        self.assertEqual(p["color"], C_RED)
+
+    def test_unresolvable_home_means_off(self):
+        # no HOME / no passwd entry: a user who never created the file must
+        # not see an error segment
+        with patch("statusline.projects_config_path", side_effect=RuntimeError("no home")):
+            self.assertIsNone(statusline.project_for(self.data))
+
+    def test_internal_error_never_breaks_the_line(self):
+        self.cfg.write_bytes(b"{}")
+        with patch("statusline.projects_config_path", return_value=self.cfg), \
+             patch("statusline.resolve_project", side_effect=RuntimeError("boom")):
+            p = statusline.project_for(self.data)
+        self.assertEqual(p["label"], statusline.PROJECT_CONFIG_ERROR_LABEL)
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

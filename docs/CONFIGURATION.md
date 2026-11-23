@@ -204,13 +204,17 @@ have a documented diagnostic anchor.
 
 - **Type:** path
 - **Default:** unset → `~/.claude.json` and `~/.claude/projects/`
-- **Read by:** `shared.claude_json_path()`, `shared.claude_projects_dir()`
+- **Read by:** `shared.claude_json_path()`, `shared.claude_projects_dir()`,
+  `shared.projects_config_path()`
 - **Effect:** set by Claude Code users running a second account; when set,
   the FBL reader uses `$CLAUDE_CONFIG_DIR/.claude.json` and the monitor reads
   transcripts (desktop sessions, token stats, cost breakdown, agents) from
   `$CLAUDE_CONFIG_DIR/projects/` — the files Claude Code writes for that
   account. Inherited by the statusline from Claude Code; start `monitor.py`
-  with the same value.
+  with the same value. The PRJ segment's config file
+  (`cc-aio-mon-projects.json`) is looked up in the same directory, else in
+  `~/.claude/` — PRJ is switched on by that file, not by a variable; see
+  [PROJECT-SEGMENT.md](PROJECT-SEGMENT.md).
 
 ### `HOME` / `USERPROFILE`
 

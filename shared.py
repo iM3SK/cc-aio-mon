@@ -57,7 +57,7 @@ DATA_DIR = pathlib.Path(tempfile.gettempdir()) / DATA_DIR_NAME
 VERSION_RE = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
 # Single source of truth for app version — imported by monitor.py, pulse.py, update.py
-VERSION = "1.19.1"
+VERSION = "1.20.0"
 
 # File-IPC contract version. Statusline writes this field on every snapshot
 # and history entry; bumped when the JSON shape changes incompatibly. Monitor's
@@ -906,6 +906,143 @@ def claude_projects_dir() -> pathlib.Path:
     cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     base = pathlib.Path(cfg).expanduser() if cfg else pathlib.Path.home() / ".claude"
     return base / "projects"
+
+
+def ellipsize(text, maxw):
+    """Cut plain text to maxw visible columns, ending in '…' when shortened.
+    Used for the variable-length part of a line (a session name, a project
+    label) so the fixed parts after it stay visible in a narrow terminal."""
+    if maxw <= 0:
+        return ""
+    if sum(char_width(c) for c in _ANSI_RE.sub("", text)) <= maxw:
+        return text
+    out, w = [], 0
+    for ch in text:
+        cw = char_width(ch)
+        if w + cw > maxw - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
+
+
+# ---------------------------------------------------------------------------
+# PRJ — which project a session works in (statusline segment, opt-in).
+# The config FILE is the on-switch: no file, no segment, no behavior change.
+# A file instead of an env var: the statusline command cannot carry an env
+# prefix on Windows, and settings.json `env` is not documented to reach it.
+# Spec: docs/CONFIGURATION.md "Project segment (PRJ)".
+# ---------------------------------------------------------------------------
+PROJECTS_FILE_NAME = "cc-aio-mon-projects.json"
+PROJECTS_FILE_MAX = 65_536          # the whole config; a map of paths stays far below
+PROJECT_LABEL_MAX = 24              # display columns, ellipsis included
+PROJECT_DEFAULT_COLOR = "white"
+# Names a user writes in the config -> palette entries (never raw escapes).
+PROJECT_COLORS = {
+    "red": C_RED, "orange": C_ORN, "yellow": C_YEL, "green": C_GRN,
+    "teal": C_TEAL, "cyan": C_CYN, "blue": C_BLU, "navy": C_NAV,
+    "purple": C_PUR, "white": C_WHT,
+}
+
+
+def projects_config_path() -> pathlib.Path:
+    """PRJ config: $CLAUDE_CONFIG_DIR/cc-aio-mon-projects.json, else ~/.claude/…"""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    base = pathlib.Path(cfg).expanduser() if cfg else pathlib.Path.home() / ".claude"
+    return base / PROJECTS_FILE_NAME
+
+
+def _read_user_json(path, max_bytes) -> Optional[dict]:
+    """Bounded read of a hand-written JSON object file. A UTF-8 BOM is accepted:
+    Windows PowerShell 5.1 `Set-Content -Encoding utf8` writes one. Anything
+    but a regular file (a directory, a FIFO that would block open()) is None."""
+    try:
+        if not _stat_mod.S_ISREG(os.stat(path).st_mode):
+            return None
+    except (OSError, ValueError):
+        return None
+    raw = safe_read(path, max_bytes)
+    if raw is None:
+        return None
+    return json_object(raw[3:] if raw.startswith(codecs.BOM_UTF8) else raw)
+
+
+def load_projects_config(path=None) -> Tuple[str, Optional[dict]]:
+    """("off", None) when the file is absent, ("error", None) when it exists but
+    is unreadable, too big or not a JSON object, else ("on", config)."""
+    p = pathlib.Path(path) if path is not None else projects_config_path()
+    if not p.exists():
+        return "off", None
+    cfg = _read_user_json(p, PROJECTS_FILE_MAX)
+    return ("on", cfg) if cfg is not None else ("error", None)
+
+
+_PROJECT_LABEL_DROP_RE = re.compile("[\\ud800-\\udfff\\u200b-\\u200d\\u2060\\ufeff]")
+
+
+def _project_label(value) -> Optional[str]:
+    """Sanitized, trimmed label cut to PROJECT_LABEL_MAX columns; None if empty.
+    Lone surrogates (an emoji cut by UTF-16 units) are removed: printing one
+    raises UnicodeEncodeError and would kill the whole line. Zero-width
+    characters are removed so an invisible label cannot win over the folder."""
+    if not isinstance(value, str):
+        return None
+    s = _PROJECT_LABEL_DROP_RE.sub("", _sanitize(value)).strip()
+    return ellipsize(s, PROJECT_LABEL_MAX) if s else None
+
+
+def _project_color(name, default) -> str:
+    def key(v):
+        return v.strip().lower() if isinstance(v, str) else ""
+    return (PROJECT_COLORS.get(key(name)) or PROJECT_COLORS.get(key(default))
+            or PROJECT_COLORS[PROJECT_DEFAULT_COLOR])
+
+
+def _norm_dir(value) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return os.path.normcase(os.path.normpath(os.path.expanduser(value.strip())))
+
+
+def resolve_project(data: dict, cfg: dict) -> Optional[dict]:
+    """{"label", "color" (palette escape)} for this statusline event, or None.
+
+    Order: (1) the longest `projects[].path` containing the session's
+    current_dir — else its project_dir, else cwd (the first of them with a
+    match decides, so `cd` into another mapped folder switches the label),
+    (2) the name of project_dir (the folder Claude Code was started in),
+    unless `"folder_name": false`."""
+    data, cfg = as_dict(data), as_dict(cfg)
+    default_color = cfg.get("color")
+    ws = as_dict(data.get("workspace"))
+
+    entries = cfg.get("projects")
+    mapped = []
+    for item in entries if isinstance(entries, list) else []:
+        item = as_dict(item)
+        base, label = _norm_dir(item.get("path")), _project_label(item.get("label"))
+        if base is not None and label is not None:
+            mapped.append((base, label, item.get("color")))
+    for d in (_norm_dir(ws.get("current_dir")), _norm_dir(ws.get("project_dir")),
+              _norm_dir(data.get("cwd"))):
+        if d is None:
+            continue
+        best = None
+        for base, label, color in mapped:
+            prefix = base if base.endswith(os.sep) else base + os.sep
+            if (d == base or d.startswith(prefix)) and (best is None or len(base) > len(best[0])):
+                best = (base, label, color)
+        if best:
+            return {"label": best[1], "color": _project_color(best[2], default_color)}
+
+    if cfg.get("folder_name", True) is False:
+        return None
+    for d in (ws.get("project_dir"), ws.get("current_dir"), data.get("cwd")):
+        if isinstance(d, str) and d.strip():
+            label = _project_label(os.path.basename(os.path.normpath(d.strip())))
+            if label:
+                return {"label": label, "color": _project_color(None, default_color)}
+    return None
 
 
 def _fable_finite_number(value) -> Optional[float]:

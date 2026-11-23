@@ -12,6 +12,10 @@ Config env vars:
     CLAUDE_STATUS_CRIT  — red threshold % (default 80)
     CC_AIO_MON_FABLE_REFRESH_SEC — Fable pool refresh TTL in s (default 300, 0 = read-only)
 
+Config file:
+    $CLAUDE_CONFIG_DIR or ~/.claude/cc-aio-mon-projects.json — switches on the PRJ
+    project segment (docs/PROJECT-SEGMENT.md); absent = off
+
 Entry points:
     statusline.py                  — status line (JSON on stdin)
     statusline.py --refresh-fable  — detached Fable usage refresher (spawned by the above)
@@ -36,6 +40,7 @@ from shared import (as_dict, json_object, calc_rates as _calc_rates, _num, _sani
                     char_width,
                     read_fable_weekly, fable_display_state, FABLE_REFRESH_SEC, FABLE_SETTINGS_STEM,
                     STALE_DIM_SEC,
+                    projects_config_path, load_projects_config, resolve_project,
                     R, B, C_RED, C_GRN, C_YEL, C_DIM, C_MUT, C_LABEL, C_MONEY)
 
 
@@ -269,6 +274,37 @@ def seg_brn(brn):
     return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
 
 
+# Shown instead of a label when the PRJ config exists but cannot be used, so a
+# typo in the file is visible rather than a silently missing segment.
+PROJECT_CONFIG_ERROR_LABEL = "config?"
+
+
+def project_for(data):
+    """PRJ input for this event: None when the config file is absent (feature
+    off) or no project resolves, else {"label", "color"}. Never raises."""
+    try:
+        path = projects_config_path()
+    except Exception:   # no resolvable home directory: the user cannot have the file
+        return None
+    try:
+        state, cfg = load_projects_config(path)
+        if state == "off":
+            return None
+        if state == "error":
+            return {"label": PROJECT_CONFIG_ERROR_LABEL, "color": C_RED}
+        return resolve_project(data, cfg)
+    except Exception:  # the status line must never die on our own config
+        return {"label": PROJECT_CONFIG_ERROR_LABEL, "color": C_RED}
+
+
+def seg_project(project):
+    """`project` = project_for() output; label is already sanitized and cut."""
+    if not project:
+        return None
+    text = f"{C_LABEL}{B}PRJ{R} {project['color']}{B}{project['label']}{R}"
+    return text, sum(char_width(c) for c in _ANSI_RE.sub("", text))
+
+
 def _last_known_rate_limits_at(hist):
     """(rate_limits, observed_at): the most recent rate_limits for this account
     when the current CC event omitted them. Claude Code emits rate_limits only
@@ -328,19 +364,23 @@ def _last_known_rate_limits_at(hist):
 # ---------------------------------------------------------------------------
 # Layout assembly — single line (CC notifications share the row on the right)
 # ---------------------------------------------------------------------------
-def build_line(data, cols, brn=None, fable=None, rl_age=None):
+def build_line(data, cols, brn=None, fable=None, rl_age=None, project=None):
     """Build single status line. Drops the lowest-priority segment when too wide.
 
     Position and drop priority are separate: FBL sits between 5HL and 7DL, but
     is dropped before 7DL (the account-wide weekly limit matters more than one
     model's pool). CCH sits right after CTX; on narrowing it goes after BRN and
     CST but before FBL — it only appears when the cache is about to expire or
-    is already cold. Every other segment keeps the historic drop-from-the-right order.
+    is already cold. PRJ (opt-in, `project_for`) leads the line and goes after
+    BRN and CST but before CCH: the project names the session, the limits come
+    after it in importance. Every other segment keeps the historic
+    drop-from-the-right order.
     """
     sv = _SEP_VLEN
 
     # (drop rank — higher drops first, segment) in display order
     all_segs = [(rank, s) for rank, s in [
+        (5.5, seg_project(project)),
         (0, seg_model(data)),
         (1, seg_ctx(data)),
         (5, seg_cache(data)),
@@ -559,7 +599,8 @@ def main():
 
     fable = read_fable_weekly()
     cols = _get_terminal_width(fallback=120)
-    line = build_line(display, cols, brn=brn, fable=fable, rl_age=rl_age)
+    line = build_line(display, cols, brn=brn, fable=fable, rl_age=rl_age,
+                      project=project_for(data))
     if line:
         # Claude Code reads this line from the statusline subprocess's stdout.
         # If it closed the pipe early (e.g. the event was superseded), print()
